@@ -1,0 +1,137 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isCoordinator() {
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'coordinator';
+    }
+
+    function isAssignedToLine(lineId) {
+      return isCoordinator() || (isSignedIn() && get(/databases/$(database)/documents/rotations/$(request.auth.uid)).data.lineId == lineId);
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'name', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 256 &&
+             data.role is string && (data.role == 'coordinator' || data.role == 'leader') &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.createdAt is string;
+    }
+
+    function isValidProductionLine(data) {
+      return data.keys().hasAll(['name', 'status']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+             data.status is string && (data.status == 'active' || data.status == 'idle' || data.status == 'paused') &&
+             (!('currentOpId' in data) || data.currentOpId == null || (data.currentOpId is string && data.currentOpId.size() <= 128));
+    }
+
+    function isValidProductionOrder(data) {
+      return data.keys().hasAll(['number', 'product', 'plannedQuantity', 'producedQuantity', 'priority', 'status', 'sequence', 'createdAt']) &&
+             data.number is string && data.number.size() > 0 && data.number.size() <= 128 &&
+             data.product is string && data.product.size() > 0 && data.product.size() <= 128 &&
+             data.plannedQuantity is number && data.plannedQuantity >= 0 &&
+             data.producedQuantity is number && data.producedQuantity >= 0 &&
+             data.priority is string && (data.priority == 'Crítica' || data.priority == 'Alta' || data.priority == 'Normal' || data.priority == 'Baixa') &&
+             data.status is string && (data.status == 'pending' || data.status == 'in_progress' || data.status == 'paused' || data.status == 'completed') &&
+             data.sequence is number &&
+             data.createdAt is string &&
+             (!('lineId' in data) || data.lineId == null || (data.lineId is string && data.lineId.size() <= 128)) &&
+             (!('leaderId' in data) || data.leaderId == null || (data.leaderId is string && data.leaderId.size() <= 128)) &&
+             (!('packageAvailability' in data) || data.packageAvailability is number);
+    }
+
+    function isValidProductionEvent(data) {
+      return data.keys().hasAll(['opId', 'lineId', 'leaderId', 'type', 'timestamp']) &&
+             data.opId is string && data.opId.size() > 0 && data.opId.size() <= 128 &&
+             data.lineId is string && data.lineId.size() > 0 && data.lineId.size() <= 128 &&
+             data.leaderId is string && data.leaderId == request.auth.uid &&
+             data.type is string && (data.type == 'STARTED' || data.type == 'PAUSED' || data.type == 'RESUMED' || data.type == 'FINISHED' || data.type == 'QUANTITY_REPORTED') &&
+             data.timestamp is timestamp && data.timestamp == request.time &&
+             (!('quantity' in data) || (data.quantity is number && data.quantity >= 0)) &&
+             (!('reason' in data) || (data.reason is string && data.reason.size() <= 128)) &&
+             (!('observation' in data) || (data.observation is string && data.observation.size() <= 500));
+    }
+
+    function getMyAssignedLine(leaderId) {
+      return true; // Simplified for now, need better logic later.
+    }
+
+    function canManageOrder(data) {
+      return isCoordinator() || (isSignedIn() && data.leaderId == request.auth.uid);
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn() && isValidId(userId);
+      // Prevent user from setting role on create
+      allow create: if isSignedIn() && isValidId(userId) && request.auth.uid == userId && 
+                       isValidUser(incoming()) && incoming().role == 'leader';
+      // Only coordinator can update roles
+      allow update: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) && (
+        isCoordinator() ||
+        (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['name']) && incoming().role == existing().role)
+      );
+      allow delete: if isCoordinator() && isValidId(userId);
+    }
+
+    match /lines/{lineId} {
+      allow read: if isSignedIn() && isValidId(lineId);
+      allow create: if isCoordinator() && isValidId(lineId) && isValidProductionLine(incoming());
+      allow update: if isSignedIn() && isValidId(lineId) && isValidProductionLine(incoming()) && isAssignedToLine(lineId);
+      allow delete: if isCoordinator() && isValidId(lineId);
+    }
+
+    match /ops/{opId} {
+      allow read: if isSignedIn() && isValidId(opId);
+      allow create: if isCoordinator() && isValidId(opId) && isValidProductionOrder(incoming());
+      // Leader can only update status/producedQuantity if assigned to the line
+      allow update: if isSignedIn() && isValidId(opId) && isValidProductionOrder(incoming()) && (
+        isCoordinator() ||
+        (isAssignedToLine(incoming().lineId) && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'producedQuantity', 'leaderId']))
+      );
+      allow delete: if isCoordinator() && isValidId(opId);
+    }
+
+    match /events/{eventId} {
+      allow read: if isSignedIn() && isValidId(eventId);
+      allow create: if isSignedIn() && isValidId(eventId) && isValidProductionEvent(incoming());
+      allow update, delete: if false; // Append-only log
+    }
+
+    match /rotations/{rotationId} {
+      allow read: if isSignedIn() && isValidId(rotationId);
+      allow write: if isCoordinator() && isValidId(rotationId);
+    }
+
+    match /events/{eventId} {
+      allow read: if isSignedIn() && isValidId(eventId);
+      allow create: if isSignedIn() && isValidId(eventId) && isValidProductionEvent(incoming());
+      allow update, delete: if false; // Append-only log
+    }
+
+    match /rotations/{rotationId} {
+      allow read: if isSignedIn() && isValidId(rotationId);
+      allow write: if isCoordinator() && isValidId(rotationId);
+    }
+  }
+}

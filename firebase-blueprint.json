@@ -1,0 +1,105 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "System user (Coordinator or Leader)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["coordinator", "leader"] },
+        "name": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "role", "name"]
+    },
+    "productionLine": {
+      "title": "Production Line",
+      "description": "A physical production line",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "idle", "paused"] },
+        "currentOpId": { "type": ["string", "null"] }
+      },
+      "required": ["name", "status"]
+    },
+    "productionOrder": {
+      "title": "Production Order",
+      "description": "An order of production to be executed",
+      "type": "object",
+      "properties": {
+        "number": { "type": "string" },
+        "product": { "type": "string" },
+        "plannedQuantity": { "type": "number" },
+        "producedQuantity": { "type": "number" },
+        "priority": { "type": "string", "enum": ["Crítica", "Alta", "Normal", "Baixa"] },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "paused", "completed"] },
+        "lineId": { "type": ["string", "null"] },
+        "leaderId": { "type": ["string", "null"] },
+        "packageAvailability": { "type": "number" },
+        "sequence": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["number", "product", "plannedQuantity", "producedQuantity", "priority", "status", "sequence"]
+    },
+    "productionEvent": {
+      "title": "Production Event",
+      "description": "Log of activities during production",
+      "type": "object",
+      "properties": {
+        "opId": { "type": "string" },
+        "lineId": { "type": "string" },
+        "leaderId": { "type": "string" },
+        "type": { "type": "string", "enum": ["STARTED", "PAUSED", "RESUMED", "FINISHED", "QUANTITY_REPORTED"] },
+        "timestamp": { "type": "string" },
+        "quantity": { "type": "number" },
+        "reason": { "type": "string" },
+        "observation": { "type": "string" }
+      },
+      "required": ["opId", "lineId", "leaderId", "type", "timestamp"]
+    },
+    "weeklyRotation": {
+      "title": "Weekly Rotation",
+      "description": "Scale of leaders per line for a week",
+      "type": "object",
+      "properties": {
+        "weekNumber": { "type": "number" },
+        "year": { "type": "number" },
+        "assignments": { 
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "leaderId": { "type": "string" },
+              "lineId": { "type": "string" }
+            }
+          }
+        }
+      },
+      "required": ["weekNumber", "year", "assignments"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": { "$ref": "#/entities/user" },
+      "description": "User profiles"
+    },
+    "lines/{lineId}": {
+      "schema": { "$ref": "#/entities/productionLine" },
+      "description": "Production lines configuration"
+    },
+    "ops/{opId}": {
+      "schema": { "$ref": "#/entities/productionOrder" },
+      "description": "Production orders (OPs)"
+    },
+    "events/{eventId}": {
+      "schema": { "$ref": "#/entities/productionEvent" },
+      "description": "Log of production events"
+    },
+    "rotations/{rotationId}": {
+      "schema": { "$ref": "#/entities/weeklyRotation" },
+      "description": "Weekly rotation configurations"
+    }
+  }
+}
