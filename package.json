@@ -13,6 +13,7 @@
   "dependencies": {
     "@base-ui/react": "^1.7.0",
     "@google/genai": "^2.4.0",
+    "@supabase/supabase-js": "^2.112.3",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "class-variance-authority": "^0.7.1",

@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
-import { auth } from '../lib/firebase';
-import { signOut } from 'firebase/auth';
+import { supabase } from '../lib/supabase';
 import { LogOut, Play, Pause, CheckCircle, Package } from 'lucide-react';
 import { getLeaderRotation, getLines, getActiveOP, startOP, pauseOP, resumeOP, finishOP, reportQuantity } from '../services/db';
 import { ProductionLine, ProductionOrder } from '../types';
@@ -112,7 +111,7 @@ export function LeaderScreen() {
         {import.meta.env.DEV && profile?.role === 'coordinator' && (
           <Button onClick={seedDatabase}>[DEV] Popular Banco de Dados</Button>
         )}
-        <Button variant="ghost" onClick={() => signOut(auth)} className="mt-4">Sair</Button>
+        <Button variant="ghost" onClick={() => supabase.auth.signOut()} className="mt-4">Sair</Button>
       </div>
     );
   }
@@ -124,7 +123,7 @@ export function LeaderScreen() {
       <div className="w-full max-w-md bg-[#18181b] border border-[#27272a] rounded-xl p-8 text-center shadow-[0_0_30px_rgba(0,0,0,0.5)]">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-[#71717a] uppercase tracking-widest text-[10px] font-bold flex-1 text-left">Líder: {profile?.name}</h2>
-          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-[#71717a] hover:text-[#f4f4f5]">
+          <Button variant="ghost" size="icon" onClick={() => supabase.auth.signOut()} className="text-[#71717a] hover:text-[#f4f4f5]">
             <LogOut className="w-4 h-4" />
           </Button>
         </div>

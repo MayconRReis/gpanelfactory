@@ -1,8 +1,8 @@
 import * as React from 'react';
 import { useEffect } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { supabase } from './lib/supabase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db } from './lib/firebase';
+import { db } from './lib/firebase';
 import { useAuthStore } from './store/authStore';
 import { UserProfile } from './types';
 
@@ -10,38 +10,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { setUser, setProfile, setLoading } = useAuthStore();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      
-      if (currentUser) {
-        // Fetch or create profile
-        const userRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userRef);
-        
-        if (userSnap.exists()) {
-          setProfile(userSnap.data() as UserProfile);
-        } else {
-          // Defaults: In a real app, role would be assigned by an admin.
-          // For demo, first user is coordinator, others are leaders.
-          const profile: UserProfile = {
-            uid: currentUser.uid,
-            email: currentUser.email || '',
-            role: 'leader',
-            name: currentUser.displayName || currentUser.email?.split('@')[0] || 'User',
-            createdAt: new Date().toISOString(),
-          };
-          await setDoc(userRef, profile);
-          setProfile(profile);
-        }
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user || null);
+      if (session?.user) {
+        // Fetch profile from Firestore
+        fetchProfile(session.user);
+      } else {
+        setProfile(null);
+        setLoading(false);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      setUser(session?.user || null);
+      if (session?.user) {
+        await fetchProfile(session.user);
       } else {
         setProfile(null);
       }
-      
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => subscription.unsubscribe();
   }, []);
+
+  async function fetchProfile(user: any) {
+    const userRef = doc(db, 'users', user.id);
+    const userSnap = await getDoc(userRef);
+    
+    if (userSnap.exists()) {
+      setProfile(userSnap.data() as UserProfile);
+    } else {
+      // Defaults
+      const profile: UserProfile = {
+        uid: user.id,
+        email: user.email || '',
+        role: 'leader',
+        name: user.user_metadata.name || user.email?.split('@')[0] || 'User',
+        createdAt: new Date().toISOString(),
+      };
+      await setDoc(userRef, profile);
+      setProfile(profile);
+    }
+  }
 
   return <>{children}</>;
 }

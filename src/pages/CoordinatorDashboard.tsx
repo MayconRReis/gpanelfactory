@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
-import { auth } from '../lib/firebase';
-import { signOut } from 'firebase/auth';
+import { supabase } from '../lib/supabase';
 import { LogOut } from 'lucide-react';
 import { getLines, getAllOPs } from '../services/db';
 import { ProductionLine, ProductionOrder } from '../types';
@@ -62,7 +61,7 @@ export function CoordinatorDashboard() {
               {profile?.name?.substring(0,2) || 'CG'}
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#27272a]">
+          <Button variant="ghost" size="icon" onClick={() => supabase.auth.signOut()} className="text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#27272a]">
             <LogOut className="w-4 h-4" />
           </Button>
         </div>
