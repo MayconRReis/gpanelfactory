@@ -10,7 +10,12 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, profile, isLoading } = useAuthStore();
   
   if (isLoading) {
-    return <div className="min-h-screen bg-[#0a0a0c] font-sans flex items-center justify-center text-[#f4f4f5] text-xs font-bold uppercase tracking-widest">Carregando...</div>;
+    return (
+      <div className="min-h-screen bg-[#09090b] font-sans flex items-center justify-center text-[#f4f4f5] text-xs font-bold uppercase tracking-widest gap-2">
+        <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
+        <span>Carregando Sistema...</span>
+      </div>
+    );
   }
   
   if (!user) {
@@ -19,7 +24,12 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
   // Se logado e sem profile, aguarde carregar profile
   if (!profile) {
-    return <div className="min-h-screen bg-[#0a0a0c] font-sans flex items-center justify-center text-[#f4f4f5] text-xs font-bold uppercase tracking-widest">Carregando perfil...</div>;
+    return (
+      <div className="min-h-screen bg-[#09090b] font-sans flex items-center justify-center text-[#f4f4f5] text-xs font-bold uppercase tracking-widest gap-2">
+        <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+        <span>Sincronizando perfil Supabase...</span>
+      </div>
+    );
   }
 
   return <>{children}</>;
@@ -28,13 +38,22 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function MainRoute() {
   const { profile } = useAuthStore();
   
-  if (profile?.role === 'coordinator') {
+  const role = String(profile?.role || '').toLowerCase().trim();
+  const isCoordinator = role === 'coordinator' || role === 'coordenador';
+
+  if (isCoordinator) {
     return <CoordinatorDashboard />;
-  } else if (profile?.role === 'leader') {
-    return <LeaderScreen />;
   }
   
-  return <div className="text-white p-4">Perfil inválido</div>;
+  return <LeaderScreen />;
+}
+
+function PublicLoginRoute() {
+  const { user, profile, isLoading } = useAuthStore();
+  if (!isLoading && user && profile) {
+    return <Navigate to="/" replace />;
+  }
+  return <Login />;
 }
 
 export default function App() {
@@ -42,15 +61,15 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/login" element={<Login />} />
+          <Route path="/login" element={<PublicLoginRoute />} />
           <Route path="/" element={
             <RequireAuth>
               <MainRoute />
             </RequireAuth>
           } />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
   );
 }
-

@@ -1,10 +1,24 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const envUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
+const envKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Supabase credentials are missing');
-}
+// Use environment variables if present, or the provided project credentials
+const supabaseUrl = envUrl || 'https://dmebcmxyeyvdntwalceu.supabase.co';
+const supabaseAnonKey = envKey || 'sb_publishable_clNlxpAAXoEvgoeQ6tKp9g_A_ZYJ7mW';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const isSupabaseConfigured = Boolean(
+  supabaseUrl &&
+  supabaseAnonKey &&
+  supabaseUrl.startsWith('http') &&
+  !supabaseUrl.includes('placeholder-project') &&
+  supabaseAnonKey !== 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy'
+);
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});

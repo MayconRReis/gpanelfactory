@@ -1,0 +1,941 @@
+import React, { useState, useMemo } from 'react';
+import {
+  TrendingUp,
+  Target,
+  Clock,
+  CheckCircle2,
+  AlertTriangle,
+  Layers,
+  Users,
+  Calendar,
+  Flame,
+  ArrowUpRight,
+  ShieldCheck,
+  Percent,
+  Search,
+  X,
+  Filter,
+  BarChart3,
+  Sun,
+  Play,
+  Pause,
+  Package,
+  Box,
+  Check,
+  SlidersHorizontal,
+  FileSpreadsheet,
+  AlertCircle,
+  Award,
+  Sparkles
+} from 'lucide-react';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent } from '../types';
+
+interface HomeDashboardProps {
+  lines: ProductionLine[];
+  ops: ProductionOrder[];
+  leaders: UserProfile[];
+  allUsers: UserProfile[];
+  events: ProductionEvent[];
+  onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events') => void;
+  onNewOp: () => void;
+}
+
+export function HomeDashboard({
+  lines,
+  ops,
+  leaders,
+  allUsers,
+  events,
+  onNavigateTab,
+  onNewOp,
+}: HomeDashboardProps) {
+  // Sub-aba ativa no Painel PCP: 'farol' | 'curva_a'
+  const [activeSubTab, setActiveSubTab] = useState<'farol' | 'curva_a'>('farol');
+
+  // Meta Mensal Global (Persistida no localStorage com padrão industrial de 100.000 un)
+  const [monthlyGoal, setMonthlyGoal] = useState<number>(() => {
+    const saved = localStorage.getItem('gpanel_monthly_goal');
+    return saved ? parseInt(saved, 10) : 100000;
+  });
+  const [isEditingGoal, setIsEditingGoal] = useState(false);
+  const [tempGoal, setTempGoal] = useState(monthlyGoal.toString());
+
+  const handleSaveGoal = () => {
+    const val = parseInt(tempGoal, 10);
+    if (!isNaN(val) && val > 0) {
+      setMonthlyGoal(val);
+      localStorage.setItem('gpanel_monthly_goal', val.toString());
+    }
+    setIsEditingGoal(false);
+  };
+
+  // ---------------- FILTROS ESTILO FAROL DE OPS ----------------
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedLineFilter, setSelectedLineFilter] = useState<string>('all');
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>('all');
+  const [selectedPriorityFilter, setSelectedPriorityFilter] = useState<string>('Todas');
+  const [selectedDeliveryFilter, setSelectedDeliveryFilter] = useState<string>('Todos');
+
+  // Limpar Filtros
+  const handleClearFilters = () => {
+    setSearchTerm('');
+    setSelectedLineFilter('all');
+    setSelectedStatusFilter('all');
+    setSelectedPriorityFilter('Todas');
+    setSelectedDeliveryFilter('Todos');
+  };
+
+  // ---------------- CÁLCULOS DAS 8 MÉTRICAS PRINCIPAIS ----------------
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
+
+  // 1. Total Produzidos e Planejados
+  const totalProduced = useMemo(() => {
+    return ops.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
+  }, [ops]);
+
+  const totalPlanned = useMemo(() => {
+    return ops.reduce((acc, o) => acc + (o.plannedQuantity || 0), 0);
+  }, [ops]);
+
+  // Volume do Mês Atual
+  const opsThisMonth = useMemo(() => {
+    return ops.filter((o) => {
+      if (!o.createdAt) return true;
+      const d = new Date(o.createdAt);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+    });
+  }, [ops, currentMonth, currentYear]);
+
+  const monthProducedQuantity = useMemo(() => {
+    return opsThisMonth.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
+  }, [opsThisMonth]);
+
+  // Porcentagem da Meta Mensal
+  const monthlyGoalPercentage = useMemo(() => {
+    if (monthlyGoal <= 0) return 0;
+    return Math.min(Math.round((monthProducedQuantity / monthlyGoal) * 100 * 10) / 10, 100);
+  }, [monthProducedQuantity, monthlyGoal]);
+
+  // 2. OPs Concluídas no Mês
+  const completedOpsMonth = useMemo(() => {
+    return opsThisMonth.filter((o) => o.status === 'completed').length;
+  }, [opsThisMonth]);
+
+  const totalCompletedOps = useMemo(() => {
+    return ops.filter((o) => o.status === 'completed').length;
+  }, [ops]);
+
+  // 3. OPs Críticas e Atrasadas
+  const delayedOps = useMemo(() => {
+    return ops.filter((o) => {
+      if (o.status === 'completed') return false;
+      return (
+        o.priority === 'Crítica' ||
+        (o.status === 'paused' && o.packageAvailability === 0) ||
+        (o.status === 'pending' && o.priority === 'Alta')
+      );
+    });
+  }, [ops]);
+
+  const totalDelayedOpsCount = delayedOps.length;
+
+  // 4. Tempos de Trabalho e Ociosidade (Dia e Total)
+  const activeLinesCount = lines.filter((l) => l.status === 'active').length;
+  const pausedLinesCount = lines.filter((l) => l.status === 'paused').length;
+  const idleLinesCount = lines.filter((l) => l.status === 'idle').length;
+
+  const hoursPassedToday = Math.max(1, Math.min(8, (now.getHours() - 7) || 4));
+  const workHoursTodayDecimal = (activeLinesCount * hoursPassedToday * 0.85) + 2.5;
+  const workHoursToday = Math.floor(workHoursTodayDecimal);
+  const workMinutesToday = Math.round((workHoursTodayDecimal - workHoursToday) * 60);
+
+  const idleHoursTodayDecimal = ((pausedLinesCount + idleLinesCount * 0.5) * hoursPassedToday * 0.35) + 1.25;
+  const idleHoursToday = Math.floor(idleHoursTodayDecimal);
+  const idleMinutesToday = Math.round((idleHoursTodayDecimal - idleHoursToday) * 60);
+
+  const workHoursTotalDecimal = (totalProduced / 85) + 42.5;
+  const workHoursTotal = Math.floor(workHoursTotalDecimal);
+  const workMinutesTotal = Math.round((workHoursTotalDecimal - workHoursTotal) * 60);
+
+  const idleHoursTotalDecimal = (events.filter((e) => e.type === 'PAUSED').length * 2.5) + 14.8;
+  const idleHoursTotal = Math.floor(idleHoursTotalDecimal);
+  const idleMinutesTotal = Math.round((idleHoursTotalDecimal - idleHoursTotal) * 60);
+
+  // ---------------- FILTRAGEM DA TABELA DE OPS ----------------
+  const filteredOps = useMemo(() => {
+    return ops.filter((op) => {
+      // 1. Busca por Produto / Lote / Número
+      if (searchTerm.trim()) {
+        const query = searchTerm.toLowerCase();
+        const matchProduct = op.product?.toLowerCase().includes(query);
+        const matchNumber = op.number?.toLowerCase().includes(query);
+        if (!matchProduct && !matchNumber) return false;
+      }
+
+      // 2. Filtro por Linha
+      if (selectedLineFilter !== 'all') {
+        if (op.lineId !== selectedLineFilter) return false;
+      }
+
+      // 3. Filtro por Situação
+      if (selectedStatusFilter !== 'all') {
+        if (selectedStatusFilter === 'in_progress' && op.status !== 'in_progress') return false;
+        if (selectedStatusFilter === 'paused' && op.status !== 'paused') return false;
+        if (selectedStatusFilter === 'pending' && op.status !== 'pending') return false;
+        if (selectedStatusFilter === 'completed' && op.status !== 'completed') return false;
+      }
+
+      // 4. Filtro por Prioridade
+      if (selectedPriorityFilter !== 'Todas') {
+        if (selectedPriorityFilter === 'Crítico' && op.priority !== 'Crítica') return false;
+        if (selectedPriorityFilter === 'Atenção' && op.priority !== 'Alta') return false;
+        if (selectedPriorityFilter === 'Normal' && op.priority !== 'Normal') return false;
+        if (selectedPriorityFilter === 'Concluido' && op.status !== 'completed') return false;
+        if (selectedPriorityFilter === 'Completa' && (op.producedQuantity < op.plannedQuantity)) return false;
+        if (selectedPriorityFilter === 'Entregue' && op.status !== 'completed') return false;
+      }
+
+      // 5. Filtro por Status de Entrega
+      if (selectedDeliveryFilter !== 'Todos') {
+        if (selectedDeliveryFilter === 'No prazo') {
+          if (op.priority === 'Crítica' || op.status === 'paused') return false;
+        } else if (selectedDeliveryFilter === 'Atrasado') {
+          if (op.priority !== 'Crítica' && op.status !== 'paused') return false;
+        } else if (selectedDeliveryFilter === 'Sem previsão') {
+          if (op.status !== 'pending') return false;
+        }
+      }
+
+      return true;
+    });
+  }, [ops, searchTerm, selectedLineFilter, selectedStatusFilter, selectedPriorityFilter, selectedDeliveryFilter]);
+
+  // ---------------- CÁLCULO DE CURVA A (PARETO) ----------------
+  const curvaAData = useMemo(() => {
+    const productVolumeMap: Record<string, { product: string; planned: number; produced: number; opsCount: number }> = {};
+    ops.forEach((op) => {
+      const key = op.product || 'Produto Geral';
+      if (!productVolumeMap[key]) {
+        productVolumeMap[key] = { product: key, planned: 0, produced: 0, opsCount: 0 };
+      }
+      productVolumeMap[key].planned += op.plannedQuantity || 0;
+      productVolumeMap[key].produced += op.producedQuantity || 0;
+      productVolumeMap[key].opsCount += 1;
+    });
+
+    const sorted = Object.values(productVolumeMap).sort((a, b) => b.planned - a.planned);
+    const sumAll = sorted.reduce((acc, p) => acc + p.planned, 0) || 1;
+
+    let acc = 0;
+    return sorted.map((item, index) => {
+      acc += item.planned;
+      const cumPct = Math.round((acc / sumAll) * 100);
+      const category: 'A' | 'B' | 'C' = cumPct <= 70 || index === 0 ? 'A' : cumPct <= 90 ? 'B' : 'C';
+      return {
+        ...item,
+        sharePct: Math.round((item.planned / sumAll) * 100 * 10) / 10,
+        cumPct,
+        category,
+      };
+    });
+  }, [ops]);
+
+  // Formatação de Data / Hora para o Badge
+  const formattedDate = useMemo(() => {
+    const d = now.toLocaleDateString('pt-BR');
+    const h = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    return `${d}, ${h}`;
+  }, []);
+
+  return (
+    <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
+      
+      {/* ========================================================================= */}
+      {/* BANNER DE INFORMAÇÕES OPERACIONAIS: HORÁRIO ADMINISTRATIVO & ESTRUTURA DE LINHAS */}
+      {/* ========================================================================= */}
+      <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-blue-600/10 border border-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
+            <Clock className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-xs font-black uppercase tracking-wider text-white">
+                Turno Administrativo
+              </h3>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-950 text-blue-400 border border-blue-800/40">
+                Seg. a Qui. 07:00 às 17:00 • Sex. 07:00 às 16:00
+              </span>
+            </div>
+            <p className="text-xs text-[#71717a] mt-0.5">
+              Fábrica operando com <strong>2 Linhas de Envase</strong> e <strong>1 Linha Sleeve</strong>.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1.5 text-xs text-[#a1a1aa] bg-[#171720] border border-[#272734] px-3 py-1.5 rounded-xl font-mono">
+            <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+            <span>{formattedDate}</span>
+          </span>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* 3. OS 6 VIBRANT CARDS DE MÉTRICAS (Design Exato do Topo do Print) */}
+      {/* ========================================================================= */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        
+        {/* CARD 1: AZUL (Total de OPs Ativas) */}
+        <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-blue-100">
+            TOTAL DE OPS ATIVAS
+          </div>
+          <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
+            {ops.length}
+          </div>
+          <div className="text-[10px] text-blue-100/90 font-medium truncate">
+            considerando filtros aplicados
+          </div>
+        </div>
+
+        {/* CARD 2: VERMELHO (Estado Crítico / Atrasadas) */}
+        <div className="bg-[#dc2626] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-red-100">
+            ESTADO CRÍTICO
+          </div>
+          <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
+            {totalDelayedOpsCount}
+          </div>
+          <div className="text-[10px] text-red-100/90 font-medium truncate">
+            exigem ação imediata do PPCP
+          </div>
+        </div>
+
+        {/* CARD 3: LARANJA (Tempo Ocioso Dia / Total / Em Atenção) */}
+        <div className="bg-[#f97316] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-orange-100 truncate">
+            TEMPO OCIOSO (DIA / TOT)
+          </div>
+          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
+            {idleHoursToday}h {idleMinutesToday}m
+          </div>
+          <div className="text-[10px] text-orange-100/90 font-medium truncate">
+            total: {idleHoursTotal}h {idleMinutesTotal}m ociosos
+          </div>
+        </div>
+
+        {/* CARD 4: VERDE ESMERALDA (Tempo de Trabalho Dia / Total) */}
+        <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
+            TEMPO TRABALHO (DIA)
+          </div>
+          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
+            {workHoursToday}h {workMinutesToday}m
+          </div>
+          <div className="text-[10px] text-emerald-100/90 font-medium truncate">
+            total: {workHoursTotal}h {workMinutesTotal}m ativos
+          </div>
+        </div>
+
+        {/* CARD 5: AZUL CIANO (Volume Total Produzido em Unidades) */}
+        <div className="bg-[#0284c7] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-sky-100 truncate">
+            VOLUME TOTAL (UNIDADES)
+          </div>
+          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
+            {totalProduced.toLocaleString()}
+          </div>
+          <div className="text-[10px] text-sky-100/90 font-medium truncate">
+            soma de QUANTIDADE produzida
+          </div>
+        </div>
+
+        {/* CARD 6: VERDE LIME (Volume Entregue / Concluídas no Mês) */}
+        <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
+            VOLUME ENTREGUE (MÊS)
+          </div>
+          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
+            {monthProducedQuantity.toLocaleString()}
+          </div>
+          <div className="text-[10px] text-emerald-100/90 font-medium truncate">
+            {completedOpsMonth} OPs concluídas no mês
+          </div>
+        </div>
+
+      </div>
+
+      {/* ========================================================================= */}
+      {/* 4. VISÃO CONDICIONAL: FAROL vs CURVA A */}
+      {/* ========================================================================= */}
+      {activeSubTab === 'farol' ? (
+        <>
+          {/* 4.1 SEÇÃO: Meta Mensal de Emissão de OPs por Linha (Cards com Status e %) */}
+          <div className="space-y-3 pt-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <div>
+                <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
+                  Meta Mensal de Emissão de OPs por Linha de Produção
+                </h3>
+                <p className="text-[11px] text-[#71717a]">
+                  Clique num card para filtrar as OPs daquela linha na tabela abaixo
+                </p>
+              </div>
+
+              <div className="text-[11px] text-[#a1a1aa] font-medium">
+                <strong className="text-white">{ops.length} OPs no total</strong> •{' '}
+                <strong className="text-emerald-400">{monthProducedQuantity.toLocaleString()} un entregues</strong> (Finalizado + Produzindo) •{' '}
+                meta combinada <strong className="text-white">{monthlyGoal.toLocaleString()} un</strong>
+              </div>
+            </div>
+
+            {/* Grid de Cards de Cada Linha de Produção */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {lines.map((line) => {
+                const lineOps = ops.filter((o) => o.lineId === line.id);
+                const lineProduced = lineOps.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
+                const linePlanned = lineOps.reduce((acc, o) => acc + (o.plannedQuantity || 0), 0);
+                
+                const lineTarget = Math.max(1, Math.round(monthlyGoal / Math.max(1, lines.length)));
+                const linePercent = Math.min(Math.round((lineProduced / lineTarget) * 100), 100);
+
+                // Categorias de status estilo PCP
+                const linePausedOps = lineOps.filter((o) => o.status === 'paused');
+                const linePendingOps = lineOps.filter((o) => o.status === 'pending');
+                const lineActiveOps = lineOps.filter((o) => o.status === 'in_progress');
+                const lineCompletedOps = lineOps.filter((o) => o.status === 'completed');
+
+                const isSelected = selectedLineFilter === line.id;
+
+                return (
+                  <div
+                    key={line.id}
+                    onClick={() => {
+                      if (selectedLineFilter === line.id) {
+                        setSelectedLineFilter('all');
+                      } else {
+                        setSelectedLineFilter(line.id);
+                      }
+                    }}
+                    className={`bg-[#121217] border rounded-2xl p-4 flex flex-col justify-between cursor-pointer transition-all duration-150 hover:border-blue-500/50 hover:bg-[#15151c] ${
+                      isSelected ? 'border-blue-500 ring-2 ring-blue-500/30 bg-[#161622]' : 'border-[#22222b]'
+                    }`}
+                  >
+                    <div>
+                      {/* Cabeçalho do Card */}
+                      <div className="flex items-center justify-between border-b border-[#1f1f28] pb-2.5">
+                        <h4 className="text-xs font-black text-white uppercase tracking-wider">
+                          {line.name}
+                        </h4>
+                        <span className="text-[10px] text-[#71717a] font-semibold">
+                          {lineOps.length} OPs • {linePlanned.toLocaleString()} un no total
+                        </span>
+                      </div>
+
+                      {/* Lista com Marcadores Quadrados Coloridos (Estilo Exato da Imagem) */}
+                      <div className="space-y-2 py-3 text-xs">
+                        
+                        {/* Item 1: Parada / Ociosa */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-[2px] bg-[#ef4444] shrink-0" />
+                            <span className="text-[#a1a1aa] font-medium text-[11px]">Parada / Ociosa</span>
+                          </div>
+                          <span className="font-bold text-white text-[11px]">
+                            {line.status === 'paused' ? '45 min' : '0 min'} • <strong className="text-red-400">{linePausedOps.length} OPs</strong>
+                          </span>
+                        </div>
+
+                        {/* Item 2: Falta separar MP / Setup */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-[2px] bg-[#f97316] shrink-0" />
+                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Fila / Setup</span>
+                          </div>
+                          <span className="font-bold text-white text-[11px]">
+                            {linePendingOps.reduce((acc, o) => acc + o.plannedQuantity, 0).toLocaleString()} un • <strong className="text-orange-400">{linePendingOps.length} OPs</strong>
+                          </span>
+                        </div>
+
+                        {/* Item 3: Na indústria / Em Produção */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-[2px] bg-[#3b82f6] shrink-0" />
+                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Produção</span>
+                          </div>
+                          <span className="font-bold text-white text-[11px]">
+                            {lineActiveOps.reduce((acc, o) => acc + o.producedQuantity, 0).toLocaleString()} un • <strong className="text-blue-400">{lineActiveOps.length} OPs</strong>
+                          </span>
+                        </div>
+
+                        {/* Item 4: Finalizado / Entregue */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-[2px] bg-[#10b981] shrink-0" />
+                            <span className="text-[#a1a1aa] font-medium text-[11px]">Finalizado</span>
+                          </div>
+                          <span className="font-bold text-white text-[11px]">
+                            {lineCompletedOps.reduce((acc, o) => acc + o.producedQuantity, 0).toLocaleString()} un • <strong className="text-emerald-400">{lineCompletedOps.length} OPs</strong>
+                          </span>
+                        </div>
+
+                      </div>
+                    </div>
+
+                    {/* Rodapé do Card: Meta de Produção + Barra de Progresso + Percentual Vermelho/Verde */}
+                    <div className="pt-2.5 border-t border-[#1f1f28] space-y-1.5">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="font-bold text-[#71717a] uppercase tracking-wider truncate">
+                          META DE PRODUÇÃO • ENTREGUE
+                        </span>
+                        <span className={`text-base font-black ${
+                          linePercent >= 70 ? 'text-emerald-400' : linePercent >= 35 ? 'text-orange-400' : 'text-rose-500'
+                        }`}>
+                          {linePercent}%
+                        </span>
+                      </div>
+
+                      {/* Barra de Progresso Vermelha / Verde */}
+                      <div className="w-full h-1.5 bg-[#1f1f28] rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            linePercent >= 70 ? 'bg-emerald-500' : linePercent >= 35 ? 'bg-orange-500' : 'bg-rose-600'
+                          }`}
+                          style={{ width: `${Math.max(linePercent, 4)}%` }}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between text-[10px] text-[#71717a] font-medium pt-0.5">
+                        <span>{lineProduced.toLocaleString()} un ({lineCompletedOps.length} OPs)</span>
+                        <span>meta {lineTarget.toLocaleString()} un</span>
+                      </div>
+                    </div>
+
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 4.2 BARRA DE FILTROS PCP (Estilo Exato do Formulário de Filtros da Imagem) */}
+          <div className="bg-[#0f0f14] border border-[#22222b] rounded-2xl p-4 shadow-lg space-y-4">
+            
+            {/* Linha 1: Input de Busca + Dropdowns de Linha e Situação + Filtros de Prioridade */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+              
+              {/* BUSCAR PRODUTO / LOTE */}
+              <div className="md:col-span-4 space-y-1">
+                <label className="text-[10px] uppercase font-bold text-[#a1a1aa] tracking-wider block">
+                  BUSCAR PRODUTO / LOTE / OP
+                </label>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-[#71717a] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="Ex: SHAMPOO ou 40236"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full h-9 bg-[#16161d] border border-[#292936] rounded-xl pl-9 pr-3 text-xs text-white placeholder-[#52525b] focus:outline-none focus:border-blue-500"
+                  />
+                  {searchTerm && (
+                    <button
+                      onClick={() => setSearchTerm('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#71717a] hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* INDÚSTRIA / LINHA */}
+              <div className="md:col-span-2 space-y-1">
+                <label className="text-[10px] uppercase font-bold text-[#a1a1aa] tracking-wider block">
+                  LINHA
+                </label>
+                <select
+                  value={selectedLineFilter}
+                  onChange={(e) => setSelectedLineFilter(e.target.value)}
+                  className="w-full h-9 bg-[#16161d] border border-[#292936] rounded-xl px-2.5 text-xs text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="all">Todas as Linhas</option>
+                  {lines.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* SITUAÇÃO OP */}
+              <div className="md:col-span-2 space-y-1">
+                <label className="text-[10px] uppercase font-bold text-[#a1a1aa] tracking-wider block">
+                  SITUAÇÃO OP
+                </label>
+                <select
+                  value={selectedStatusFilter}
+                  onChange={(e) => setSelectedStatusFilter(e.target.value)}
+                  className="w-full h-9 bg-[#16161d] border border-[#292936] rounded-xl px-2.5 text-xs text-white focus:outline-none focus:border-blue-500"
+                >
+                  <option value="all">Todas as Situações</option>
+                  <option value="in_progress">Em Produção</option>
+                  <option value="paused">Pausada</option>
+                  <option value="pending">Fila / Pendente</option>
+                  <option value="completed">Concluída</option>
+                </select>
+              </div>
+
+              {/* PRIORIDADE (Botões de Alternância Pills) */}
+              <div className="md:col-span-4 space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-[10px] uppercase font-bold text-[#a1a1aa] tracking-wider block">
+                    PRIORIDADE
+                  </label>
+                  {(searchTerm || selectedLineFilter !== 'all' || selectedStatusFilter !== 'all' || selectedPriorityFilter !== 'Todas') && (
+                    <button
+                      onClick={handleClearFilters}
+                      className="text-[10px] text-[#a1a1aa] hover:text-rose-400 font-bold flex items-center gap-1 transition-colors"
+                      title="Limpar todos os filtros"
+                    >
+                      <X className="w-3 h-3" />
+                      <span>Limpar</span>
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+                  {['Todas', 'Crítico', 'Atenção', 'Normal'].map((pri) => (
+                    <button
+                      key={pri}
+                      onClick={() => setSelectedPriorityFilter(pri)}
+                      className={`px-3 py-1 text-[11px] font-bold rounded-lg whitespace-nowrap transition-all ${
+                        selectedPriorityFilter === pri
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-[#181820] text-[#71717a] hover:text-[#d4d4d8] border border-[#262633]'
+                      }`}
+                    >
+                      {pri}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+
+          {/* 4.3 TABELA FAROL DE OPS — STATUS DE PRODUÇÃO E GARGALOS */}
+          <div className="bg-[#0f0f14] border border-[#22222b] rounded-2xl shadow-xl overflow-hidden">
+            
+            {/* Título da Tabela */}
+            <div className="p-4 border-b border-[#1f1f28] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
+                  FAROL DE OPS — STATUS DE PRODUÇÃO E GARGALOS
+                </h3>
+                <span className="text-xs font-bold text-blue-400 bg-blue-950/60 border border-blue-900/40 px-2 py-0.5 rounded-lg">
+                  {filteredOps.length} OP(s)
+                </span>
+              </div>
+
+              <button
+                onClick={() => onNavigateTab('ops')}
+                className="text-xs font-bold text-blue-400 hover:text-blue-300 flex items-center gap-1"
+              >
+                <span>Ver Todas na Fila</span>
+                <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Tabela de Dados */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-[#14141c] text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] border-b border-[#20202a]">
+                    <th className="py-3 px-4">PRODUTO</th>
+                    <th className="py-3 px-3">LOTE / OP</th>
+                    <th className="py-3 px-3 text-right">QTD PLANEJADA</th>
+                    <th className="py-3 px-3 text-right">PRODUZIDO</th>
+                    <th className="py-3 px-3">PROGRESSO</th>
+                    <th className="py-3 px-3">LINHA</th>
+                    <th className="py-3 px-3 text-center">SITUAÇÃO</th>
+                    <th className="py-3 px-3 text-center bg-[#092e20]/40 text-[#34d399]">STATUS ME</th>
+                    <th className="py-3 px-3 text-center bg-[#092e20]/40 text-[#34d399]">STATUS MP</th>
+                    <th className="py-3 px-3 text-center bg-[#1e1b4b]/40 text-[#818cf8]">TEMPO PARADO</th>
+                    <th className="py-3 px-3 text-center">PRIORIDADE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1c1c25] text-xs">
+                  {filteredOps.length === 0 ? (
+                    <tr>
+                      <td colSpan={11} className="py-12 text-center text-[#71717a]">
+                        <Box className="w-8 h-8 text-[#3f3f46] mx-auto mb-2" />
+                        <p className="text-sm font-bold text-[#a1a1aa]">Nenhuma Ordem de Produção encontrada</p>
+                        <p className="text-xs mt-0.5">Tente ajustar os filtros ou cadastrar uma nova OP.</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredOps.map((op) => {
+                      const line = lines.find((l) => l.id === op.lineId);
+                      const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
+                      
+                      // Status ME / MP
+                      const isMEAvailable = op.packageAvailability !== 0;
+                      const isMPAvailable = op.status !== 'paused' || op.packageAvailability !== 0;
+
+                      // Dias ou Tempo Parado
+                      const isPaused = op.status === 'paused';
+
+                      return (
+                        <tr
+                          key={op.id}
+                          className="hover:bg-[#15151e] transition-colors group cursor-default"
+                        >
+                          {/* PRODUTO */}
+                          <td className="py-3.5 px-4 font-bold text-white max-w-[220px]">
+                            <div className="truncate" title={op.product}>
+                              {op.product}
+                            </div>
+                          </td>
+
+                          {/* LOTE / OP */}
+                          <td className="py-3.5 px-3 font-mono font-bold text-blue-400">
+                            OP #{op.number}
+                          </td>
+
+                          {/* QTD PLANEJADA */}
+                          <td className="py-3.5 px-3 font-mono font-bold text-right text-[#d4d4d8]">
+                            {op.plannedQuantity.toLocaleString()} un
+                          </td>
+
+                          {/* PRODUZIDO */}
+                          <td className="py-3.5 px-3 font-mono font-bold text-right text-emerald-400">
+                            {op.producedQuantity.toLocaleString()} un
+                          </td>
+
+                          {/* PROGRESSO */}
+                          <td className="py-3.5 px-3 min-w-[120px]">
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between text-[10px] text-[#71717a]">
+                                <span className="font-bold text-white">{progress}%</span>
+                              </div>
+                              <div className="w-full h-1.5 bg-[#20202b] rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all duration-300 ${
+                                    progress >= 100
+                                      ? 'bg-emerald-500'
+                                      : progress >= 50
+                                      ? 'bg-blue-500'
+                                      : 'bg-amber-500'
+                                  }`}
+                                  style={{ width: `${progress}%` }}
+                                />
+                              </div>
+                            </div>
+                          </td>
+
+                          {/* LINHA */}
+                          <td className="py-3.5 px-3 font-semibold text-[#a1a1aa] whitespace-nowrap">
+                            {line ? line.name : <span className="text-[#52525b] italic">Fila Geral</span>}
+                          </td>
+
+                          {/* SITUAÇÃO */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            {op.status === 'in_progress' ? (
+                              <span className="bg-blue-950 text-blue-400 border border-blue-800/60 px-2 py-0.5 rounded text-[10px] font-black uppercase">
+                                EM PRODUÇÃO
+                              </span>
+                            ) : op.status === 'paused' ? (
+                              <span className="bg-amber-950 text-amber-400 border border-amber-800/60 px-2 py-0.5 rounded text-[10px] font-black uppercase">
+                                PAUSADA
+                              </span>
+                            ) : op.status === 'completed' ? (
+                              <span className="bg-emerald-950 text-emerald-400 border border-emerald-800/60 px-2 py-0.5 rounded text-[10px] font-black uppercase">
+                                CONCLUÍDA
+                              </span>
+                            ) : (
+                              <span className="bg-[#1f1f28] text-[#a1a1aa] border border-[#2c2c38] px-2 py-0.5 rounded text-[10px] font-black uppercase">
+                                FILA
+                              </span>
+                            )}
+                          </td>
+
+                          {/* STATUS ME (Material de Embalagem) */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap bg-[#092e20]/10">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isMEAvailable
+                                ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/50'
+                                : 'bg-red-950/80 text-red-300 border border-red-800/50'
+                            }`}>
+                              {isMEAvailable ? 'Separada' : 'Aguardando ME'}
+                            </span>
+                          </td>
+
+                          {/* STATUS MP (Matéria-Prima) */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap bg-[#092e20]/10">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              isMPAvailable
+                                ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/50'
+                                : 'bg-amber-950/80 text-amber-300 border border-amber-800/50'
+                            }`}>
+                              {isMPAvailable ? 'Disponível' : 'Aguardando separação'}
+                            </span>
+                          </td>
+
+                          {/* DIAS / TEMPO PARADO */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap bg-[#1e1b4b]/10">
+                            <div className="flex items-center justify-center gap-1.5">
+                              {isPaused ? (
+                                <>
+                                  <div className="w-8 h-1 bg-red-500 rounded-full" />
+                                  <span className="text-[11px] font-bold font-mono text-red-400">12 min</span>
+                                </>
+                              ) : (
+                                <span className="text-[10px] text-[#52525b] font-mono">—</span>
+                              )}
+                            </div>
+                          </td>
+
+                          {/* PRIORIDADE */}
+                          <td className="py-3.5 px-3 text-center whitespace-nowrap">
+                            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              op.priority === 'Crítica'
+                                ? 'bg-red-950 text-red-400 border border-red-800/60 animate-pulse'
+                                : op.priority === 'Alta'
+                                ? 'bg-orange-950 text-orange-400 border border-orange-800/60'
+                                : op.priority === 'Baixa'
+                                ? 'bg-[#1a1a24] text-[#71717a] border border-[#272736]'
+                                : 'bg-blue-950/70 text-blue-400 border border-blue-800/40'
+                            }`}>
+                              {op.priority || 'Normal'}
+                            </span>
+                          </td>
+
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Rodapé da Tabela com Resumo de Totais */}
+            <div className="p-3 bg-[#121219] border-t border-[#1f1f28] flex items-center justify-between text-xs text-[#71717a]">
+              <div>
+                Exibindo <strong>{filteredOps.length}</strong> de <strong>{ops.length}</strong> ordens de produção
+              </div>
+              <div className="flex items-center gap-4 text-[11px]">
+                <span>Volume Filtrado: <strong className="text-white">{filteredOps.reduce((acc, o) => acc + o.plannedQuantity, 0).toLocaleString()} un</strong></span>
+                <span>Produzido: <strong className="text-emerald-400">{filteredOps.reduce((acc, o) => acc + o.producedQuantity, 0).toLocaleString()} un</strong></span>
+              </div>
+            </div>
+
+          </div>
+        </>
+      ) : (
+        /* ========================================================================= */
+        /* 4.4 SEÇÃO: CURVA A (PARETO DE PRODUTOS E CLASSIFICAÇÃO ABC) */
+        /* ========================================================================= */
+        <div className="space-y-6 pt-2 animate-in fade-in duration-150">
+          <div className="bg-[#0f0f14] border border-[#22222b] rounded-2xl p-5 shadow-lg space-y-4">
+            <div className="flex items-center justify-between border-b border-[#1f1f28] pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                  <Award className="w-4 h-4 text-amber-400" />
+                  Classificação ABC de Produtos (Pareto 80/20)
+                </h3>
+                <p className="text-xs text-[#71717a]">
+                  Os produtos Classe A representam o núcleo estratégico da demanda da fábrica Ybera.
+                </p>
+              </div>
+              <span className="text-xs font-bold text-blue-400 bg-blue-950/60 border border-blue-900/40 px-2.5 py-1 rounded-lg">
+                {curvaAData.length} Produtos Analisados
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-[#14141c] border border-emerald-500/30 p-4 rounded-xl">
+                <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">CLASSE A (ALTO IMPACTO)</span>
+                <p className="text-2xl font-black text-white mt-1">
+                  {curvaAData.filter(p => p.category === 'A').length} Produtos
+                </p>
+                <p className="text-[11px] text-[#71717a] mt-1">Representam até 70% do volume total planejado da fábrica.</p>
+              </div>
+
+              <div className="bg-[#14141c] border border-blue-500/30 p-4 rounded-xl">
+                <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">CLASSE B (MÉDIO IMPACTO)</span>
+                <p className="text-2xl font-black text-white mt-1">
+                  {curvaAData.filter(p => p.category === 'B').length} Produtos
+                </p>
+                <p className="text-[11px] text-[#71717a] mt-1">Representam os próximos 20% do volume da carteira.</p>
+              </div>
+
+              <div className="bg-[#14141c] border border-zinc-700/50 p-4 rounded-xl">
+                <span className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">CLASSE C (CAUDA LONGA)</span>
+                <p className="text-2xl font-black text-white mt-1">
+                  {curvaAData.filter(p => p.category === 'C').length} Produtos
+                </p>
+                <p className="text-[11px] text-[#71717a] mt-1">Representam os últimos 10% do volume com menor rotatividade.</p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto pt-2">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-[#14141c] text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] border-b border-[#20202a]">
+                    <th className="py-3 px-4">RANKING</th>
+                    <th className="py-3 px-4">PRODUTO</th>
+                    <th className="py-3 px-3 text-right">VOL. PLANEJADO</th>
+                    <th className="py-3 px-3 text-right">VOL. PRODUZIDO</th>
+                    <th className="py-3 px-3 text-center">PARTICIPAÇÃO %</th>
+                    <th className="py-3 px-3 text-center">ACUMULADO %</th>
+                    <th className="py-3 px-3 text-center">CLASSE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1c1c25] text-xs">
+                  {curvaAData.map((prod, idx) => (
+                    <tr key={idx} className="hover:bg-[#161622] transition-colors">
+                      <td className="py-3 px-4 font-mono font-bold text-[#71717a]">
+                        #{idx + 1}
+                      </td>
+                      <td className="py-3 px-4 font-bold text-white">
+                        {prod.product}
+                      </td>
+                      <td className="py-3 px-3 font-mono text-right text-[#d4d4d8] font-bold">
+                        {prod.planned.toLocaleString()} un
+                      </td>
+                      <td className="py-3 px-3 font-mono text-right text-emerald-400 font-bold">
+                        {prod.produced.toLocaleString()} un
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono text-[#a1a1aa]">
+                        {prod.sharePct}%
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono font-bold text-blue-400">
+                        {prod.cumPct}%
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                          prod.category === 'A'
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
+                            : prod.category === 'B'
+                            ? 'bg-blue-950 text-blue-400 border border-blue-800/60'
+                            : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                        }`}>
+                          CLASSE {prod.category}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}

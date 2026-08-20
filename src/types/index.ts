@@ -5,6 +5,8 @@ export interface UserProfile {
   email: string;
   role: Role;
   name: string;
+  cargo?: string;
+  status?: 'active' | 'inactive' | 'pending';
   createdAt: string;
 }
 
@@ -22,14 +24,18 @@ export interface ProductionOrder {
   id: string;
   number: string;
   product: string;
+  lote?: string;
   plannedQuantity: number;
   producedQuantity: number;
+  granel?: string;
   priority: OPPriority;
   status: OPStatus;
   lineId: string | null;
   leaderId: string | null;
   packageAvailability: number;
   sequence: number;
+  scheduledDate?: string;
+  scheduledShift?: string;
   createdAt: string;
 }
 
@@ -37,22 +43,29 @@ export type EventType = 'STARTED' | 'PAUSED' | 'RESUMED' | 'FINISHED' | 'QUANTIT
 
 export interface ProductionEvent {
   id: string;
-  opId: string;
-  lineId: string;
-  leaderId: string;
+  opId?: string;
+  lineId?: string;
+  leaderId?: string;
+  leaderName?: string;
+  lineName?: string;
+  opNumber?: string;
   type: EventType;
-  timestamp: any; // Firestore server timestamp
   quantity?: number;
   reason?: string;
   observation?: string;
+  createdAt: string;
 }
 
-export interface WeeklyRotation {
+export interface LeaderAssignment {
+  leaderId: string;
+  leaderName: string;
+  lineId: string;
+  lineName: string;
+  shift?: string;
+}
+
+export interface PauseReason {
   id: string;
-  weekNumber: number;
-  year: number;
-  assignments: {
-    leaderId: string;
-    lineId: string;
-  }[];
+  name: string;
+  category?: string;
 }

@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
-import { supabase } from '../lib/supabase';
 import { LogOut, Play, Pause, CheckCircle, Package } from 'lucide-react';
 import { getLeaderRotation, getLines, getActiveOP, startOP, pauseOP, resumeOP, finishOP, reportQuantity } from '../services/db';
 import { ProductionLine, ProductionOrder } from '../types';
@@ -9,7 +8,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { Label } from '../components/ui/label';
 import { Input } from '../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { seedDatabase } from '../services/seed'; // Temporary for MVP init
 
 const PAUSE_REASONS = [
   'Falta de insumo',
@@ -25,7 +23,7 @@ const PAUSE_REASONS = [
 ];
 
 export function LeaderScreen() {
-  const { profile } = useAuthStore();
+  const { profile, signOut } = useAuthStore();
   const [line, setLine] = useState<ProductionLine | null>(null);
   const [op, setOp] = useState<ProductionOrder | null>(null);
   const [loading, setLoading] = useState(true);
@@ -108,13 +106,11 @@ export function LeaderScreen() {
     return (
       <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col items-center justify-center p-4 font-sans">
         <p className="mb-4">Você não está alocado em nenhuma linha nesta semana.</p>
-        {import.meta.env.DEV && profile?.role === 'coordinator' && (
-          <Button onClick={seedDatabase}>[DEV] Popular Banco de Dados</Button>
-        )}
-        <Button variant="ghost" onClick={() => supabase.auth.signOut()} className="mt-4">Sair</Button>
+        <Button variant="ghost" onClick={() => signOut()} className="mt-4">Sair</Button>
       </div>
     );
   }
+
 
   const progress = op ? (op.producedQuantity / op.plannedQuantity) * 100 : 0;
 
@@ -122,8 +118,11 @@ export function LeaderScreen() {
     <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-md bg-[#18181b] border border-[#27272a] rounded-xl p-8 text-center shadow-[0_0_30px_rgba(0,0,0,0.5)]">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-[#71717a] uppercase tracking-widest text-[10px] font-bold flex-1 text-left">Líder: {profile?.name}</h2>
-          <Button variant="ghost" size="icon" onClick={() => supabase.auth.signOut()} className="text-[#71717a] hover:text-[#f4f4f5]">
+          <div className="text-left flex-1">
+            <h2 className="text-[#71717a] uppercase tracking-widest text-[10px] font-bold">Líder: {profile?.name}</h2>
+            {profile?.cargo && <span className="text-[9px] text-blue-400 font-semibold">{profile.cargo}</span>}
+          </div>
+          <Button variant="ghost" size="icon" onClick={() => signOut()} className="text-[#71717a] hover:text-[#f4f4f5]">
             <LogOut className="w-4 h-4" />
           </Button>
         </div>
