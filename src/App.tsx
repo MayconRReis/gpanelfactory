@@ -5,6 +5,7 @@ import { useAuthStore } from './store/authStore';
 import { Login } from './pages/Login';
 import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
 import { LeaderScreen } from './pages/LeaderScreen';
+import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, profile, isLoading } = useAuthStore();
@@ -38,6 +39,11 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function MainRoute() {
   const { profile } = useAuthStore();
   
+  // Se for primeiro acesso ou troca obrigatória de senha, força a tela de definição de nova senha
+  if (profile?.mustChangePassword || profile?.status === 'first_access') {
+    return <FirstAccessPasswordChange />;
+  }
+
   const role = String(profile?.role || '').toLowerCase().trim();
   const isCoordinator = role === 'coordinator' || role === 'coordenador';
 

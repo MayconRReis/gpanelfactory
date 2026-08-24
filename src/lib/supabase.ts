@@ -4,8 +4,8 @@ const envUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
 const envKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
 
 // Use environment variables if present, or the provided project credentials
-const supabaseUrl = envUrl || 'https://dmebcmxyeyvdntwalceu.supabase.co';
-const supabaseAnonKey = envKey || 'sb_publishable_clNlxpAAXoEvgoeQ6tKp9g_A_ZYJ7mW';
+export const supabaseUrl = envUrl || 'https://dmebcmxyeyvdntwalceu.supabase.co';
+export const supabaseAnonKey = envKey || 'sb_publishable_clNlxpAAXoEvgoeQ6tKp9g_A_ZYJ7mW';
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl &&

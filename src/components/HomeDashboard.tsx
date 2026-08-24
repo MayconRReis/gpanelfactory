@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   TrendingUp,
   Target,
@@ -36,6 +36,7 @@ interface HomeDashboardProps {
   leaders: UserProfile[];
   allUsers: UserProfile[];
   events: ProductionEvent[];
+  rotations?: Record<string, string>;
   onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events') => void;
   onNewOp: () => void;
 }
@@ -46,6 +47,7 @@ export function HomeDashboard({
   leaders,
   allUsers,
   events,
+  rotations = {},
   onNavigateTab,
   onNewOp,
 }: HomeDashboardProps) {
@@ -68,6 +70,29 @@ export function HomeDashboard({
     }
     setIsEditingGoal(false);
   };
+
+  // ---------------- HELPER PARA RESOLVER LÍDER DA LINHA PELA ESCALA ----------------
+  const getLineLeader = useCallback((lineId: string): UserProfile | null => {
+    // 1. Verificar em rotations (bidirecional)
+    let leaderKey = Object.keys(rotations || {}).find(k => rotations[k] === lineId);
+    if (!leaderKey && rotations?.[lineId]) {
+      leaderKey = rotations[lineId];
+    }
+    if (leaderKey) {
+      const found = leaders.find(l => 
+        l.uid === leaderKey || 
+        (l.email && l.email.toLowerCase() === leaderKey.toLowerCase()) || 
+        l.name?.toLowerCase() === leaderKey.toLowerCase()
+      );
+      if (found) return found;
+    }
+
+    // 2. Fallback: procurar por propriedade lineId no perfil do líder
+    const byLine = leaders.find(l => (l as any).lineId === lineId);
+    if (byLine) return byLine;
+
+    return null;
+  }, [rotations, leaders]);
 
   // ---------------- FILTROS ESTILO FAROL DE OPS ----------------
   const [searchTerm, setSearchTerm] = useState('');
@@ -402,6 +427,16 @@ export function HomeDashboard({
                 const lineTarget = Math.max(1, Math.round(monthlyGoal / Math.max(1, lines.length)));
                 const linePercent = Math.min(Math.round((lineProduced / lineTarget) * 100), 100);
 
+                // Líder alocado pela escala
+                const assignedLeader = getLineLeader(line.id);
+
+                // OP ativa / em produção ou próxima na fila
+                const activeLineOp = line.currentOpId 
+                  ? ops.find(o => o.id === line.currentOpId)
+                  : lineOps.find(o => o.status === 'in_progress' || o.status === 'paused')
+                  || lineOps.filter(o => o.status === 'pending').sort((a, b) => a.sequence - b.sequence)[0]
+                  || null;
+
                 // Categorias de status estilo PCP
                 const linePausedOps = lineOps.filter((o) => o.status === 'paused');
                 const linePendingOps = lineOps.filter((o) => o.status === 'pending');
@@ -426,13 +461,44 @@ export function HomeDashboard({
                   >
                     <div>
                       {/* Cabeçalho do Card */}
-                      <div className="flex items-center justify-between border-b border-[#1f1f28] pb-2.5">
-                        <h4 className="text-xs font-black text-white uppercase tracking-wider">
-                          {line.name}
-                        </h4>
-                        <span className="text-[10px] text-[#71717a] font-semibold">
-                          {lineOps.length} OPs • {linePlanned.toLocaleString()} un no total
-                        </span>
+                      <div className="border-b border-[#1f1f28] pb-2.5">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-black text-white uppercase tracking-wider">
+                            {line.name}
+                          </h4>
+                          <span className="text-[10px] text-[#71717a] font-semibold">
+                            {lineOps.length} OPs • {linePlanned.toLocaleString()} un
+                          </span>
+                        </div>
+
+                        {/* Líder Escalado */}
+                        <div className="flex items-center justify-between mt-1 text-[11px]">
+                          <span className="text-[#71717a] flex items-center gap-1">
+                            <Users className="w-3 h-3 text-blue-400" />
+                            <span>Líder:</span>
+                          </span>
+                          <span className="font-bold text-blue-300">
+                            {assignedLeader?.name || 'Aguardando escala'}
+                          </span>
+                        </div>
+
+                        {/* OP Atual da Linha */}
+                        {activeLineOp && (
+                          <div className="mt-1.5 p-1.5 rounded-lg bg-[#181824] border border-[#262638] text-[10px]">
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono font-bold text-blue-400">OP {activeLineOp.number}</span>
+                              <span className={`px-1.5 py-0.2 rounded font-bold uppercase text-[9px] ${
+                                activeLineOp.status === 'in_progress' ? 'text-emerald-400 bg-emerald-950/80' :
+                                activeLineOp.status === 'paused' ? 'text-amber-400 bg-amber-950/80' : 'text-blue-300 bg-blue-950/80'
+                              }`}>
+                                {activeLineOp.status === 'in_progress' ? 'Produzindo' : activeLineOp.status === 'paused' ? 'Pausada' : 'Fila'}
+                              </span>
+                            </div>
+                            <p className="text-[#f4f4f5] font-medium truncate mt-0.5" title={activeLineOp.product}>
+                              {activeLineOp.product}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
                       {/* Lista com Marcadores Quadrados Coloridos (Estilo Exato da Imagem) */}
@@ -453,7 +519,7 @@ export function HomeDashboard({
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <span className="w-2 h-2 rounded-[2px] bg-[#f97316] shrink-0" />
-                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Fila / Setup</span>
+                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Fila / Estoque</span>
                           </div>
                           <span className="font-bold text-white text-[11px]">
                             {linePendingOps.reduce((acc, o) => acc + o.plannedQuantity, 0).toLocaleString()} un • <strong className="text-orange-400">{linePendingOps.length} OPs</strong>

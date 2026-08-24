@@ -6,7 +6,9 @@ export interface UserProfile {
   role: Role;
   name: string;
   cargo?: string;
-  status?: 'active' | 'inactive' | 'pending';
+  status?: 'active' | 'inactive' | 'pending' | 'first_access';
+  mustChangePassword?: boolean;
+  defaultPassword?: string;
   createdAt: string;
 }
 

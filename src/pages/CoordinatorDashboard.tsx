@@ -38,7 +38,8 @@ import {
   Tag,
   FlaskConical,
   Database,
-  Menu
+  Menu,
+  KeyRound
 } from 'lucide-react';
 import { 
   getLines, 
@@ -60,7 +61,9 @@ import {
   finishOP, 
   getRecentEvents, 
   getPauseReasons,
-  resetProductionDatabase
+  resetProductionDatabase,
+  DEFAULT_LEADER_PASSWORD,
+  generateLeaderEmail
 } from '../services/db';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
 import { supabase } from '../lib/supabase';
@@ -68,6 +71,7 @@ import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
+import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar } from 'lucide-react';
 
 export function CoordinatorDashboard() {
@@ -131,11 +135,24 @@ export function CoordinatorDashboard() {
   const [newLeaderLineId, setNewLeaderLineId] = useState('');
   const [newLeaderCargo, setNewLeaderCargo] = useState('Líder de Produção');
   const [isSubmittingLeader, setIsSubmittingLeader] = useState(false);
+  const [isAutoEmail, setIsAutoEmail] = useState(true);
+
+  // Modal: Credenciais Geradas (Primeiro Acesso)
+  const [createdCredentialsModalData, setCreatedCredentialsModalData] = useState<{
+    name: string;
+    email: string;
+    password: string;
+    cargo: string;
+    lineName?: string;
+  } | null>(null);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
   const [selectedPauseReason, setSelectedPauseReason] = useState('');
   const [pauseObservation, setPauseObservation] = useState('');
+
+  // Modal: Vincular OP do Estoque diretamente à Linha
+  const [assignStockModalTargetLine, setAssignStockModalTargetLine] = useState<ProductionLine | null>(null);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -335,6 +352,21 @@ WHERE email IN (
     await loadData();
   };
 
+  const handleAssignAndStart = async (opId: string, lineId: string) => {
+    const today = new Date().toISOString().split('T')[0];
+    await updateOP(opId, { lineId, scheduledDate: today });
+    await startOP(opId, lineId, profile?.uid || 'coord');
+    showToast(`OP vinculada e iniciada com sucesso na linha!`);
+    await loadData();
+  };
+
+  const handleAssignToQueue = async (opId: string, lineId: string) => {
+    const today = new Date().toISOString().split('T')[0];
+    await updateOP(opId, { lineId, scheduledDate: today });
+    showToast(`OP colocada na fila de produção da linha com sucesso.`);
+    await loadData();
+  };
+
   const handleCreateOP = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newOpNumber.trim() || !newOpProduct.trim() || !newOpPlanned) {
@@ -459,28 +491,52 @@ WHERE email IN (
     await loadData();
   };
 
+  const handleCopyLeaderCredentials = (leader: UserProfile) => {
+    const pwd = leader.defaultPassword || DEFAULT_LEADER_PASSWORD;
+    const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${leader.email}\n🔑 *Senha Padrão Inicial:* ${pwd}\n\n⚠️ *Atenção:* No seu primeiro acesso, o sistema solicitará automaticamente a criação de uma nova senha pessoal de sua escolha.`;
+    navigator.clipboard.writeText(text);
+    showToast(`Credenciais de ${leader.name} copiadas para a área de transferência!`);
+  };
+
   const handleCreateLeader = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!newLeaderName.trim() || !newLeaderEmail.trim()) {
+    const name = newLeaderName.trim();
+    const email = (newLeaderEmail.trim() || generateLeaderEmail(name)).toLowerCase();
+
+    if (!name || !email) {
       showToast('Por favor, informe o nome e o e-mail do líder.', 'error');
       return;
     }
     setIsSubmittingLeader(true);
     try {
       const ok = await preAuthorizeUser({
-        name: newLeaderName.trim(),
-        email: newLeaderEmail.trim(),
+        name,
+        email,
         role: 'leader',
         cargo: newLeaderCargo.trim() || 'Líder de Produção',
         lineId: newLeaderLineId || undefined,
+        mustChangePassword: true,
+        defaultPassword: DEFAULT_LEADER_PASSWORD,
       });
 
       if (ok) {
-        showToast(`Líder ${newLeaderName.trim()} cadastrado com sucesso!`);
+        showToast(`Líder ${name} cadastrado com sucesso!`);
+        const assignedLineObj = lines.find(l => l.id === newLeaderLineId);
+
+        // Exibe o modal com os dados de acesso gerados para cópia imediata
+        setCreatedCredentialsModalData({
+          name,
+          email,
+          password: DEFAULT_LEADER_PASSWORD,
+          cargo: newLeaderCargo.trim() || 'Líder de Produção',
+          lineName: assignedLineObj?.name,
+        });
+
         setNewLeaderName('');
         setNewLeaderEmail('');
         setNewLeaderLineId('');
         setNewLeaderCargo('Líder de Produção');
+        setIsAutoEmail(true);
         setShowNewLeaderModal(false);
         await loadData();
       } else {
@@ -699,6 +755,7 @@ WHERE email IN (
                 leaders={leaders}
                 allUsers={allUsers}
                 events={events}
+                rotations={rotations}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
               />
@@ -707,31 +764,60 @@ WHERE email IN (
             {/* ---------------- TELA 2: MONITORAMENTO DE LINHAS ---------------- */}
             {activeTab === 'lines' && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
                 <div>
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                    Chão de Fábrica • Visão em Tempo Real
-                  </h2>
-                  <p className="text-xs text-[#71717a]">
-                    Acompanhe o status instantâneo, líderes operacionais e lotes de cada linha.
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
+                      Chão de Fábrica • Monitoramento em Tempo Real
+                    </h2>
+                    <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      Live Supabase
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#71717a] mt-0.5">
+                    Acompanhe a alocação de líderes, status operacional, OPs em produção e fila de espera por linha.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-emerald-400 bg-emerald-950/50 border border-emerald-800/40 px-2 py-1 rounded-lg">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                    Live Supabase
-                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setAssignStockModalTargetLine(lines[0] || null);
+                    }}
+                    className="h-9 px-3 bg-[#171720] hover:bg-[#22222e] border-[#2c2c3a] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Vincular OP do Estoque</span>
+                  </Button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                 {lines.map(line => {
-                  const currentOp = line.currentOpId ? ops.find(o => o.id === line.currentOpId) : null;
+                  const lineOps = ops.filter(o => o.lineId === line.id);
                   
-                  const leaderId = Object.keys(rotations).find(k => rotations[k] === line.id);
-                  const leader = leaderId ? leaders.find(l => l.uid === leaderId) : null;
+                  // Resolução inteligente da OP ativa/atual
+                  const currentOp = (line.currentOpId ? ops.find(o => o.id === line.currentOpId) : null)
+                    || lineOps.find(o => o.status === 'in_progress')
+                    || lineOps.find(o => o.status === 'paused')
+                    || lineOps.filter(o => o.status === 'pending').sort((a, b) => a.sequence - b.sequence)[0]
+                    || null;
 
-                  const latestPauseEvent = line.status === 'paused' && currentOp 
+                  const queueOps = lineOps.filter(o => o.status === 'pending' && o.id !== currentOp?.id);
+
+                  // Resolução do Líder da Linha
+                  const leaderId = Object.keys(rotations).find(k => rotations[k] === line.id) || (rotations[line.id]);
+                  const leader = leaderId 
+                    ? leaders.find(l => l.uid === leaderId || (l.email && l.email.toLowerCase() === leaderId.toLowerCase()) || l.name?.toLowerCase() === leaderId.toLowerCase()) 
+                    : (leaders.find(l => (l as any).lineId === line.id) || null);
+
+                  const isLineProducing = line.status === 'active' || (currentOp && currentOp.status === 'in_progress');
+                  const isLinePaused = line.status === 'paused' || (currentOp && currentOp.status === 'paused');
+                  const isLineReady = currentOp && currentOp.status === 'pending';
+
+                  const latestPauseEvent = isLinePaused && currentOp 
                     ? events.find(e => e.opId === currentOp.id && e.type === 'PAUSED') 
                     : null;
 
@@ -743,32 +829,55 @@ WHERE email IN (
                     <div
                       key={line.id}
                       className={`bg-[#121216] border rounded-2xl p-5 flex flex-col justify-between transition-all ${
-                        line.status === 'active'
+                        isLineProducing
                           ? 'border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.05)]'
-                          : line.status === 'paused'
+                          : isLinePaused
                           ? 'border-amber-500/40 shadow-[0_0_15px_rgba(245,158,11,0.05)]'
+                          : isLineReady
+                          ? 'border-blue-500/30'
                           : 'border-[#242429]'
                       }`}
                     >
                       <div>
+                        {/* Header do Card da Linha */}
                         <div className="flex items-start justify-between pb-3 border-b border-[#1f1f24]">
                           <div>
                             <div className="flex items-center gap-2">
                               <h3 className="text-base font-black text-[#f4f4f5]">{line.name}</h3>
                               <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md ${
-                                line.status === 'active'
+                                isLineProducing
                                   ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
-                                  : line.status === 'paused'
+                                  : isLinePaused
                                   ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40'
+                                  : isLineReady
+                                  ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
                                   : 'bg-[#1e1e24] text-[#a1a1aa] border border-[#2c2c34]'
                               }`}>
-                                {line.status === 'active' ? 'Produzindo' : line.status === 'paused' ? 'Pausada' : 'Livre / Ociosa'}
+                                {isLineProducing ? 'Produzindo' : isLinePaused ? 'Pausada' : isLineReady ? 'OP Pronta' : 'Livre / Ociosa'}
                               </span>
                             </div>
-                            <p className="text-xs text-[#71717a] mt-0.5 flex items-center gap-1.5">
-                              <Users className="w-3 h-3 text-blue-400" />
-                              <span>Líder Responsável: <strong>{leader?.name || 'Aguardando alocação'}</strong></span>
-                            </p>
+
+                            {/* Líder Responsável com Dropdown de Alocação Rápida */}
+                            <div className="mt-1 flex items-center gap-1.5 text-xs text-[#71717a]">
+                              <Users className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                              <span className="font-semibold">Líder:</span>
+                              <select
+                                value={leader?.uid || leader?.email || ''}
+                                onChange={(e) => {
+                                  if (e.target.value) {
+                                    handleUpdateLeaderRotation(e.target.value, line.id);
+                                  }
+                                }}
+                                className="bg-[#181820] border border-[#282834] rounded px-1.5 py-0.5 text-[11px] font-bold text-[#f4f4f5] focus:outline-none focus:border-blue-500 cursor-pointer"
+                              >
+                                <option value="">{leader ? leader.name : 'Selecionar Líder...'}</option>
+                                {leaders.map(ldr => (
+                                  <option key={ldr.uid || ldr.email} value={ldr.uid || ldr.email}>
+                                    {ldr.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
 
                           {currentOp && (
@@ -777,46 +886,61 @@ WHERE email IN (
                               currentOp.priority === 'Alta' ? 'bg-orange-950/80 border border-orange-800/40 text-orange-400' :
                               'bg-[#1a1a20] text-[#a1a1aa]'
                             }`}>
-                              Prioridade {currentOp.priority}
+                              {currentOp.priority}
                             </span>
                           )}
                         </div>
 
-                        <div className="py-4">
+                        {/* Corpo: OP em Execução ou Pronta */}
+                        <div className="py-3.5">
                           {currentOp ? (
                             <div className="space-y-3">
                               <div className="flex items-start justify-between">
                                 <div>
-                                  <span className="text-[10px] text-blue-400 font-mono font-bold tracking-wider uppercase">
-                                    OP {currentOp.number}
-                                  </span>
-                                  <p className="text-sm font-bold text-[#f4f4f5] leading-snug mt-0.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs text-blue-400 font-mono font-black tracking-wider uppercase bg-blue-950/60 border border-blue-800/40 px-1.5 py-0.2 rounded">
+                                      OP #{currentOp.number}
+                                    </span>
+                                    {currentOp.lote && (
+                                      <span className="text-[10px] text-emerald-400 font-mono font-bold bg-emerald-950/50 px-1.5 py-0.2 rounded">
+                                        Lote: {currentOp.lote}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-sm font-bold text-[#f4f4f5] leading-snug mt-1">
                                     {currentOp.product}
                                   </p>
+                                  {currentOp.granel && (
+                                    <p className="text-[11px] font-mono text-amber-300/90 mt-0.5">
+                                      Granel: {currentOp.granel}
+                                    </p>
+                                  )}
                                 </div>
-                                <div className="text-right">
+                                <div className="text-right shrink-0">
                                   <span className="text-base font-mono font-bold text-[#f4f4f5]">
-                                    {currentOp.producedQuantity} <span className="text-xs text-[#71717a]">/ {currentOp.plannedQuantity} un</span>
+                                    {currentOp.producedQuantity.toLocaleString('pt-BR')} <span className="text-xs text-[#71717a]">/ {currentOp.plannedQuantity.toLocaleString('pt-BR')} un</span>
                                   </span>
                                 </div>
                               </div>
 
+                              {/* Barra de Progresso */}
                               <div>
                                 <div className="flex justify-between text-[10px] font-mono text-[#a1a1aa] mb-1">
-                                  <span>Progresso do Lote</span>
+                                  <span>Progresso da Produção</span>
                                   <span className="font-bold text-[#f4f4f5]">{progress}%</span>
                                 </div>
                                 <div className="w-full h-2.5 bg-[#1f1f25] rounded-full overflow-hidden">
                                   <div
                                     className={`h-full transition-all duration-500 ${
-                                      line.status === 'active' ? 'bg-emerald-500' : 'bg-amber-500'
+                                      isLineProducing ? 'bg-emerald-500' : isLinePaused ? 'bg-amber-500' : 'bg-blue-500'
                                     }`}
                                     style={{ width: `${progress}%` }}
                                   />
                                 </div>
                               </div>
 
-                              {line.status === 'paused' && (
+                              {/* Alerta de Parada se Pausada */}
+                              {isLinePaused && (
                                 <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-2.5 text-xs text-amber-200 flex items-start gap-2 mt-2">
                                   <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                                   <div>
@@ -833,19 +957,60 @@ WHERE email IN (
                               )}
                             </div>
                           ) : (
-                            <div className="py-6 text-center text-[#71717a] border border-dashed border-[#24242a] rounded-xl">
-                              <Package className="w-5 h-5 mx-auto mb-1.5 opacity-40" />
-                              <p className="text-xs font-semibold">Nenhuma OP em execução nesta linha</p>
-                              <p className="text-[10px] text-[#52525b]">Vincule ou inicie uma OP da fila de produção</p>
+                            <div className="py-5 text-center text-[#71717a] border border-dashed border-[#24242a] rounded-xl bg-[#0e0e12]">
+                              <Package className="w-5 h-5 mx-auto mb-1 opacity-40" />
+                              <p className="text-xs font-semibold text-[#a1a1aa]">Nenhuma OP ativa nesta linha</p>
+                              <p className="text-[10px] text-[#52525b] mt-0.5">Vincule uma OP do estoque abaixo</p>
                             </div>
                           )}
                         </div>
+
+                        {/* Fila de Espera desta Linha */}
+                        {queueOps.length > 0 && (
+                          <div className="mt-2 pt-2.5 border-t border-[#1e1e24] space-y-1.5">
+                            <div className="flex items-center justify-between text-[11px] font-bold text-[#a1a1aa]">
+                              <span className="flex items-center gap-1 text-blue-400">
+                                <Layers className="w-3 h-3" /> Fila da Linha ({queueOps.length})
+                              </span>
+                            </div>
+                            <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                              {queueOps.map(qOp => (
+                                <div key={qOp.id} className="bg-[#0e0e12] border border-[#1f1f26] p-2 rounded-lg flex items-center justify-between gap-2 text-xs">
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-mono font-bold text-[10px] text-blue-400">OP #{qOp.number}</span>
+                                      <span className="text-[#d4d4d8] font-medium text-[11px] truncate max-w-[140px]">{qOp.product}</span>
+                                    </div>
+                                    <span className="text-[10px] text-[#71717a] font-mono">{qOp.plannedQuantity.toLocaleString('pt-BR')} un</span>
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => handleStartOP(qOp)}
+                                    className="h-6 px-2 bg-emerald-700 hover:bg-emerald-600 text-white text-[10px] font-bold rounded flex items-center gap-1 shrink-0"
+                                  >
+                                    <Play className="w-2.5 h-2.5" /> Iniciar
+                                  </Button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
 
-                      <div className="pt-3 border-t border-[#1f1f24] flex items-center justify-between gap-2">
+                      {/* Botões de Ação na Linha */}
+                      <div className="pt-3 mt-3 border-t border-[#1f1f24] flex items-center justify-between gap-2 flex-wrap">
                         {currentOp ? (
                           <>
-                            {line.status === 'active' ? (
+                            {currentOp.status === 'pending' ? (
+                              <Button
+                                size="sm"
+                                onClick={() => handleStartOP(currentOp)}
+                                className="flex-1 h-8 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 shadow-md shadow-emerald-950/40"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                <span>Iniciar Produção</span>
+                              </Button>
+                            ) : isLineProducing ? (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -853,7 +1018,7 @@ WHERE email IN (
                                 className="h-8 bg-[#18181e] hover:bg-amber-950/40 border-amber-800/40 text-amber-300 text-xs font-bold rounded-lg flex items-center gap-1.5"
                               >
                                 <Pause className="w-3.5 h-3.5" />
-                                <span>Pausar Linha</span>
+                                <span>Pausar</span>
                               </Button>
                             ) : (
                               <Button
@@ -862,33 +1027,54 @@ WHERE email IN (
                                 className="h-8 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
                               >
                                 <Play className="w-3.5 h-3.5" />
-                                <span>Retomar Linha</span>
+                                <span>Retomar</span>
+                              </Button>
+                            )}
+
+                            {currentOp.status !== 'pending' && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleFinishOP(currentOp)}
+                                className="h-8 bg-[#18181e] hover:bg-[#22222a] border-[#2c2c35] text-[#d4d4d8] text-xs font-bold rounded-lg flex items-center gap-1.5"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>Finalizar</span>
                               </Button>
                             )}
 
                             <Button
                               size="sm"
-                              variant="outline"
-                              onClick={() => handleFinishOP(currentOp)}
-                              className="h-8 bg-[#18181e] hover:bg-[#22222a] border-[#2c2c35] text-[#d4d4d8] text-xs font-bold rounded-lg flex items-center gap-1.5"
+                              variant="ghost"
+                              onClick={() => setAssignStockModalTargetLine(line)}
+                              className="h-8 px-2 text-[#71717a] hover:text-blue-400 text-xs rounded-lg flex items-center gap-1"
+                              title="Adicionar mais OPs do Estoque a esta linha"
                             >
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Finalizar OP</span>
+                              <Plus className="w-3 h-3" />
+                              <span>+ OP</span>
                             </Button>
                           </>
                         ) : (
-                          <div className="w-full flex items-center justify-between">
-                            <span className="text-[10px] text-[#71717a]">Disponível para novos lotes</span>
+                          <div className="w-full flex items-center justify-between gap-2">
                             <Button
                               size="sm"
+                              onClick={() => setAssignStockModalTargetLine(line)}
+                              className="flex-1 h-8 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 shadow-md shadow-blue-950/40"
+                            >
+                              <Layers className="w-3.5 h-3.5" />
+                              <span>Vincular OP do Estoque</span>
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
                               onClick={() => {
                                 setNewOpLineId(line.id);
                                 setShowNewOpModal(true);
                               }}
-                              className="h-8 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg flex items-center gap-1"
+                              className="h-8 px-2.5 bg-[#171720] hover:bg-[#22222e] border-[#2a2a38] text-[#a1a1aa] hover:text-white text-xs rounded-lg"
+                              title="Criar nova OP manual para esta linha"
                             >
                               <Plus className="w-3.5 h-3.5" />
-                              <span>Criar OP para Linha</span>
                             </Button>
                           </div>
                         )}
@@ -1298,6 +1484,7 @@ WHERE email IN (
                     <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1 custom-scrollbar">
                       {leaders.map(ldr => {
                         const currentLineId = rotations[ldr.uid] || rotations[ldr.email] || 'line-1';
+                        const isFirstAccess = ldr.status === 'first_access' || ldr.mustChangePassword;
                         return (
                           <div key={ldr.uid || ldr.email} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                             <div className="flex items-center gap-3">
@@ -1307,15 +1494,35 @@ WHERE email IN (
                               <div>
                                 <div className="flex items-center gap-2">
                                   <p className="text-sm font-bold text-[#f4f4f5]">{ldr.name}</p>
-                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                    ldr.status === 'active'
-                                      ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
-                                      : 'bg-amber-950/60 text-amber-400 border border-amber-800/40'
-                                  }`}>
-                                    {ldr.status === 'active' ? 'Ativo' : 'Pendente'}
-                                  </span>
+                                  {isFirstAccess ? (
+                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1">
+                                      <KeyRound className="w-2.5 h-2.5" />
+                                      1º Acesso Pendente
+                                    </span>
+                                  ) : (
+                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                      ldr.status === 'active'
+                                        ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
+                                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                                    }`}>
+                                      {ldr.status === 'active' ? 'Ativo' : 'Pendente'}
+                                    </span>
+                                  )}
                                 </div>
-                                <p className="text-[11px] text-[#71717a]">{ldr.email}</p>
+                                <p className="text-[11px] text-[#71717a] flex items-center gap-2 mt-0.5">
+                                  <span>{ldr.email}</span>
+                                  {isFirstAccess && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCopyLeaderCredentials(ldr)}
+                                      className="text-[10px] text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-0.5"
+                                      title="Copiar e-mail e senha padrão"
+                                    >
+                                      <Copy className="w-2.5 h-2.5" />
+                                      Copiar Acesso
+                                    </button>
+                                  )}
+                                </p>
                               </div>
                             </div>
 
@@ -1574,18 +1781,39 @@ WHERE email IN (
                               </td>
 
                               <td className="py-3.5 px-4">
-                                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                                  isActive
-                                    ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
-                                    : 'bg-red-950/80 text-red-400 border border-red-800/40'
-                                }`}>
-                                  <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                                  <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
-                                </span>
+                                {(user.status === 'first_access' || user.mustChangePassword) ? (
+                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit bg-amber-950/80 text-amber-300 border border-amber-800/40">
+                                    <KeyRound className="w-3 h-3 text-amber-400" />
+                                    <span>1º Acesso</span>
+                                  </span>
+                                ) : (
+                                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
+                                    isActive
+                                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
+                                      : 'bg-red-950/80 text-red-400 border border-red-800/40'
+                                  }`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                                    <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
+                                  </span>
+                                )}
                               </td>
 
                               <td className="py-3.5 px-4 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
+                                  {/* Botão Copiar Acesso Inicial se 1º acesso */}
+                                  {(user.status === 'first_access' || user.mustChangePassword) && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => handleCopyLeaderCredentials(user)}
+                                      className="h-7 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
+                                      title="Copiar e-mail e senha padrão"
+                                    >
+                                      <Copy className="w-3 h-3" />
+                                      <span>Copiar Acesso</span>
+                                    </Button>
+                                  )}
+
                                   {/* Botão Promover / Rebaixar Cargo */}
                                   {!isCoordinator ? (
                                     <Button
@@ -2331,7 +2559,7 @@ WHERE email IN (
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-[#f4f4f5]">Cadastrar Novo Líder</h3>
-                  <p className="text-[11px] text-[#71717a]">Adicionar líder à escala de produção</p>
+                  <p className="text-[11px] text-[#71717a]">Gere e-mail automático e senha padrão de 1º acesso</p>
                 </div>
               </div>
               <button
@@ -2346,28 +2574,63 @@ WHERE email IN (
             {/* Form */}
             <form onSubmit={handleCreateLeader} className="p-5 space-y-4">
               <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa]">Nome Completo</Label>
+                <Label className="text-xs font-semibold text-[#a1a1aa]">Nome Completo do Líder</Label>
                 <Input
                   required
                   placeholder="Ex: Carlos Mendes"
                   value={newLeaderName}
-                  onChange={(e) => setNewLeaderName(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setNewLeaderName(val);
+                    if (isAutoEmail) {
+                      setNewLeaderEmail(generateLeaderEmail(val));
+                    }
+                  }}
                   className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
                 />
               </div>
 
               <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa]">E-mail Corporativo</Label>
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-semibold text-[#a1a1aa]">E-mail Corporativo de Acesso</Label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAutoEmail(true);
+                      setNewLeaderEmail(generateLeaderEmail(newLeaderName));
+                    }}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 font-semibold underline flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-2.5 h-2.5" />
+                    Gerar Automático
+                  </button>
+                </div>
                 <Input
                   required
                   type="email"
-                  placeholder="Ex: carlos.mendes@empresa.com"
+                  placeholder="carlos.mendes@fabrica.com"
                   value={newLeaderEmail}
-                  onChange={(e) => setNewLeaderEmail(e.target.value)}
+                  onChange={(e) => {
+                    setIsAutoEmail(false);
+                    setNewLeaderEmail(e.target.value);
+                  }}
                   className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
                 />
-                <p className="text-[10px] text-[#71717a]">
-                  O líder poderá fazer login imediatamente com este e-mail.
+              </div>
+
+              {/* Informação sobre Senha Padrão & 1º Acesso */}
+              <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3.5 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                    <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+                    Senha Padrão Inicial:
+                  </span>
+                  <span className="font-mono font-bold bg-amber-900/60 text-amber-200 px-2 py-0.5 rounded border border-amber-700/50">
+                    {DEFAULT_LEADER_PASSWORD}
+                  </span>
+                </div>
+                <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                  No primeiro acesso, o sistema exigirá que o líder defina uma nova senha pessoal definitiva de sua escolha.
                 </p>
               </div>
 
@@ -2422,12 +2685,97 @@ WHERE email IN (
                   ) : (
                     <>
                       <Check className="w-3.5 h-3.5" />
-                      <span>Confirmar Cadastro</span>
+                      <span>Criar Acesso do Líder</span>
                     </>
                   )}
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CREDENCIAIS CRIADAS (PRIMEIRO ACESSO) */}
+      {createdCredentialsModalData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[#121217] border border-emerald-800/40 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-[#222228] bg-emerald-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f4f4f5]">Líder Cadastrado com Sucesso!</h3>
+                  <p className="text-[11px] text-[#71717a]">Credenciais geradas para primeiro acesso</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setCreatedCredentialsModalData(null)}
+                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Card de Credenciais */}
+              <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                  <span className="text-[#71717a] font-semibold">Nome do Líder:</span>
+                  <span className="font-bold text-[#f4f4f5]">{createdCredentialsModalData.name}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                  <span className="text-[#71717a] font-semibold">E-mail de Login:</span>
+                  <span className="font-mono font-bold text-blue-400">{createdCredentialsModalData.email}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                  <span className="text-[#71717a] font-semibold">Senha Padrão:</span>
+                  <span className="font-mono font-bold text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40">
+                    {createdCredentialsModalData.password}
+                  </span>
+                </div>
+
+                {createdCredentialsModalData.lineName && (
+                  <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                    <span className="text-[#71717a] font-semibold">Linha Alocada:</span>
+                    <span className="font-bold text-emerald-400">{createdCredentialsModalData.lineName}</span>
+                  </div>
+                )}
+
+                <div className="pt-1 text-[11px] text-[#a1a1aa] flex items-start gap-2">
+                  <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    No 1º acesso com esta senha padrão, o líder será automaticamente direcionado para escolher sua nova senha pessoal.
+                  </span>
+                </div>
+              </div>
+
+              {/* Botões de Ação */}
+              <div className="space-y-2 pt-2 border-t border-[#222228]">
+                <Button
+                  onClick={() => {
+                    const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${createdCredentialsModalData.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${createdCredentialsModalData.email}\n🔑 *Senha Padrão:* ${createdCredentialsModalData.password}\n\n⚠️ *Atenção:* No seu primeiro acesso, você definirá sua nova senha pessoal definitiva.`;
+                    navigator.clipboard.writeText(text);
+                    showToast('Dados de acesso copiados para a área de transferência!');
+                  }}
+                  className="w-full h-10 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30"
+                >
+                  <Copy className="w-4 h-4" />
+                  <span>Copiar Credenciais para Enviar ao Líder</span>
+                </Button>
+
+                <Button
+                  variant="ghost"
+                  onClick={() => setCreatedCredentialsModalData(null)}
+                  className="w-full h-9 text-xs text-[#a1a1aa] hover:text-white"
+                >
+                  Fechar
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -2513,6 +2861,16 @@ WHERE email IN (
         lines={lines}
         allOps={ops}
         onSave={handleSaveAssignment}
+      />
+
+      {/* MODAL DE VINCULAR OP DO ESTOQUE À LINHA */}
+      <AssignStockOpToLineModal
+        isOpen={Boolean(assignStockModalTargetLine)}
+        onClose={() => setAssignStockModalTargetLine(null)}
+        targetLine={assignStockModalTargetLine}
+        ops={ops}
+        onAssignAndStart={handleAssignAndStart}
+        onAssignToQueue={handleAssignToQueue}
       />
 
     </div>

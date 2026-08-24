@@ -1,5 +1,28 @@
-import { supabase } from '../lib/supabase';
+import { createClient } from '@supabase/supabase-js';
+import { supabase, supabaseUrl, supabaseAnonKey } from '../lib/supabase';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
+
+export const DEFAULT_LEADER_PASSWORD = 'Lider@123';
+
+/**
+ * Gera um e-mail corporativo padronizado a partir do nome completo do líder
+ * Ex: "Carlos Alberto da Silva" -> "carlos.silva@fabrica.com"
+ */
+export function generateLeaderEmail(name: string, domain = 'fabrica.com'): string {
+  if (!name || !name.trim()) return '';
+  const clean = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (clean.length === 0) return '';
+  if (clean.length === 1) return `${clean[0]}@${domain}`;
+  return `${clean[0]}.${clean[clean.length - 1]}@${domain}`;
+}
 
 // Storage keys for persistent local storage fallback
 const STORAGE_KEYS = {
@@ -143,13 +166,16 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
 
     if (data && !error) {
       const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && data.cargo.toLowerCase().includes('coordenador'));
+      const isFirstAccess = data.must_change_password === true || data.status === 'first_access' || (foundLocal?.mustChangePassword === true);
       const profile: UserProfile = {
         uid: data.id,
         email: data.email,
         name: data.name || data.email?.split('@')[0] || 'Usuário',
         role: isCoord ? 'coordinator' : 'leader',
         cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
-        status: data.status || 'active',
+        status: isFirstAccess ? 'first_access' : (data.status || 'active'),
+        mustChangePassword: isFirstAccess,
+        defaultPassword: isFirstAccess ? (foundLocal?.defaultPassword || DEFAULT_LEADER_PASSWORD) : undefined,
         createdAt: data.created_at || new Date().toISOString(),
       };
       
@@ -184,13 +210,17 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
     if (data && data.length > 0 && !error) {
       const remoteUsers: UserProfile[] = data.map((d: any) => {
         const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && d.cargo.toLowerCase().includes('coordenador'));
+        const localMatch = inMemoryProfiles.find(p => p.uid === d.id || (d.email && p.email?.toLowerCase() === d.email.toLowerCase()));
+        const isFirstAccess = d.must_change_password === true || d.status === 'first_access' || (localMatch?.mustChangePassword === true);
         return {
           uid: String(d.id || d.uid || `usr-${d.email}`),
           email: d.email || '',
           name: d.name || d.email?.split('@')[0] || 'Colaborador',
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
-          status: (d.status as 'active' | 'inactive' | 'pending') || 'active',
+          status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
+          mustChangePassword: isFirstAccess,
+          defaultPassword: isFirstAccess ? (localMatch?.defaultPassword || DEFAULT_LEADER_PASSWORD) : undefined,
           createdAt: d.created_at || new Date().toISOString(),
         };
       });
@@ -303,12 +333,17 @@ export const preAuthorizeUser = async (data: {
   role: 'coordinator' | 'leader';
   cargo?: string;
   lineId?: string;
+  mustChangePassword?: boolean;
+  defaultPassword?: string;
 }): Promise<boolean> => {
   try {
     const email = data.email.trim().toLowerCase();
     const name = data.name.trim();
     const role = data.role;
     const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
+    const isFirstAccess = data.mustChangePassword !== false;
+    const defaultPassword = data.defaultPassword || DEFAULT_LEADER_PASSWORD;
+
     const generatedId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -323,7 +358,9 @@ export const preAuthorizeUser = async (data: {
       name,
       role,
       cargo,
-      status: 'active',
+      status: isFirstAccess ? 'first_access' : 'active',
+      mustChangePassword: isFirstAccess,
+      defaultPassword: isFirstAccess ? defaultPassword : undefined,
       createdAt: existingLocalIdx !== -1 ? inMemoryProfiles[existingLocalIdx].createdAt : new Date().toISOString(),
     };
 
@@ -343,7 +380,40 @@ export const preAuthorizeUser = async (data: {
       }
     }
 
-    // 3. Sync with Supabase profiles table
+    // 3. Register user in Supabase Auth via ephemeral client so they can log in directly
+    if (supabaseUrl && supabaseAnonKey) {
+      try {
+        const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+          auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+            detectSessionInUrl: false,
+          },
+        });
+
+        const { data: signUpData, error: authSignUpErr } = await ephemeralClient.auth.signUp({
+          email,
+          password: defaultPassword,
+          options: {
+            data: {
+              name,
+              role,
+              cargo,
+              must_change_password: isFirstAccess,
+            },
+          },
+        });
+
+        if (!authSignUpErr && signUpData.user?.id) {
+          userObj.uid = signUpData.user.id;
+          persistProfiles();
+        }
+      } catch (authErr) {
+        console.warn('Registro no Auth Supabase via cliente temporário:', authErr);
+      }
+    }
+
+    // 4. Sync with Supabase profiles table
     try {
       const { data: existingUser } = await supabase
         .from('profiles')
@@ -357,22 +427,35 @@ export const preAuthorizeUser = async (data: {
 
         const { error: updateErr } = await supabase
           .from('profiles')
-          .update({ role, name, cargo, status: 'active' })
+          .update({ 
+            role, 
+            name, 
+            cargo, 
+            status: isFirstAccess ? 'first_access' : 'active',
+            must_change_password: isFirstAccess,
+          })
           .eq('id', existingUser.id);
 
         if (updateErr) {
-          await supabase.from('profiles').update({ role, name, cargo }).eq('email', email);
+          await supabase.from('profiles').update({ 
+            role, 
+            name, 
+            cargo,
+            status: isFirstAccess ? 'first_access' : 'active',
+            must_change_password: isFirstAccess,
+          }).eq('email', email);
         }
         return true;
       }
 
       const payload: any = {
-        id: generatedId,
+        id: userObj.uid || generatedId,
         email,
         name,
         role,
         cargo,
-        status: 'active',
+        status: isFirstAccess ? 'first_access' : 'active',
+        must_change_password: isFirstAccess,
         created_at: new Date().toISOString(),
       };
 
@@ -386,7 +469,14 @@ export const preAuthorizeUser = async (data: {
         if (upsertErr) {
           await supabase
             .from('profiles')
-            .upsert({ email, name, role, cargo, status: 'active' }, { onConflict: 'email' });
+            .upsert({ 
+              email, 
+              name, 
+              role, 
+              cargo, 
+              status: isFirstAccess ? 'first_access' : 'active',
+              must_change_password: isFirstAccess,
+            }, { onConflict: 'email' });
         }
       }
     } catch (dbErr) {
@@ -397,6 +487,72 @@ export const preAuthorizeUser = async (data: {
   } catch (err) {
     console.error('Erro ao pré-autorizar usuário:', err);
     return false;
+  }
+};
+
+/**
+ * Atualiza a senha no primeiro acesso e remove a flag de primeiro acesso
+ */
+export const completeFirstAccessPasswordChange = async (
+  uid: string,
+  newPassword: string
+): Promise<{ success: boolean; message?: string }> => {
+  try {
+    // 1. Atualizar cache e local storage imediatamente
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const target = inMemoryProfiles.find(u => u.uid === uid || (u.email && u.email.toLowerCase() === uid.toLowerCase()));
+    if (target) {
+      target.mustChangePassword = false;
+      target.status = 'active';
+      delete target.defaultPassword;
+      persistProfiles();
+    }
+
+    // 2. Atualizar senha no Supabase Auth
+    try {
+      const { error: authErr } = await supabase.auth.updateUser({
+        password: newPassword,
+        data: {
+          must_change_password: false,
+          status: 'active'
+        }
+      });
+      if (authErr) {
+        console.warn('Aviso ao atualizar senha no Supabase Auth:', authErr);
+      }
+    } catch (authE) {
+      console.warn('Exceção ao atualizar senha no Supabase Auth:', authE);
+    }
+
+    // 3. Atualizar status na tabela profiles do Supabase
+    try {
+      let { error: updateErr } = await supabase
+        .from('profiles')
+        .update({
+          status: 'active',
+          must_change_password: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', uid);
+
+      if (updateErr && target?.email) {
+        await supabase
+          .from('profiles')
+          .update({
+            status: 'active',
+            must_change_password: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('email', target.email);
+      }
+    } catch (dbErr) {
+      console.warn('Aviso ao atualizar status no profiles Supabase:', dbErr);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Erro ao concluir troca de senha do primeiro acesso:', err);
+    return { success: false, message: err?.message || 'Falha ao gravar nova senha.' };
   }
 };
 

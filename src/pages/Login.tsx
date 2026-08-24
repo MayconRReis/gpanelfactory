@@ -123,10 +123,38 @@ export function Login() {
         }
       } else {
         // Login / Entrada
-        const { error: signInErr } = await supabase.auth.signInWithPassword({
+        let { error: signInErr } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
+
+        // Fallback especial para líderes recém-criados com senha padrão
+        if (signInErr) {
+          const rawProfiles = (typeof window !== 'undefined' && window.localStorage)
+            ? JSON.parse(window.localStorage.getItem('SIG_PROD_PROFILES_STORAGE_V5') || '[]')
+            : [];
+          const matchedProfile = rawProfiles.find((p: any) => p.email?.toLowerCase() === email.trim().toLowerCase());
+
+          if (matchedProfile && (password === 'Lider@123' || password === matchedProfile.defaultPassword)) {
+            // Tenta criar e autenticar o líder automaticamente no primeiro acesso
+            const { error: fallbackSignUpErr } = await supabase.auth.signUp({
+              email: email.trim(),
+              password,
+              options: {
+                data: {
+                  name: matchedProfile.name,
+                  role: matchedProfile.role || 'leader',
+                  cargo: matchedProfile.cargo || 'Líder de Produção',
+                  must_change_password: true,
+                },
+              },
+            });
+
+            if (!fallbackSignUpErr) {
+              signInErr = null;
+            }
+          }
+        }
 
         if (signInErr) throw signInErr;
       }

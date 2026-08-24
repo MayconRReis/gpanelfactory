@@ -25,7 +25,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         let dbName: string | null = null;
         let dbCargo: string | null = null;
         let dbStatus: string = 'active';
+        let dbMustChange = false;
+        let dbDefaultPassword: string | undefined = undefined;
         let dbCreatedAt: string = new Date().toISOString();
+
+        // 0. Verifica se existe cache local persistido
+        try {
+          if (typeof window !== 'undefined' && window.localStorage) {
+            const rawStored = window.localStorage.getItem('SIG_PROD_PROFILES_STORAGE_V5');
+            if (rawStored) {
+              const parsed = JSON.parse(rawStored);
+              const match = parsed.find((p: any) => p.uid === user.id || (user.email && p.email?.toLowerCase() === user.email.toLowerCase()));
+              if (match) {
+                if (match.mustChangePassword || match.status === 'first_access') {
+                  dbMustChange = true;
+                }
+                if (match.defaultPassword) {
+                  dbDefaultPassword = match.defaultPassword;
+                }
+              }
+            }
+          }
+        } catch {
+          // ignora
+        }
 
         // 1. Tenta buscar pelo ID na tabela profiles
         try {
@@ -40,6 +63,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             dbName = profileById.name;
             dbCargo = profileById.cargo;
             dbStatus = profileById.status || 'active';
+            if (profileById.must_change_password === true || profileById.status === 'first_access') {
+              dbMustChange = true;
+            }
             dbCreatedAt = profileById.created_at || dbCreatedAt;
           }
         } catch (e) {
@@ -60,6 +86,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               dbName = dbName || profileByEmail.name;
               dbCargo = dbCargo || profileByEmail.cargo;
               dbStatus = profileByEmail.status || dbStatus;
+              if (profileByEmail.must_change_password === true || profileByEmail.status === 'first_access') {
+                dbMustChange = true;
+              }
               dbCreatedAt = profileByEmail.created_at || dbCreatedAt;
             }
           } catch (e) {
@@ -71,6 +100,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const metaRole = user.user_metadata?.role || user.app_metadata?.role;
         const metaCargo = user.user_metadata?.cargo;
         const metaName = user.user_metadata?.name;
+        if (user.user_metadata?.must_change_password === true || user.app_metadata?.must_change_password === true) {
+          dbMustChange = true;
+        }
 
         // Determina se é Coordenador
         const rawRole = String(dbRole || metaRole || '').toLowerCase().trim();
@@ -86,7 +118,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           role: finalRole,
           name: finalName,
           cargo: finalCargo,
-          status: (dbStatus as any) || 'active',
+          status: dbMustChange ? 'first_access' : ((dbStatus as any) || 'active'),
+          mustChangePassword: dbMustChange,
+          defaultPassword: dbDefaultPassword,
           createdAt: dbCreatedAt,
         };
 
@@ -102,7 +136,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               email: user.email,
               name: finalName,
               role: finalRole,
-              status: 'active',
+              status: dbMustChange ? 'first_access' : 'active',
+              must_change_password: dbMustChange,
               created_at: dbCreatedAt,
               updated_at: new Date().toISOString(),
             });
@@ -114,13 +149,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.warn('Sincronização de perfil Supabase:', err);
         if (mounted) {
           const isCoord = user.user_metadata?.role === 'coordinator';
+          const metaMustChange = user.user_metadata?.must_change_password === true;
           setProfile({
             uid: user.id,
             email: user.email || '',
             role: isCoord ? 'coordinator' : 'leader',
             name: user.user_metadata?.name || user.email?.split('@')[0] || 'Usuário',
             cargo: isCoord ? 'Coordenador Geral' : 'Líder de Produção',
-            status: 'active',
+            status: metaMustChange ? 'first_access' : 'active',
+            mustChangePassword: metaMustChange,
             createdAt: new Date().toISOString(),
           });
         }
