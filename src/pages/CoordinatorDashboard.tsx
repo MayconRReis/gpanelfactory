@@ -62,7 +62,7 @@ import {
   getRecentEvents, 
   getPauseReasons,
   resetProductionDatabase,
-  DEFAULT_LEADER_PASSWORD,
+  generateTemporaryPassword,
   generateLeaderEmail
 } from '../services/db';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
@@ -145,6 +145,10 @@ export function CoordinatorDashboard() {
     cargo: string;
     lineName?: string;
   } | null>(null);
+
+  // Modal: Excluir Colaborador
+  const [deleteUserModalData, setDeleteUserModalData] = useState<UserProfile | null>(null);
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
@@ -254,28 +258,35 @@ export function CoordinatorDashboard() {
       return;
     }
     const newStatus = user.status === 'inactive' ? 'active' : 'inactive';
-    const actionLabel = newStatus === 'active' ? 'Ativar acesso' : 'Bloquear / Inativar';
-
-    if (window.confirm(`Deseja ${actionLabel} de ${user.name} (${user.email})?`)) {
-      const ok = await updateUserStatus(user.uid || user.email, newStatus);
-      if (ok) {
-        showToast(`Status de ${user.name} alterado para ${newStatus === 'active' ? 'Ativo' : 'Inativo'}.`);
-        await loadData();
-      } else {
-        showToast('Falha ao atualizar status.', 'error');
-      }
+    const ok = await updateUserStatus(user.uid || user.email, newStatus);
+    if (ok) {
+      showToast(`Status de ${user.name} alterado para ${newStatus === 'active' ? 'Ativo' : 'Inativo'}.`);
+      await loadData();
+    } else {
+      showToast('Falha ao atualizar status.', 'error');
     }
   };
 
-  const handleDeleteUserRecord = async (user: UserProfile) => {
-    if (user.uid === profile?.uid) {
+  const handleOpenDeleteUserModal = (user: UserProfile) => {
+    if (user.uid === profile?.uid || (profile?.email && user.email?.toLowerCase() === profile.email.toLowerCase())) {
       showToast('Você não pode excluir seu próprio perfil.', 'error');
       return;
     }
-    if (window.confirm(`Deseja remover o registro do colaborador ${user.name} (${user.email})?`)) {
-      await deleteUserProfile(user.uid || user.email);
-      showToast(`Registro de ${user.name} removido.`);
+    setDeleteUserModalData(user);
+  };
+
+  const handleConfirmDeleteUser = async () => {
+    if (!deleteUserModalData) return;
+    setIsDeletingUser(true);
+    try {
+      await deleteUserProfile(deleteUserModalData.uid, deleteUserModalData.email);
+      showToast(`Colaborador ${deleteUserModalData.name} removido com sucesso.`);
+      setDeleteUserModalData(null);
       await loadData();
+    } catch (err: any) {
+      showToast(`Erro ao remover colaborador: ${err?.message || 'Falha na operação'}`, 'error');
+    } finally {
+      setIsDeletingUser(false);
     }
   };
 
@@ -492,8 +503,13 @@ WHERE email IN (
   };
 
   const handleCopyLeaderCredentials = (leader: UserProfile) => {
-    const pwd = leader.defaultPassword || DEFAULT_LEADER_PASSWORD;
-    const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${leader.email}\n🔑 *Senha Padrão Inicial:* ${pwd}\n\n⚠️ *Atenção:* No seu primeiro acesso, o sistema solicitará automaticamente a criação de uma nova senha pessoal de sua escolha.`;
+    // A senha temporária é salva no perfil do líder no momento da criação.
+    // Se não estiver disponível (líder criado antes desta versão), orienta o coordenador
+    // a deletar e recriar o acesso para gerar uma nova senha temporária.
+    const pwd = leader.defaultPassword;
+    const text = pwd
+      ? `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${leader.email}\n🔑 *Senha Temporária:* ${pwd}\n\n⚠️ *Atenção:* No seu primeiro acesso, o sistema solicitará automaticamente a criação de uma nova senha pessoal definitiva.`
+      : `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\n\n📧 *E-mail de Login:* ${leader.email}\n\n⚠️ Senha temporária não disponível. Solicite ao coordenador que recrie seu acesso para gerar uma nova senha.`;
     navigator.clipboard.writeText(text);
     showToast(`Credenciais de ${leader.name} copiadas para a área de transferência!`);
   };
@@ -508,6 +524,8 @@ WHERE email IN (
       return;
     }
     setIsSubmittingLeader(true);
+    // Gera uma senha temporária única para este líder — nunca reutilizamos a mesma para todos
+    const tempPassword = generateTemporaryPassword();
     try {
       const ok = await preAuthorizeUser({
         name,
@@ -516,7 +534,7 @@ WHERE email IN (
         cargo: newLeaderCargo.trim() || 'Líder de Produção',
         lineId: newLeaderLineId || undefined,
         mustChangePassword: true,
-        defaultPassword: DEFAULT_LEADER_PASSWORD,
+        defaultPassword: tempPassword,
       });
 
       if (ok) {
@@ -527,7 +545,7 @@ WHERE email IN (
         setCreatedCredentialsModalData({
           name,
           email,
-          password: DEFAULT_LEADER_PASSWORD,
+          password: tempPassword,
           cargo: newLeaderCargo.trim() || 'Líder de Produção',
           lineName: assignedLineObj?.name,
         });
@@ -1539,6 +1557,17 @@ WHERE email IN (
                                   </option>
                                 ))}
                               </select>
+
+                              {/* Botão Excluir Líder da Escala */}
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleOpenDeleteUserModal(ldr)}
+                                className="h-8 w-8 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors shrink-0"
+                                title="Excluir Líder"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </Button>
                             </div>
                           </div>
                         );
@@ -1879,13 +1908,13 @@ WHERE email IN (
                                     {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                                   </Button>
 
-                                  {/* Botão Excluir */}
+                                  {/* Botão Excluir Colaborador */}
                                   {!isSelf && (
                                     <Button
                                       size="sm"
                                       variant="ghost"
-                                      onClick={() => handleDeleteUserRecord(user)}
-                                      className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0"
+                                      onClick={() => handleOpenDeleteUserModal(user)}
+                                      className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
                                       title="Remover Colaborador"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
@@ -2185,8 +2214,8 @@ WHERE email IN (
                             <Button
                               size="sm"
                               variant="ghost"
-                              onClick={() => handleDeleteUserRecord(user)}
-                              className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0"
+                              onClick={() => handleOpenDeleteUserModal(user)}
+                              className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
                               title="Remover Colaborador"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -2618,19 +2647,14 @@ WHERE email IN (
                 />
               </div>
 
-              {/* Informação sobre Senha Padrão & 1º Acesso */}
+              {/* Informação sobre Senha Temporária & 1º Acesso */}
               <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3.5 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                    <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-                    Senha Padrão Inicial:
-                  </span>
-                  <span className="font-mono font-bold bg-amber-900/60 text-amber-200 px-2 py-0.5 rounded border border-amber-700/50">
-                    {DEFAULT_LEADER_PASSWORD}
-                  </span>
+                <div className="flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="font-bold text-amber-300">Senha Temporária Automática</span>
                 </div>
                 <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                  No primeiro acesso, o sistema exigirá que o líder defina uma nova senha pessoal definitiva de sua escolha.
+                  Uma senha temporária única será gerada automaticamente para este líder. Você poderá copiá-la após confirmar o cadastro. No primeiro acesso, o sistema exigirá a criação de uma senha pessoal definitiva.
                 </p>
               </div>
 
@@ -2872,6 +2896,102 @@ WHERE email IN (
         onAssignAndStart={handleAssignAndStart}
         onAssignToQueue={handleAssignToQueue}
       />
+
+      {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE COLABORADOR ---------------- */}
+      {deleteUserModalData && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-[#121217] border border-red-900/40 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+            
+            {/* Header */}
+            <div className="p-5 border-b border-[#222228] bg-red-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-red-600/20 border border-red-500/30 text-red-400 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
+                    Excluir Colaborador
+                  </h3>
+                  <p className="text-xs text-[#71717a] mt-0.5">
+                    Confirme a remoção definitiva do colaborador
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => !isDeletingUser && setDeleteUserModalData(null)}
+                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                disabled={isDeletingUser}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Conteúdo */}
+            <div className="p-5 space-y-4">
+              {/* Card de Detalhes do Usuário */}
+              <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                  <span className="text-[#71717a] font-semibold">Nome:</span>
+                  <span className="font-bold text-[#f4f4f5]">{deleteUserModalData.name}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
+                  <span className="text-[#71717a] font-semibold">E-mail:</span>
+                  <span className="font-mono text-blue-400 font-bold">{deleteUserModalData.email}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[#71717a] font-semibold">Função / Cargo:</span>
+                  <span className="text-[#d4d4d8] font-semibold">
+                    {deleteUserModalData.cargo || (deleteUserModalData.role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção')}
+                  </span>
+                </div>
+              </div>
+
+              {/* Mensagem de Aviso */}
+              <div className="bg-red-950/30 border border-red-900/40 p-3.5 rounded-xl flex items-start gap-2.5 text-xs text-red-200">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <p className="leading-relaxed">
+                  Tem certeza de que deseja remover permanentemente o colaborador <strong>{deleteUserModalData.name}</strong>? Essa ação revogará o acesso ao sistema, removerá sua escala e apagará o cadastro.
+                </p>
+              </div>
+
+              {/* Ações */}
+              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isDeletingUser}
+                  onClick={() => setDeleteUserModalData(null)}
+                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                >
+                  Cancelar
+                </Button>
+                
+                <Button
+                  disabled={isDeletingUser}
+                  onClick={handleConfirmDeleteUser}
+                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+                >
+                  {isDeletingUser ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Excluindo...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Sim, Excluir Colaborador</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

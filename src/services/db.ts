@@ -2,7 +2,36 @@ import { createClient } from '@supabase/supabase-js';
 import { supabase, supabaseUrl, supabaseAnonKey } from '../lib/supabase';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
 
-export const DEFAULT_LEADER_PASSWORD = 'Lider@123';
+/**
+ * Gera uma senha temporária segura para o primeiro acesso do líder.
+ * Nunca use uma senha fixa/hardcoded — cada usuário recebe uma senha única.
+ * Formato: 3 letras maiúsculas + 3 números + 2 caracteres especiais (ex: "XKP472#!")
+ */
+export function generateTemporaryPassword(): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // sem I e O para evitar confusão visual
+  const digits = '0123456789';
+  const special = '!@#$%&*';
+
+  const rand = (charset: string) =>
+    charset[crypto.getRandomValues(new Uint32Array(1))[0] % charset.length];
+
+  const parts = [
+    rand(upper), rand(upper), rand(upper),
+    rand(digits), rand(digits), rand(digits),
+    rand(special), rand(special),
+  ];
+
+  // Embaralha para não ter padrão previsível
+  for (let i = parts.length - 1; i > 0; i--) {
+    const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
+    [parts[i], parts[j]] = [parts[j], parts[i]];
+  }
+
+  return parts.join('');
+}
+
+/** @deprecated Use generateTemporaryPassword() — senha fixa removida por segurança. */
+export const DEFAULT_LEADER_PASSWORD = generateTemporaryPassword();
 
 /**
  * Gera um e-mail corporativo padronizado a partir do nome completo do líder
@@ -130,25 +159,39 @@ let inMemoryEvents: ProductionEvent[] = loadFromStorage<ProductionEvent[]>(STORA
 let inMemoryRotations: Record<string, string> = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, {});
 let inMemoryProfiles: UserProfile[] = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, []);
 
+function notifyStateChange() {
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem('SIG_PROD_LAST_SYNC', String(Date.now()));
+      window.dispatchEvent(new CustomEvent('sig_data_updated'));
+    } catch {}
+  }
+}
+
 // Helper to save current in-memory state
 function persistOps() {
   saveToStorage(STORAGE_KEYS.ops, inMemoryOps);
+  notifyStateChange();
 }
 
 function persistLines() {
   saveToStorage(STORAGE_KEYS.lines, inMemoryLines);
+  notifyStateChange();
 }
 
 function persistEvents() {
   saveToStorage(STORAGE_KEYS.events, inMemoryEvents);
+  notifyStateChange();
 }
 
 function persistRotations() {
   saveToStorage(STORAGE_KEYS.rotations, inMemoryRotations);
+  notifyStateChange();
 }
 
 export function persistProfiles() {
   saveToStorage(STORAGE_KEYS.profiles, inMemoryProfiles);
+  notifyStateChange();
 }
 
 // ---------------- PROFILES & LEADERS ----------------
@@ -175,7 +218,8 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
         status: isFirstAccess ? 'first_access' : (data.status || 'active'),
         mustChangePassword: isFirstAccess,
-        defaultPassword: isFirstAccess ? (foundLocal?.defaultPassword || DEFAULT_LEADER_PASSWORD) : undefined,
+        // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
+        defaultPassword: isFirstAccess ? (foundLocal?.defaultPassword || undefined) : undefined,
         createdAt: data.created_at || new Date().toISOString(),
       };
       
@@ -220,7 +264,8 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
-          defaultPassword: isFirstAccess ? (localMatch?.defaultPassword || DEFAULT_LEADER_PASSWORD) : undefined,
+          // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
+          defaultPassword: isFirstAccess ? (localMatch?.defaultPassword || undefined) : undefined,
           createdAt: d.created_at || new Date().toISOString(),
         };
       });
@@ -342,7 +387,8 @@ export const preAuthorizeUser = async (data: {
     const role = data.role;
     const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
     const isFirstAccess = data.mustChangePassword !== false;
-    const defaultPassword = data.defaultPassword || DEFAULT_LEADER_PASSWORD;
+    // Gera uma senha temporária única por usuário; nunca reutiliza a mesma senha para todos
+    const defaultPassword = data.defaultPassword || generateTemporaryPassword();
 
     const generatedId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
@@ -556,27 +602,43 @@ export const completeFirstAccessPasswordChange = async (
   }
 };
 
-export const deleteUserProfile = async (userId: string): Promise<boolean> => {
+export const deleteUserProfile = async (userId: string, userEmail?: string): Promise<boolean> => {
   try {
+    const targetEmail = (userEmail || userId).toLowerCase();
+
     // 1. Remove from local storage
     inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-    inMemoryProfiles = inMemoryProfiles.filter(u => u.uid !== userId && u.email?.toLowerCase() !== userId.toLowerCase());
+    inMemoryProfiles = inMemoryProfiles.filter(u => 
+      u.uid !== userId && 
+      (!u.email || u.email.toLowerCase() !== targetEmail)
+    );
     persistProfiles();
 
     // Remove from rotations
     inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
     delete inMemoryRotations[userId];
+    if (userEmail) delete inMemoryRotations[userEmail];
+    if (targetEmail) delete inMemoryRotations[targetEmail];
     persistRotations();
 
-    // 2. Remove from Supabase
-    const { error } = await supabase
-      .from('profiles')
-      .delete()
-      .eq('id', userId);
+    // 2. Remove from Supabase profiles and leader_rotations
+    try {
+      await supabase.from('leader_rotations').delete().eq('leader_id', userId);
+    } catch {}
 
-    if (error) {
-      await supabase.from('profiles').delete().eq('email', userId);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', userId);
+
+      if (error || targetEmail) {
+        await supabase.from('profiles').delete().eq('email', targetEmail);
+      }
+    } catch (e) {
+      console.warn('Erro ao excluir no Supabase:', e);
     }
+
     return true;
   } catch (err) {
     console.error('Erro ao remover perfil:', err);
@@ -949,34 +1011,110 @@ export const getActiveOP = async (lineId: string): Promise<ProductionOrder | nul
 };
 
 // ---------------- ROTATIONS & ASSIGNMENTS ----------------
-export const getLeaderRotation = async (leaderId: string): Promise<string | null> => {
+export const getLeaderRotation = async (
+  leaderId: string,
+  leaderEmail?: string,
+  leaderName?: string
+): Promise<string | null> => {
   inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
+  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
 
-  try {
-    let { data, error } = await supabase
-      .from('weekly_rotations')
-      .select('line_id')
-      .eq('leader_id', leaderId)
-      .maybeSingle();
+  const cleanEmail = (leaderEmail || '').trim().toLowerCase();
+  const cleanName = (leaderName || '').trim().toLowerCase();
 
-    if (!data || error) {
-      const res = await supabase
-        .from('rotations')
-        .select('line_id')
-        .eq('leader_id', leaderId)
-        .maybeSingle();
-      data = res.data;
+  // 1. Direct lookup in inMemoryRotations by ID, email, or lowercased email
+  if (leaderId && inMemoryRotations[leaderId]) {
+    return inMemoryRotations[leaderId];
+  }
+  if (cleanEmail && inMemoryRotations[cleanEmail]) {
+    return inMemoryRotations[cleanEmail];
+  }
+  if (leaderEmail && inMemoryRotations[leaderEmail]) {
+    return inMemoryRotations[leaderEmail];
+  }
+
+  // 2. Cross-reference profiles to see if another key matches this user
+  const matchingProfile = inMemoryProfiles.find(p => 
+    (leaderId && p.uid === leaderId) || 
+    (cleanEmail && p.email && p.email.toLowerCase() === cleanEmail) ||
+    (cleanName && p.name && p.name.toLowerCase() === cleanName)
+  );
+
+  if (matchingProfile) {
+    if (matchingProfile.uid && inMemoryRotations[matchingProfile.uid]) {
+      return inMemoryRotations[matchingProfile.uid];
     }
+    if (matchingProfile.email && inMemoryRotations[matchingProfile.email.toLowerCase()]) {
+      return inMemoryRotations[matchingProfile.email.toLowerCase()];
+    }
+    if (matchingProfile.email && inMemoryRotations[matchingProfile.email]) {
+      return inMemoryRotations[matchingProfile.email];
+    }
+    if ((matchingProfile as any).lineId) {
+      return (matchingProfile as any).lineId;
+    }
+  }
 
-    if (data?.line_id) {
-      inMemoryRotations[leaderId] = String(data.line_id);
-      persistRotations();
-      return String(data.line_id);
+  // 3. Search key-value entries in inMemoryRotations for any email / uid substring match
+  for (const [key, lineVal] of Object.entries(inMemoryRotations)) {
+    if (cleanEmail && key.toLowerCase() === cleanEmail) return lineVal;
+    if (cleanEmail && (key.toLowerCase().includes(cleanEmail) || cleanEmail.includes(key.toLowerCase()))) return lineVal;
+    if (leaderId && key === leaderId) return lineVal;
+  }
+
+  // 4. Query Supabase across multiple candidate IDs
+  try {
+    const candidateIds = [
+      leaderId,
+      cleanEmail,
+      leaderEmail,
+      matchingProfile?.uid,
+      matchingProfile?.email?.toLowerCase(),
+      matchingProfile?.email,
+    ].filter(Boolean) as string[];
+
+    const uniqueCandidates = Array.from(new Set(candidateIds));
+
+    for (const cId of uniqueCandidates) {
+      let { data, error } = await supabase
+        .from('weekly_rotations')
+        .select('line_id')
+        .eq('leader_id', cId)
+        .maybeSingle();
+
+      if (!data || error) {
+        const res = await supabase
+          .from('rotations')
+          .select('line_id')
+          .eq('leader_id', cId)
+          .maybeSingle();
+        data = res.data;
+      }
+
+      if (data?.line_id) {
+        const resolvedLine = String(data.line_id);
+        inMemoryRotations[leaderId] = resolvedLine;
+        if (cleanEmail) inMemoryRotations[cleanEmail] = resolvedLine;
+        if (matchingProfile?.uid) inMemoryRotations[matchingProfile.uid] = resolvedLine;
+        persistRotations();
+        return resolvedLine;
+      }
     }
   } catch (err) {
     console.warn('Consulta de rotação no Supabase:', err);
   }
-  return inMemoryRotations[leaderId] || 'line-1';
+
+  // 5. Fallback: Check if an active / in_progress OP has this leader assigned
+  const foundOp = inMemoryOps.find(o => 
+    (leaderId && o.leaderId === leaderId) || 
+    (cleanEmail && o.leaderId && o.leaderId.toLowerCase() === cleanEmail) ||
+    (matchingProfile?.uid && o.leaderId === matchingProfile.uid)
+  );
+  if (foundOp?.lineId) {
+    return foundOp.lineId;
+  }
+
+  return inMemoryRotations[leaderId] || inMemoryRotations[cleanEmail] || null;
 };
 
 export const getAllRotations = async (): Promise<Record<string, string>> => {
@@ -993,7 +1131,10 @@ export const getAllRotations = async (): Promise<Record<string, string>> => {
     if (data && data.length > 0 && !error) {
       const map: Record<string, string> = { ...inMemoryRotations };
       data.forEach((r: any) => {
-        if (r.leader_id && r.line_id) map[String(r.leader_id)] = String(r.line_id);
+        if (r.leader_id && r.line_id) {
+          map[String(r.leader_id)] = String(r.line_id);
+          map[String(r.leader_id).toLowerCase()] = String(r.line_id);
+        }
       });
       inMemoryRotations = map;
       persistRotations();
@@ -1005,21 +1146,65 @@ export const getAllRotations = async (): Promise<Record<string, string>> => {
   return inMemoryRotations;
 };
 
-export const saveLeaderRotation = async (leaderId: string, lineId: string): Promise<void> => {
+export const saveLeaderRotation = async (
+  leaderId: string, 
+  lineId: string,
+  leaderEmail?: string,
+  leaderName?: string
+): Promise<void> => {
+  inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
+  
   inMemoryRotations[leaderId] = lineId;
+  if (leaderEmail) {
+    inMemoryRotations[leaderEmail] = lineId;
+    inMemoryRotations[leaderEmail.toLowerCase()] = lineId;
+  }
+
+  // Update in profiles if found
+  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+  const targetProf = inMemoryProfiles.find(p => 
+    p.uid === leaderId || 
+    (leaderEmail && p.email?.toLowerCase() === leaderEmail.toLowerCase()) ||
+    (leaderName && p.name?.toLowerCase() === leaderName.toLowerCase())
+  );
+
+  if (targetProf) {
+    (targetProf as any).lineId = lineId;
+    if (targetProf.uid) inMemoryRotations[targetProf.uid] = lineId;
+    if (targetProf.email) {
+      inMemoryRotations[targetProf.email] = lineId;
+      inMemoryRotations[targetProf.email.toLowerCase()] = lineId;
+    }
+    persistProfiles();
+  }
+
   persistRotations();
 
-  try {
-    const payload = {
-      leader_id: leaderId,
-      line_id: lineId,
-      updated_at: new Date().toISOString(),
-    };
+  // Notify listeners via storage event or custom event for multi-tab / real-time sync
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('sig_rotations_updated', { 
+      detail: { leaderId, lineId, leaderEmail: leaderEmail || targetProf?.email } 
+    }));
+    window.dispatchEvent(new CustomEvent('sig_data_updated'));
+  }
 
-    await Promise.any([
-      supabase.from('weekly_rotations').upsert(payload, { onConflict: 'leader_id' }),
-      supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
-    ]);
+  try {
+    const payloads = [
+      { leader_id: leaderId, line_id: lineId, updated_at: new Date().toISOString() },
+    ];
+    if (leaderEmail && leaderEmail.toLowerCase() !== leaderId.toLowerCase()) {
+      payloads.push({ leader_id: leaderEmail.toLowerCase(), line_id: lineId, updated_at: new Date().toISOString() });
+    }
+    if (targetProf?.uid && targetProf.uid !== leaderId) {
+      payloads.push({ leader_id: targetProf.uid, line_id: lineId, updated_at: new Date().toISOString() });
+    }
+
+    for (const payload of payloads) {
+      await Promise.allSettled([
+        supabase.from('weekly_rotations').upsert(payload, { onConflict: 'leader_id' }),
+        supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
+      ]);
+    }
   } catch (err) {
     console.warn('Salvar escala de líder no Supabase:', err);
   }

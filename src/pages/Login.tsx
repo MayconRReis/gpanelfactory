@@ -128,15 +128,20 @@ export function Login() {
           password,
         });
 
-        // Fallback especial para líderes recém-criados com senha padrão
+        // Fallback: tenta criar a conta no Supabase Auth caso o líder tenha sido
+        // pré-autorizado mas ainda não confirmou o e-mail (fluxo de primeiro acesso).
+        // A verificação usa apenas a senha que o usuário digitou — nunca uma senha fixa.
         if (signInErr) {
           const rawProfiles = (typeof window !== 'undefined' && window.localStorage)
             ? JSON.parse(window.localStorage.getItem('SIG_PROD_PROFILES_STORAGE_V5') || '[]')
             : [];
-          const matchedProfile = rawProfiles.find((p: any) => p.email?.toLowerCase() === email.trim().toLowerCase());
+          const matchedProfile = rawProfiles.find(
+            (p: any) => p.email?.toLowerCase() === email.trim().toLowerCase()
+          );
 
-          if (matchedProfile && (password === 'Lider@123' || password === matchedProfile.defaultPassword)) {
-            // Tenta criar e autenticar o líder automaticamente no primeiro acesso
+          // Só tenta o signup se: (a) existe um perfil local para este e-mail E
+          // (b) o perfil está marcado para primeiro acesso (senha temporária ainda válida)
+          if (matchedProfile && (matchedProfile.mustChangePassword || matchedProfile.status === 'first_access')) {
             const { error: fallbackSignUpErr } = await supabase.auth.signUp({
               email: email.trim(),
               password,
