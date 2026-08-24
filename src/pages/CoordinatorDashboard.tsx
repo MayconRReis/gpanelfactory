@@ -59,7 +59,8 @@ import {
   resumeOP, 
   finishOP, 
   getRecentEvents, 
-  getPauseReasons 
+  getPauseReasons,
+  resetProductionDatabase
 } from '../services/db';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
 import { supabase } from '../lib/supabase';
@@ -108,6 +109,10 @@ export function CoordinatorDashboard() {
   // Modal: Importar CSV de Estoque
   const [showCsvImportModal, setShowCsvImportModal] = useState(false);
 
+  // Modal: Limpar / Resetar Banco de Dados
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+
   // Modal: Atribuir Linha & Cronograma
   const [assignModalOp, setAssignModalOp] = useState<ProductionOrder | null>(null);
 
@@ -118,6 +123,14 @@ export function CoordinatorDashboard() {
   // Modal: Cadastros & Confirmações de Usuários
   const [showAuthorizeModal, setShowAuthorizeModal] = useState(false);
   const [modalUserSearch, setModalUserSearch] = useState('');
+
+  // Modal: Cadastrar Novo Líder
+  const [showNewLeaderModal, setShowNewLeaderModal] = useState(false);
+  const [newLeaderName, setNewLeaderName] = useState('');
+  const [newLeaderEmail, setNewLeaderEmail] = useState('');
+  const [newLeaderLineId, setNewLeaderLineId] = useState('');
+  const [newLeaderCargo, setNewLeaderCargo] = useState('Líder de Produção');
+  const [isSubmittingLeader, setIsSubmittingLeader] = useState(false);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
@@ -378,6 +391,20 @@ WHERE email IN (
     }
   };
 
+  const handleResetDatabase = async () => {
+    setIsResetting(true);
+    try {
+      await resetProductionDatabase();
+      showToast('Base de dados limpa com sucesso! Todas as OPs e eventos mock foram removidos.');
+      setShowResetModal(false);
+      await loadData();
+    } catch {
+      showToast('Falha ao resetar banco de dados.', 'error');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   const handleStartOP = async (op: ProductionOrder) => {
     const targetLineId = op.lineId || lines[0]?.id || 'line-1';
     await startOP(op.id, targetLineId, profile?.uid || 'coord');
@@ -430,6 +457,40 @@ WHERE email IN (
     setRotations(prev => ({ ...prev, [leaderId]: lineId }));
     showToast('Escala do líder atualizada no Supabase.');
     await loadData();
+  };
+
+  const handleCreateLeader = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newLeaderName.trim() || !newLeaderEmail.trim()) {
+      showToast('Por favor, informe o nome e o e-mail do líder.', 'error');
+      return;
+    }
+    setIsSubmittingLeader(true);
+    try {
+      const ok = await preAuthorizeUser({
+        name: newLeaderName.trim(),
+        email: newLeaderEmail.trim(),
+        role: 'leader',
+        cargo: newLeaderCargo.trim() || 'Líder de Produção',
+        lineId: newLeaderLineId || undefined,
+      });
+
+      if (ok) {
+        showToast(`Líder ${newLeaderName.trim()} cadastrado com sucesso!`);
+        setNewLeaderName('');
+        setNewLeaderEmail('');
+        setNewLeaderLineId('');
+        setNewLeaderCargo('Líder de Produção');
+        setShowNewLeaderModal(false);
+        await loadData();
+      } else {
+        showToast('Falha ao cadastrar líder.', 'error');
+      }
+    } catch (err: any) {
+      showToast(`Erro ao cadastrar: ${err?.message || 'Falha na gravação'}`, 'error');
+    } finally {
+      setIsSubmittingLeader(false);
+    }
   };
 
   // ---------------- KPI COMPUTATIONS ----------------
@@ -860,7 +921,19 @@ WHERE email IN (
                 </div>
 
                 {/* Botões no canto superior direito */}
-                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
+                  {ops.length > 0 && (
+                    <Button
+                      variant="outline"
+                      onClick={() => setShowResetModal(true)}
+                      className="h-9 px-3 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all"
+                      title="Limpar todas as OPs e resetar a base de dados"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      <span>Limpar Base</span>
+                    </Button>
+                  )}
+
                   <Button
                     onClick={() => setShowCsvImportModal(true)}
                     className="h-9 px-3.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-blue-400 hover:text-blue-300 text-xs font-bold rounded-xl flex items-center gap-2 shadow-sm transition-all"
@@ -1171,43 +1244,87 @@ WHERE email IN (
           {/* ---------------- ABA 3: ESCALA DE LÍDERES ---------------- */}
           {activeTab === 'rotations' && (
             <div className="space-y-4">
-              <div>
-                <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                  Escala & Alocação de Líderes de Produção
-                </h2>
-                <p className="text-xs text-[#71717a]">
-                  Defina qual Líder de Chão de Fábrica opera cada Linha de Produção (armazenado no Supabase).
-                </p>
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
+                    Escala & Alocação de Líderes de Produção
+                  </h2>
+                  <p className="text-xs text-[#71717a]">
+                    Defina qual Líder de Chão de Fábrica opera cada Linha de Produção (sincronizado em tempo real).
+                  </p>
+                </div>
+                <Button
+                  onClick={() => setShowNewLeaderModal(true)}
+                  className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-blue-900/30"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Cadastrar Líder</span>
+                </Button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 mb-3 flex items-center gap-1.5">
-                    <Users className="w-3.5 h-3.5" />
-                    Líderes Disponíveis ({leaders.length})
-                  </h3>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5" />
+                      Líderes Disponíveis ({leaders.length})
+                    </h3>
+                    <button
+                      onClick={() => setShowNewLeaderModal(true)}
+                      className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center gap-1"
+                    >
+                      <Plus className="w-3 h-3" />
+                      Adicionar
+                    </button>
+                  </div>
 
                   {leaders.length === 0 ? (
-                    <div className="py-8 text-center text-[#71717a] text-xs">
-                      Nenhum Líder com cargo `leader` cadastrado ainda no Supabase.
+                    <div className="py-10 px-4 text-center border border-dashed border-[#27272a] rounded-xl space-y-3">
+                      <Users className="w-8 h-8 text-[#52525b] mx-auto opacity-50" />
+                      <div>
+                        <p className="text-xs font-bold text-[#f4f4f5]">Nenhum líder encontrado</p>
+                        <p className="text-[11px] text-[#71717a] mt-0.5">Cadastre os líderes da fábrica para distribuí-los nas linhas operacionais.</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        onClick={() => setShowNewLeaderModal(true)}
+                        className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl"
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1" />
+                        Cadastrar Primeiro Líder
+                      </Button>
                     </div>
                   ) : (
-                    <div className="space-y-3">
+                    <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1 custom-scrollbar">
                       {leaders.map(ldr => {
-                        const currentLineId = rotations[ldr.uid] || 'line-1';
+                        const currentLineId = rotations[ldr.uid] || rotations[ldr.email] || 'line-1';
                         return (
-                          <div key={ldr.uid} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex items-center justify-between gap-4">
-                            <div>
-                              <p className="text-sm font-bold text-[#f4f4f5]">{ldr.name}</p>
-                              <p className="text-[11px] text-[#71717a]">{ldr.email}</p>
+                          <div key={ldr.uid || ldr.email} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-blue-950/80 border border-blue-800/50 flex items-center justify-center text-xs font-bold text-blue-400 shrink-0">
+                                {ldr.name?.charAt(0)?.toUpperCase() || 'L'}
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-bold text-[#f4f4f5]">{ldr.name}</p>
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                    ldr.status === 'active'
+                                      ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
+                                      : 'bg-amber-950/60 text-amber-400 border border-amber-800/40'
+                                  }`}>
+                                    {ldr.status === 'active' ? 'Ativo' : 'Pendente'}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-[#71717a]">{ldr.email}</p>
+                              </div>
                             </div>
 
-                            <div className="flex items-center gap-2">
-                              <Label className="text-[10px] uppercase font-bold text-[#71717a]">Linha:</Label>
+                            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                              <Label className="text-[10px] uppercase font-bold text-[#71717a] shrink-0">Linha:</Label>
                               <select
                                 value={currentLineId}
-                                onChange={(e) => handleUpdateLeaderRotation(ldr.uid, e.target.value)}
-                                className="h-8 bg-[#0d0d10] border border-[#282830] text-xs text-[#f4f4f5] rounded-lg px-2 font-semibold focus:ring-1 focus:ring-blue-500"
+                                onChange={(e) => handleUpdateLeaderRotation(ldr.uid || ldr.email, e.target.value)}
+                                className="h-8 bg-[#0d0d10] border border-[#282830] text-xs text-[#f4f4f5] rounded-lg px-2.5 font-semibold focus:ring-1 focus:ring-blue-500 cursor-pointer"
                               >
                                 {lines.map(line => (
                                   <option key={line.id} value={line.id}>
@@ -1224,7 +1341,7 @@ WHERE email IN (
                 </div>
 
                 <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-3 flex items-center gap-1.5">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-4 flex items-center gap-1.5">
                     <ShieldCheck className="w-3.5 h-3.5" />
                     Mapa de Cobertura por Linha
                   </h3>
@@ -1232,7 +1349,9 @@ WHERE email IN (
                   <div className="space-y-3">
                     {lines.map(line => {
                       const assignedLeaderId = Object.keys(rotations).find(k => rotations[k] === line.id);
-                      const leader = assignedLeaderId ? leaders.find(l => l.uid === assignedLeaderId) : null;
+                      const leader = assignedLeaderId 
+                        ? leaders.find(l => l.uid === assignedLeaderId || (l.email && l.email.toLowerCase() === assignedLeaderId.toLowerCase())) 
+                        : null;
 
                       return (
                         <div key={line.id} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex items-center justify-between">
@@ -1243,9 +1362,12 @@ WHERE email IN (
 
                           <div className="text-right">
                             {leader ? (
-                              <span className="text-xs font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2.5 py-1 rounded-lg">
-                                {leader.name}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2.5 py-1 rounded-lg flex items-center gap-1">
+                                  <UserCheck className="w-3 h-3 text-emerald-400" />
+                                  {leader.name}
+                                </span>
+                              </div>
                             ) : (
                               <span className="text-xs font-semibold text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg">
                                 Sem Líder Alocado
@@ -1274,18 +1396,29 @@ WHERE email IN (
                   </p>
                 </div>
 
-                <Button
-                  onClick={() => setShowAuthorizeModal(true)}
-                  className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-[0_0_12px_rgba(37,99,235,0.3)]"
-                >
-                  <Users className="w-4 h-4" />
-                  <span>Cadastros & Acessos</span>
-                  {pendingCount > 0 && (
-                    <span className="bg-amber-400 text-black text-[10px] font-black px-1.5 py-0.5 rounded-full">
-                      {pendingCount}
-                    </span>
-                  )}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={() => setShowNewLeaderModal(true)}
+                    variant="outline"
+                    className="h-9 px-3.5 border-[#32323e] bg-[#1a1a24] hover:bg-[#222230] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-blue-400" />
+                    <span>+ Novo Líder</span>
+                  </Button>
+
+                  <Button
+                    onClick={() => setShowAuthorizeModal(true)}
+                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-[0_0_12px_rgba(37,99,235,0.3)]"
+                  >
+                    <Users className="w-4 h-4" />
+                    <span>Cadastros & Acessos</span>
+                    {pendingCount > 0 && (
+                      <span className="bg-amber-400 text-black text-[10px] font-black px-1.5 py-0.5 rounded-full">
+                        {pendingCount}
+                      </span>
+                    )}
+                  </Button>
+                </div>
               </div>
 
               {/* Banner de Ajuda: Confirmação de E-mail */}
@@ -2176,6 +2309,192 @@ WHERE email IN (
                     <>
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Confirmar Exclusão</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CADASTRAR NOVO LÍDER */}
+      {showNewLeaderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#121217] border border-[#26262e] rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
+                  <Users className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f4f4f5]">Cadastrar Novo Líder</h3>
+                  <p className="text-[11px] text-[#71717a]">Adicionar líder à escala de produção</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !isSubmittingLeader && setShowNewLeaderModal(false)}
+                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                disabled={isSubmittingLeader}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleCreateLeader} className="p-5 space-y-4">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-[#a1a1aa]">Nome Completo</Label>
+                <Input
+                  required
+                  placeholder="Ex: Carlos Mendes"
+                  value={newLeaderName}
+                  onChange={(e) => setNewLeaderName(e.target.value)}
+                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-[#a1a1aa]">E-mail Corporativo</Label>
+                <Input
+                  required
+                  type="email"
+                  placeholder="Ex: carlos.mendes@empresa.com"
+                  value={newLeaderEmail}
+                  onChange={(e) => setNewLeaderEmail(e.target.value)}
+                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
+                />
+                <p className="text-[10px] text-[#71717a]">
+                  O líder poderá fazer login imediatamente com este e-mail.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-[#a1a1aa]">Alocação de Linha Inicial</Label>
+                <select
+                  value={newLeaderLineId}
+                  onChange={(e) => setNewLeaderLineId(e.target.value)}
+                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="">Sem linha inicial (alocar depois)</option>
+                  {lines.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-[#a1a1aa]">Cargo / Função</Label>
+                <Input
+                  placeholder="Ex: Líder de Produção"
+                  value={newLeaderCargo}
+                  onChange={(e) => setNewLeaderCargo(e.target.value)}
+                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
+                />
+              </div>
+
+              {/* Actions */}
+              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isSubmittingLeader}
+                  onClick={() => setShowNewLeaderModal(false)}
+                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                >
+                  Cancelar
+                </Button>
+                
+                <Button
+                  type="submit"
+                  disabled={isSubmittingLeader}
+                  className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-blue-900/30"
+                >
+                  {isSubmittingLeader ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Cadastrando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Confirmar Cadastro</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE CONFIRMAÇÃO DE RESET / LIMPEZA DO BANCO */}
+      {showResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-[#121217] border border-red-900/50 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
+            
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-[#222228] bg-red-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 flex items-center justify-center">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f4f4f5]">Limpar Base de Dados</h3>
+                  <p className="text-[11px] text-[#71717a]">Remover todas as OPs e eventos mock</p>
+                </div>
+              </div>
+              <button
+                onClick={() => !isResetting && setShowResetModal(false)}
+                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                disabled={isResetting}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Conteúdo */}
+            <div className="p-5 space-y-4">
+              <div className="bg-red-950/30 border border-red-900/40 p-3.5 rounded-xl flex items-start gap-2.5 text-xs text-red-200">
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold">Atenção: Esta ação é definitiva.</p>
+                  <p className="text-[#a1a1aa] leading-relaxed">
+                    Todas as Ordens de Produção atuais ({ops.length} OPs), apontamentos e eventos serão excluídos. As linhas voltarão ao estado Disponível para novas importações de CSV e atribuições.
+                  </p>
+                </div>
+              </div>
+
+              {/* Ações */}
+              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isResetting}
+                  onClick={() => setShowResetModal(false)}
+                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                >
+                  Cancelar
+                </Button>
+                
+                <Button
+                  disabled={isResetting}
+                  onClick={handleResetDatabase}
+                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+                >
+                  {isResetting ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Limpando base...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Confirmar e Limpar Tudo</span>
                     </>
                   )}
                 </Button>

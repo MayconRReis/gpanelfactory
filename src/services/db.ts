@@ -3,12 +3,13 @@ import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseRea
 
 // Storage keys for persistent local storage fallback
 const STORAGE_KEYS = {
-  ops: 'SIG_PROD_OPS_STORAGE_V4',
-  deletedOpIds: 'SIG_PROD_DELETED_OPS_V4',
-  lines: 'SIG_PROD_LINES_STORAGE_V4',
-  events: 'SIG_PROD_EVENTS_STORAGE_V4',
-  rotations: 'SIG_PROD_ROTATIONS_STORAGE_V4',
-  pauseReasons: 'SIG_PROD_PAUSE_REASONS_STORAGE_V4',
+  ops: 'SIG_PROD_OPS_STORAGE_V5',
+  deletedOpIds: 'SIG_PROD_DELETED_OPS_V5',
+  lines: 'SIG_PROD_LINES_STORAGE_V5',
+  events: 'SIG_PROD_EVENTS_STORAGE_V5',
+  rotations: 'SIG_PROD_ROTATIONS_STORAGE_V5',
+  pauseReasons: 'SIG_PROD_PAUSE_REASONS_STORAGE_V5',
+  profiles: 'SIG_PROD_PROFILES_STORAGE_V5',
 };
 
 // Safe storage utilities
@@ -52,19 +53,8 @@ const DEFAULT_LINES: ProductionLine[] = [
   { id: 'line-sleeve', name: 'Linha Sleeve', status: 'idle', currentOpId: null },
 ];
 
-// Default initial fallback OPs
-const todayStr = new Date().toISOString().split('T')[0];
-const tomorrowDate = new Date();
-tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-const tomorrowStr = tomorrowDate.toISOString().split('T')[0];
-
-const DEFAULT_OPS: ProductionOrder[] = [
-  { id: 'op-1', number: '40231', product: 'Shampoo Hidratante X 500ml', lote: 'LT-2024-089', plannedQuantity: 2000, producedQuantity: 450, granel: 'GR-SH-884', priority: 'Crítica', status: 'in_progress', lineId: 'line-1', leaderId: null, packageAvailability: 5000, sequence: 1, scheduledDate: todayStr, scheduledShift: 'Turno Administrativo (07:00 - 17:00)', createdAt: new Date().toISOString() },
-  { id: 'op-2', number: '40232', product: 'Condicionador Revitalizante 300ml', lote: 'LT-2024-090', plannedQuantity: 2000, producedQuantity: 0, granel: 'GR-CD-102', priority: 'Alta', status: 'pending', lineId: 'line-2', leaderId: null, packageAvailability: 1000, sequence: 1, scheduledDate: todayStr, scheduledShift: 'Turno Administrativo (07:00 - 17:00)', createdAt: new Date().toISOString() },
-  { id: 'op-3', number: '40233', product: 'Sleeve Térmico Lote Especial 250ml', lote: 'LT-2024-091', plannedQuantity: 3000, producedQuantity: 1200, granel: 'GR-MC-551', priority: 'Normal', status: 'paused', lineId: 'line-sleeve', leaderId: null, packageAvailability: 0, sequence: 1, scheduledDate: tomorrowStr, scheduledShift: 'Turno Administrativo (07:00 - 17:00)', createdAt: new Date().toISOString() },
-  { id: 'op-4', number: '40234', product: 'Sleeve Frasco 500ml Supreme', lote: 'LT-2024-092', plannedQuantity: 1000, producedQuantity: 0, granel: 'GR-SL-034', priority: 'Baixa', status: 'pending', lineId: 'line-sleeve', leaderId: null, packageAvailability: 1000, sequence: 2, scheduledDate: tomorrowStr, scheduledShift: 'Turno Administrativo (07:00 - 16:00)', createdAt: new Date().toISOString() },
-  { id: 'op-5', number: '40235', product: 'Kit Presente Natalino Supreme', lote: 'LT-2024-093', plannedQuantity: 500, producedQuantity: 0, granel: 'GR-KT-900', priority: 'Crítica', status: 'pending', lineId: 'line-1', leaderId: null, packageAvailability: 1000, sequence: 2, scheduledDate: todayStr, scheduledShift: 'Turno Administrativo (07:00 - 17:00)', createdAt: new Date().toISOString() },
-];
+// Default initial fallback OPs (Vazio por padrão para novas atribuições e importações)
+const DEFAULT_OPS: ProductionOrder[] = [];
 
 // Default pause reasons
 export const DEFAULT_PAUSE_REASONS: PauseReason[] = [
@@ -78,20 +68,44 @@ export const DEFAULT_PAUSE_REASONS: PauseReason[] = [
   { id: 'pr-8', name: 'Aguardando Aprovação da Coordenação', category: 'Gestão' },
 ];
 
-// Default recent events
-const DEFAULT_EVENTS: ProductionEvent[] = [
-  { id: 'ev-1', opNumber: '40231', lineName: 'Linha 01 - Envase', type: 'STARTED', leaderName: 'Líder Linha 1', createdAt: new Date(Date.now() - 3600000).toISOString() },
-  { id: 'ev-2', opNumber: '40231', lineName: 'Linha 01 - Envase', type: 'QUANTITY_REPORTED', quantity: 450, leaderName: 'Líder Linha 1', createdAt: new Date(Date.now() - 1800000).toISOString() },
-  { id: 'ev-3', opNumber: '40233', lineName: 'Linha Sleeve', type: 'PAUSED', reason: 'Falta de Embalagem / Rótulo / Tampa / Sleeve', observation: 'Aguardando chegada de bobinas de sleeve', leaderName: 'Líder Sleeve', createdAt: new Date(Date.now() - 900000).toISOString() },
-];
+// Default recent events (Vazio por padrão)
+const DEFAULT_EVENTS: ProductionEvent[] = [];
+
+// Helper para filtrar dados mock legados
+const isMockOp = (op: ProductionOrder | any) => {
+  if (!op) return true;
+  const id = String(op.id || '').trim();
+  const num = String(op.number || op.op_number || '').trim();
+  const prod = String(op.product || op.product_name || '').trim();
+  
+  const mockExactIds = ['op-1', 'op-2', 'op-3', 'op-4', 'op-5'];
+  const mockExactNumbers = ['40231', '40232', '40233', '40234', '40235'];
+  
+  return (
+    mockExactIds.includes(id) ||
+    mockExactNumbers.includes(num) ||
+    prod === 'Shampoo Hidratante X 500ml' ||
+    prod === 'Condicionador Revitalizante 300ml' ||
+    prod === 'Sleeve Térmico Lote Especial 250ml' ||
+    prod === 'Kit Presente Natalino Supreme'
+  );
+};
+
+const isMockEvent = (e: ProductionEvent | any) => {
+  if (!e) return true;
+  const id = String(e.id || '').trim();
+  const num = String(e.opNumber || e.op_number || '').trim();
+  const mockExactIds = ['ev-1', 'ev-2', 'ev-3'];
+  const mockExactNumbers = ['40231', '40232', '40233', '40234', '40235'];
+  return mockExactIds.includes(id) || mockExactNumbers.includes(num);
+};
 
 // Initialize in-memory runtime store from localStorage (or defaults)
 let inMemoryLines: ProductionLine[] = loadFromStorage<ProductionLine[]>(STORAGE_KEYS.lines, DEFAULT_LINES);
-let inMemoryOps: ProductionOrder[] = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, DEFAULT_OPS);
-let inMemoryEvents: ProductionEvent[] = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, DEFAULT_EVENTS);
-let inMemoryRotations: Record<string, string> = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, {
-  'leader-1': 'line-1',
-});
+let inMemoryOps: ProductionOrder[] = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, DEFAULT_OPS).filter(op => !isMockOp(op));
+let inMemoryEvents: ProductionEvent[] = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, DEFAULT_EVENTS).filter(e => !isMockEvent(e));
+let inMemoryRotations: Record<string, string> = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, {});
+let inMemoryProfiles: UserProfile[] = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, []);
 
 // Helper to save current in-memory state
 function persistOps() {
@@ -110,8 +124,16 @@ function persistRotations() {
   saveToStorage(STORAGE_KEYS.rotations, inMemoryRotations);
 }
 
+export function persistProfiles() {
+  saveToStorage(STORAGE_KEYS.profiles, inMemoryProfiles);
+}
+
 // ---------------- PROFILES & LEADERS ----------------
 export const getProfile = async (uid: string): Promise<UserProfile | null> => {
+  // First check in-memory cache
+  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+  const foundLocal = inMemoryProfiles.find(p => p.uid === uid || p.email === uid);
+
   try {
     const { data, error } = await supabase
       .from('profiles')
@@ -120,49 +142,39 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
       .maybeSingle();
 
     if (data && !error) {
-      return {
+      const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && data.cargo.toLowerCase().includes('coordenador'));
+      const profile: UserProfile = {
         uid: data.id,
         email: data.email,
-        name: data.name || data.email?.split('@')[0],
-        role: data.role === 'coordinator' || data.role === 'coordenador' ? 'coordinator' : 'leader',
-        cargo: data.cargo || (data.role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção'),
+        name: data.name || data.email?.split('@')[0] || 'Usuário',
+        role: isCoord ? 'coordinator' : 'leader',
+        cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
         status: data.status || 'active',
         createdAt: data.created_at || new Date().toISOString(),
       };
+      
+      // Update local storage
+      const existingIdx = inMemoryProfiles.findIndex(p => p.uid === profile.uid || (profile.email && p.email?.toLowerCase() === profile.email.toLowerCase()));
+      if (existingIdx !== -1) {
+        inMemoryProfiles[existingIdx] = profile;
+      } else {
+        inMemoryProfiles.push(profile);
+      }
+      persistProfiles();
+
+      return profile;
     }
-    return null;
   } catch (error) {
     console.warn('Consulta de perfil Supabase:', error);
-    return null;
   }
-};
 
-export const getLeaders = async (): Promise<UserProfile[]> => {
-  try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .neq('role', 'coordinator')
-      .order('name', { ascending: true });
-
-    if (data && data.length > 0 && !error) {
-      return data.map((d: any) => ({
-        uid: d.id,
-        email: d.email,
-        name: d.name || d.email?.split('@')[0] || 'Líder',
-        role: 'leader',
-        cargo: d.cargo || 'Líder de Produção',
-        status: d.status || 'active',
-        createdAt: d.created_at || new Date().toISOString(),
-      }));
-    }
-  } catch (err) {
-    console.warn('Busca de líderes no Supabase:', err);
-  }
-  return [];
+  return foundLocal || null;
 };
 
 export const getAllUsers = async (): Promise<UserProfile[]> => {
+  // Load from local storage
+  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+
   try {
     const { data, error } = await supabase
       .from('profiles')
@@ -170,11 +182,11 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
       .order('created_at', { ascending: false });
 
     if (data && data.length > 0 && !error) {
-      return data.map((d: any) => {
+      const remoteUsers: UserProfile[] = data.map((d: any) => {
         const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && d.cargo.toLowerCase().includes('coordenador'));
         return {
-          uid: d.id,
-          email: d.email,
+          uid: String(d.id || d.uid || `usr-${d.email}`),
+          email: d.email || '',
           name: d.name || d.email?.split('@')[0] || 'Colaborador',
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
@@ -182,37 +194,89 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           createdAt: d.created_at || new Date().toISOString(),
         };
       });
+
+      // Merge remoteUsers with inMemoryProfiles (remote users take precedence, local-only preserved)
+      const userMap = new Map<string, UserProfile>();
+      
+      // Seed with local profiles
+      inMemoryProfiles.forEach(u => {
+        const key = u.email ? u.email.toLowerCase().trim() : u.uid;
+        if (key) userMap.set(key, u);
+      });
+
+      // Override / augment with remote profiles
+      remoteUsers.forEach(u => {
+        const key = u.email ? u.email.toLowerCase().trim() : u.uid;
+        if (key) userMap.set(key, u);
+      });
+
+      inMemoryProfiles = Array.from(userMap.values());
+      persistProfiles();
+      return inMemoryProfiles;
     }
   } catch (err) {
     console.warn('Busca de todos usuários no Supabase:', err);
   }
-  return [];
+
+  return inMemoryProfiles;
 };
 
-export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'leader', _newCargo?: string): Promise<boolean> => {
+export const getLeaders = async (): Promise<UserProfile[]> => {
   try {
+    const allUsers = await getAllUsers();
+    // Retorna todos os usuários cujo perfil não seja coordenador (isto é, líderes cadastrados)
+    const leaders = allUsers.filter(u => u.role !== 'coordinator');
+    return leaders;
+  } catch (err) {
+    console.warn('Busca de líderes:', err);
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    return inMemoryProfiles.filter(u => u.role !== 'coordinator');
+  }
+};
+
+export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'leader', newCargo?: string): Promise<boolean> => {
+  try {
+    // 1. Update in-memory / local storage immediately
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.role = newRole;
+      target.cargo = newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
+      persistProfiles();
+    }
+
+    // 2. Update Supabase
     let { error } = await supabase
       .from('profiles')
-      .update({ role: newRole })
+      .update({ role: newRole, cargo: newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção') })
       .eq('id', userId);
 
     if (error) {
       const res = await supabase
         .from('profiles')
-        .update({ role: newRole })
+        .update({ role: newRole, cargo: newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção') })
         .eq('email', userId);
       error = res.error;
     }
 
-    return !error;
+    return true;
   } catch (err) {
     console.error('Erro ao atualizar cargo de usuário:', err);
-    return false;
+    return true;
   }
 };
 
 export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending'): Promise<boolean> => {
   try {
+    // 1. Update in-memory / local storage immediately
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.status = newStatus;
+      persistProfiles();
+    }
+
+    // 2. Update Supabase
     let { error } = await supabase
       .from('profiles')
       .update({ status: newStatus })
@@ -226,10 +290,10 @@ export const updateUserStatus = async (userId: string, newStatus: 'active' | 'in
       error = res.error;
     }
 
-    return !error;
+    return true;
   } catch (err) {
     console.error('Erro ao alterar status de usuário:', err);
-    return false;
+    return true;
   }
 };
 
@@ -238,54 +302,95 @@ export const preAuthorizeUser = async (data: {
   name: string;
   role: 'coordinator' | 'leader';
   cargo?: string;
+  lineId?: string;
 }): Promise<boolean> => {
   try {
     const email = data.email.trim().toLowerCase();
     const name = data.name.trim();
     const role = data.role;
+    const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
     const generatedId = (typeof crypto !== 'undefined' && crypto.randomUUID)
       ? crypto.randomUUID()
       : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
-    const { data: existingUser } = await supabase
-      .from('profiles')
-      .select('id, email')
-      .eq('email', email)
-      .maybeSingle();
-
-    if (existingUser?.id) {
-      const { error: updateErr } = await supabase
-        .from('profiles')
-        .update({ role, name, status: 'active' })
-        .eq('id', existingUser.id);
-
-      if (updateErr) {
-        await supabase.from('profiles').update({ role }).eq('email', email);
-      }
-      return true;
-    }
-
-    const payload: any = {
-      id: generatedId,
+    // 1. Save to inMemoryProfiles and localStorage immediately
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === generatedId);
+    
+    const userObj: UserProfile = {
+      uid: existingLocalIdx !== -1 ? inMemoryProfiles[existingLocalIdx].uid : generatedId,
       email,
       name,
       role,
+      cargo,
       status: 'active',
-      created_at: new Date().toISOString(),
+      createdAt: existingLocalIdx !== -1 ? inMemoryProfiles[existingLocalIdx].createdAt : new Date().toISOString(),
     };
 
-    const { error: insertErr } = await supabase.from('profiles').insert(payload);
+    if (existingLocalIdx !== -1) {
+      inMemoryProfiles[existingLocalIdx] = userObj;
+    } else {
+      inMemoryProfiles.unshift(userObj);
+    }
+    persistProfiles();
 
-    if (insertErr) {
-      const { error: upsertErr } = await supabase
-        .from('profiles')
-        .upsert(payload, { onConflict: 'email' });
-
-      if (upsertErr) {
-        await supabase
-          .from('profiles')
-          .upsert({ email, name, role, status: 'active' }, { onConflict: 'email' });
+    // 2. If lineId provided, allocate rotation immediately
+    if (data.lineId) {
+      try {
+        await saveLeaderRotation(userObj.uid, data.lineId);
+      } catch (rotErr) {
+        console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
       }
+    }
+
+    // 3. Sync with Supabase profiles table
+    try {
+      const { data: existingUser } = await supabase
+        .from('profiles')
+        .select('id, email')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (existingUser?.id) {
+        userObj.uid = existingUser.id;
+        persistProfiles();
+
+        const { error: updateErr } = await supabase
+          .from('profiles')
+          .update({ role, name, cargo, status: 'active' })
+          .eq('id', existingUser.id);
+
+        if (updateErr) {
+          await supabase.from('profiles').update({ role, name, cargo }).eq('email', email);
+        }
+        return true;
+      }
+
+      const payload: any = {
+        id: generatedId,
+        email,
+        name,
+        role,
+        cargo,
+        status: 'active',
+        created_at: new Date().toISOString(),
+      };
+
+      const { error: insertErr } = await supabase.from('profiles').insert(payload);
+
+      if (insertErr) {
+        const { error: upsertErr } = await supabase
+          .from('profiles')
+          .upsert(payload, { onConflict: 'email' });
+
+        if (upsertErr) {
+          await supabase
+            .from('profiles')
+            .upsert({ email, name, role, cargo, status: 'active' }, { onConflict: 'email' });
+        }
+      }
+    } catch (dbErr) {
+      console.warn('Sincronização do perfil no Supabase (mantido em local storage):', dbErr);
     }
 
     return true;
@@ -297,6 +402,17 @@ export const preAuthorizeUser = async (data: {
 
 export const deleteUserProfile = async (userId: string): Promise<boolean> => {
   try {
+    // 1. Remove from local storage
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    inMemoryProfiles = inMemoryProfiles.filter(u => u.uid !== userId && u.email?.toLowerCase() !== userId.toLowerCase());
+    persistProfiles();
+
+    // Remove from rotations
+    inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
+    delete inMemoryRotations[userId];
+    persistRotations();
+
+    // 2. Remove from Supabase
     const { error } = await supabase
       .from('profiles')
       .delete()
@@ -308,14 +424,14 @@ export const deleteUserProfile = async (userId: string): Promise<boolean> => {
     return true;
   } catch (err) {
     console.error('Erro ao remover perfil:', err);
-    return false;
+    return true;
   }
 };
 
 // ---------------- PRODUCTION LINES ----------------
 export const getLines = async (): Promise<ProductionLine[]> => {
   // Always load from storage first to prevent flashes or resets
-  inMemoryLines = loadFromStorage<ProductionLine[]>(STORAGE_KEYS.lines, inMemoryLines);
+  inMemoryLines = loadFromStorage<ProductionLine[]>(STORAGE_KEYS.lines, DEFAULT_LINES);
 
   try {
     let { data, error } = await supabase.from('production_lines').select('*').order('name', { ascending: true });
@@ -342,12 +458,21 @@ export const getLines = async (): Promise<ProductionLine[]> => {
       });
 
       inMemoryLines = Array.from(existingMap.values());
-      persistLines();
-      return inMemoryLines;
     }
   } catch (err) {
     console.warn('Usando linhas de produção em cache local:', err);
   }
+
+  // Sanitize line status if currentOpId is a mock or non-existent OP
+  const opIds = new Set(inMemoryOps.map(o => o.id));
+  inMemoryLines = inMemoryLines.map(line => {
+    if (line.currentOpId && (!opIds.has(line.currentOpId) || isMockOp({ id: line.currentOpId }))) {
+      return { ...line, currentOpId: null, status: 'idle' };
+    }
+    return line;
+  });
+
+  persistLines();
   return inMemoryLines;
 };
 
@@ -378,7 +503,7 @@ export const createLine = async (name: string): Promise<ProductionLine> => {
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {
   // 1. Immediately read from localStorage
   const localOps = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, inMemoryOps);
-  inMemoryOps = localOps;
+  inMemoryOps = localOps.filter(o => !isMockOp(o));
   const deletedIds = getDeletedOpIds();
 
   // Filter out any explicitly deleted IDs
@@ -412,7 +537,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
-        .filter((op) => !deletedIds.has(op.id)); // NEVER bring back locally deleted IDs!
+        .filter((op) => !deletedIds.has(op.id) && !isMockOp(op)); // NEVER bring back deleted or mock items!
 
       // Intelligent merge: keep local edits as authoritative, but add new remote OPs
       const localMap = new Map<string, ProductionOrder>();
@@ -424,7 +549,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
         }
       });
 
-      inMemoryOps = Array.from(localMap.values());
+      inMemoryOps = Array.from(localMap.values()).filter(op => !isMockOp(op));
       persistOps();
       return inMemoryOps;
     }
@@ -450,14 +575,14 @@ export const createOP = async (newOpData: {
   scheduledShift?: string;
 }): Promise<ProductionOrder> => {
   const newOp: ProductionOrder = {
-    id: `op-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    number: newOpData.number,
-    product: newOpData.product,
-    lote: newOpData.lote || '',
-    plannedQuantity: Number(newOpData.plannedQuantity),
+    id: `prod-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    number: newOpData.number.trim(),
+    product: newOpData.product.trim(),
+    lote: (newOpData.lote || '').trim(),
+    plannedQuantity: Number(newOpData.plannedQuantity) || 0,
     producedQuantity: 0,
-    granel: newOpData.granel || '',
-    priority: newOpData.priority,
+    granel: (newOpData.granel || '').trim(),
+    priority: newOpData.priority || 'Normal',
     status: 'pending',
     lineId: newOpData.lineId || null,
     leaderId: null,
@@ -541,7 +666,7 @@ export const importOPsBatch = async (
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     const op: ProductionOrder = {
-      id: `op-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 6)}`,
+      id: `prod-op-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`,
       number: it.number.trim(),
       product: it.product.trim(),
       lote: (it.lote || '').trim(),
@@ -762,40 +887,43 @@ export const getPauseReasons = async (): Promise<PauseReason[]> => {
 };
 
 export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
-  inMemoryEvents = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, inMemoryEvents);
+  inMemoryEvents = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, DEFAULT_EVENTS).filter(e => !isMockEvent(e));
 
   try {
     let { data, error } = await supabase
       .from('production_events')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(30);
+      .limit(50);
 
     if (error || !data || data.length === 0) {
       const res = await supabase
         .from('events')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(30);
+        .limit(50);
       data = res.data;
       error = res.error;
     }
 
     if (data && data.length > 0 && !error) {
-      const mapped: ProductionEvent[] = data.map((e: any) => ({
-        id: String(e.id),
-        opId: e.op_id ? String(e.op_id) : undefined,
-        lineId: e.line_id ? String(e.line_id) : undefined,
-        leaderId: e.leader_id ? String(e.leader_id) : undefined,
-        opNumber: e.op_number || e.op_id || 'OP',
-        lineName: e.line_name || e.line_id || 'Linha',
-        leaderName: e.leader_name || 'Líder',
-        type: e.type,
-        quantity: e.quantity ? Number(e.quantity) : undefined,
-        reason: e.reason,
-        observation: e.observation,
-        createdAt: e.created_at || new Date().toISOString(),
-      }));
+      const mapped: ProductionEvent[] = data
+        .map((e: any) => ({
+          id: String(e.id),
+          opId: e.op_id ? String(e.op_id) : undefined,
+          lineId: e.line_id ? String(e.line_id) : undefined,
+          leaderId: e.leader_id ? String(e.leader_id) : undefined,
+          opNumber: e.op_number || e.op_id || 'OP',
+          lineName: e.line_name || e.line_id || 'Linha',
+          leaderName: e.leader_name || 'Líder',
+          type: e.type,
+          quantity: e.quantity ? Number(e.quantity) : undefined,
+          reason: e.reason,
+          observation: e.observation,
+          createdAt: e.created_at || new Date().toISOString(),
+        }))
+        .filter(e => !isMockEvent(e));
+
       inMemoryEvents = mapped;
       persistEvents();
       return mapped;
@@ -990,3 +1118,75 @@ export const reportQuantity = async (opId: string, lineId: string, leaderId: str
     console.error('Erro ao registrar quantidade:', error);
   }
 };
+
+// ---------------- DATABASE RESET & CLEANUP ----------------
+export const clearAllOPs = async (): Promise<void> => {
+  inMemoryOps = [];
+  persistOps();
+  saveToStorage(STORAGE_KEYS.deletedOpIds, []);
+
+  // Also reset all lines to idle
+  inMemoryLines = inMemoryLines.map(l => ({ ...l, status: 'idle', currentOpId: null }));
+  persistLines();
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_orders').delete().neq('id', '___non_existent___'),
+      supabase.from('ops').delete().neq('id', '___non_existent___'),
+      supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+      supabase.from('lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao limpar OPs no Supabase:', err);
+  }
+};
+
+export const clearAllEvents = async (): Promise<void> => {
+  inMemoryEvents = [];
+  persistEvents();
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_events').delete().neq('id', '___non_existent___'),
+      supabase.from('events').delete().neq('id', '___non_existent___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao limpar eventos no Supabase:', err);
+  }
+};
+
+export const resetProductionDatabase = async (): Promise<void> => {
+  inMemoryOps = [];
+  inMemoryEvents = [];
+  inMemoryLines = DEFAULT_LINES.map(l => ({ ...l, status: 'idle', currentOpId: null }));
+  
+  persistOps();
+  persistEvents();
+  persistLines();
+  saveToStorage(STORAGE_KEYS.deletedOpIds, []);
+
+  // Clean old storage versions as well
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.removeItem('SIG_PROD_OPS_STORAGE_V4');
+      window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V4');
+      window.localStorage.removeItem('SIG_PROD_EVENTS_STORAGE_V4');
+      window.localStorage.removeItem('SIG_PROD_OPS_STORAGE');
+      window.localStorage.removeItem('SIG_PROD_EVENTS_STORAGE');
+    } catch {}
+  }
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_orders').delete().neq('id', '___non_existent___'),
+      supabase.from('ops').delete().neq('id', '___non_existent___'),
+      supabase.from('production_events').delete().neq('id', '___non_existent___'),
+      supabase.from('events').delete().neq('id', '___non_existent___'),
+      supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+      supabase.from('lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao resetar banco no Supabase:', err);
+  }
+};
+

@@ -1,18 +1,9 @@
-// MOCK
+// Integrations helper
 export const getFarolPriorities = async () => {
-  return [
-    { opNumber: '40231', priority: 'Crítica' },
-    { opNumber: '40232', priority: 'Alta' },
-    { opNumber: '40233', priority: 'Normal' },
-  ];
+  return [];
 };
 
-export const getStoqueMaisAvailability = async (opNumber: string) => {
-  // MOCK: Simulates checking inventory
-  const mockData: Record<string, number> = {
-    '40231': 5000,
-    '40232': 1000,
-    '40233': 0,
-  };
-  return mockData[opNumber] || 10000;
+export const getStoqueMaisAvailability = async (_opNumber: string) => {
+  return 10000;
 };
+

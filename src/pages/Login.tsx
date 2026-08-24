@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useState } from 'react';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { preAuthorizeUser } from '../services/db';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -95,11 +96,18 @@ export function Login() {
 
         if (data.user) {
           try {
+            await preAuthorizeUser({
+              email: email.trim(),
+              name: name.trim(),
+              role: initialRole,
+              cargo: initialCargo,
+            });
             await supabase.from('profiles').upsert({
               id: data.user.id,
               email: email.trim(),
               name: name.trim(),
               role: initialRole,
+              cargo: initialCargo,
               status: 'active',
               created_at: new Date().toISOString(),
             });
