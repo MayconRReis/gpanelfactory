@@ -496,7 +496,16 @@ WHERE email IN (
   };
 
   const handleUpdateLeaderRotation = async (leaderId: string, lineId: string) => {
-    await saveLeaderRotation(leaderId, lineId);
+    // Busca o perfil completo para passar email e nome — necessário para
+    // resolver o uid canônico dentro de saveLeaderRotation e evitar
+    // registros duplicados por email/uid na tabela de rotações.
+    const leaderProfile = leaders.find(l => l.uid === leaderId || l.email === leaderId);
+    await saveLeaderRotation(
+      leaderId,
+      lineId,
+      leaderProfile?.email,
+      leaderProfile?.name,
+    );
     setRotations(prev => ({ ...prev, [leaderId]: lineId }));
     showToast('Escala do líder atualizada no Supabase.');
     await loadData();

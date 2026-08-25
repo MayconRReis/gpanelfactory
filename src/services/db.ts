@@ -1189,20 +1189,30 @@ export const saveLeaderRotation = async (
   }
 
   try {
-    const payloads = [
-      { leader_id: leaderId, line_id: lineId, updated_at: new Date().toISOString() },
-    ];
-    if (leaderEmail && leaderEmail.toLowerCase() !== leaderId.toLowerCase()) {
-      payloads.push({ leader_id: leaderEmail.toLowerCase(), line_id: lineId, updated_at: new Date().toISOString() });
-    }
-    if (targetProf?.uid && targetProf.uid !== leaderId) {
-      payloads.push({ leader_id: targetProf.uid, line_id: lineId, updated_at: new Date().toISOString() });
-    }
+    // Chave canônica: sempre o uid real do usuário no Supabase Auth.
+    // Gravar com email como leader_id cria registros duplicados que o líder
+    // nunca encontra quando busca pelo uid — bug de dessincronização.
+    const canonicalId = targetProf?.uid || leaderId;
 
-    for (const payload of payloads) {
+    const payload = {
+      leader_id: canonicalId,
+      line_id: lineId,
+      updated_at: new Date().toISOString(),
+    };
+
+    await Promise.allSettled([
+      supabase.from('weekly_rotations').upsert(payload, { onConflict: 'leader_id' }),
+      supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
+    ]);
+
+    // Se o leaderId original era email (não uid), limpa o registro fantasma
+    // que pode ter sido gravado antes desta correção
+    if (canonicalId !== leaderId && leaderId.includes('@')) {
       await Promise.allSettled([
-        supabase.from('weekly_rotations').upsert(payload, { onConflict: 'leader_id' }),
-        supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
+        supabase.from('weekly_rotations').delete().eq('leader_id', leaderId),
+        supabase.from('rotations').delete().eq('leader_id', leaderId),
+        supabase.from('weekly_rotations').delete().eq('leader_id', leaderId.toLowerCase()),
+        supabase.from('rotations').delete().eq('leader_id', leaderId.toLowerCase()),
       ]);
     }
   } catch (err) {

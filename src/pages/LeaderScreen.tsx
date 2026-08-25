@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
 import {
@@ -93,6 +94,9 @@ export function LeaderScreen() {
     return () => clearInterval(timer);
   }, []);
 
+  // Ref para saber se o líder trocou de linha manualmente nesta sessão
+  const manualLineRef = useRef<string | null>(null);
+
   // Busca e sincronização de dados
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!profile) return;
@@ -114,13 +118,19 @@ export function LeaderScreen() {
         setPauseReasonsList(loadedReasons);
       }
 
-      // Descobre linha atribuída ao líder se ainda não selecionada
-      if (!selectedLineId) {
-        const assignedLineId = await getLeaderRotation(profile.uid);
-        const validLineId = assignedLineId && loadedLines.some(l => l.id === assignedLineId)
-          ? assignedLineId
-          : loadedLines[0]?.id || 'line-1';
-        setSelectedLineId(validLineId);
+      // Sempre re-consulta a rotação atribuída pelo coordenador.
+      // Só ignora se o próprio líder trocou de linha manualmente nesta sessão.
+      if (!manualLineRef.current) {
+        const assignedLineId = await getLeaderRotation(
+          profile.uid,
+          profile.email,
+          profile.name,
+        );
+        if (assignedLineId && loadedLines.some(l => l.id === assignedLineId)) {
+          setSelectedLineId(assignedLineId);
+        } else if (!selectedLineId) {
+          setSelectedLineId(loadedLines[0]?.id || 'line-1');
+        }
       }
     } catch (error) {
       console.error('Erro ao carregar dados do líder:', error);
@@ -130,9 +140,31 @@ export function LeaderScreen() {
     }
   }, [profile, selectedLineId]);
 
+  // Realtime + polling: espelha o comportamento do CoordinatorDashboard
   useEffect(() => {
+    if (!profile) return;
+
     fetchData();
-  }, [fetchData]);
+
+    const channel = supabase
+      .channel('leader-realtime-' + profile.uid)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_rotations' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => fetchData())
+      .subscribe();
+
+    // Fallback: polling a cada 5s (mesmo intervalo do Coordinator)
+    const interval = setInterval(() => fetchData(), 5000);
+
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(interval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.uid]);
 
   // Linha atual selecionada
   const currentLine = useMemo(() => {
@@ -170,11 +202,12 @@ export function LeaderScreen() {
     return recentEvents.filter(e => e.lineId === currentLine.id || e.lineName === currentLine.name);
   }, [recentEvents, currentLine]);
 
-  // Troca de linha
+  // Troca de linha (iniciada pelo próprio líder)
   const handleSwitchLine = async (lineId: string) => {
+    manualLineRef.current = lineId; // impede que o próximo fetchData sobrescreva com a rotação antiga
     setSelectedLineId(lineId);
     if (profile) {
-      await saveLeaderRotation(profile.uid, lineId);
+      await saveLeaderRotation(profile.uid, lineId, profile.email, profile.name);
     }
     setIsLineSelectOpen(false);
   };
