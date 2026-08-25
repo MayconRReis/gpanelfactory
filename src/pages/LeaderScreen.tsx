@@ -94,8 +94,13 @@ export function LeaderScreen() {
     return () => clearInterval(timer);
   }, []);
 
-  // Ref para saber se o líder trocou de linha manualmente nesta sessão
+  // Ref para saber se o líder trocou de linha manualmente nesta sessão.
+  // Expira após 30 minutos para permitir que o coordenador reatribua depois.
   const manualLineRef = useRef<string | null>(null);
+  const manualLineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Ref estável para fetchData — resolve stale closure no Realtime/setInterval
+  const fetchDataRef = useRef<(showRefreshing?: boolean) => Promise<void>>();
 
   // Busca e sincronização de dados
   const fetchData = useCallback(async (showRefreshing = false) => {
@@ -119,7 +124,7 @@ export function LeaderScreen() {
       }
 
       // Sempre re-consulta a rotação atribuída pelo coordenador.
-      // Só ignora se o próprio líder trocou de linha manualmente nesta sessão.
+      // Só ignora se o próprio líder trocou de linha manualmente (e o bloqueio ainda não expirou).
       if (!manualLineRef.current) {
         const assignedLineId = await getLeaderRotation(
           profile.uid,
@@ -140,30 +145,37 @@ export function LeaderScreen() {
     }
   }, [profile, selectedLineId]);
 
+  // Mantém a ref sempre apontando para a versão mais recente do fetchData
+  // — isso resolve a stale closure no Realtime e no setInterval
+  useEffect(() => {
+    fetchDataRef.current = fetchData;
+  }, [fetchData]);
+
   // Realtime + polling: espelha o comportamento do CoordinatorDashboard
   useEffect(() => {
     if (!profile) return;
 
-    fetchData();
+    fetchDataRef.current?.();
+
+    const stable = () => fetchDataRef.current?.();
 
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_rotations' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => fetchData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_rotations' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, stable)
       .subscribe();
 
-    // Fallback: polling a cada 5s (mesmo intervalo do Coordinator)
-    const interval = setInterval(() => fetchData(), 5000);
+    // Fallback: polling a cada 5s mesmo se Realtime cair
+    const interval = setInterval(stable, 5000);
 
     return () => {
       supabase.removeChannel(channel);
       clearInterval(interval);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile?.uid]);
 
   // Linha atual selecionada
@@ -204,7 +216,14 @@ export function LeaderScreen() {
 
   // Troca de linha (iniciada pelo próprio líder)
   const handleSwitchLine = async (lineId: string) => {
-    manualLineRef.current = lineId; // impede que o próximo fetchData sobrescreva com a rotação antiga
+    // Bloqueia atualização automática pelo coordenador por 30 minutos.
+    // Depois disso, a rotação do coordenador volta a ter prioridade.
+    manualLineRef.current = lineId;
+    if (manualLineTimerRef.current) clearTimeout(manualLineTimerRef.current);
+    manualLineTimerRef.current = setTimeout(() => {
+      manualLineRef.current = null;
+    }, 30 * 60 * 1000);
+
     setSelectedLineId(lineId);
     if (profile) {
       await saveLeaderRotation(profile.uid, lineId, profile.email, profile.name);

@@ -667,12 +667,19 @@ export const getLines = async (): Promise<ProductionLine[]> => {
         currentOpId: d.current_op_id ? String(d.current_op_id) : (d.currentOpId ? String(d.currentOpId) : null),
       }));
 
-      // Merge with inMemoryLines (preserve local names / states if any)
+      // Supabase é autoridade para status e currentOpId — esses campos mudam
+      // quando o líder inicia/pausa OPs e o coordenador precisa ver em tempo real.
       const existingMap = new Map(inMemoryLines.map(l => [l.id, l]));
-      mapped.forEach(line => {
-        if (!existingMap.has(line.id)) {
-          existingMap.set(line.id, line);
-        }
+      mapped.forEach(remoteLine => {
+        const local = existingMap.get(remoteLine.id);
+        existingMap.set(remoteLine.id, {
+          // Mantém o nome local se o remoto não trouxer (preserva customizações)
+          name: remoteLine.name || local?.name || remoteLine.id,
+          // status e currentOpId sempre vêm do remoto
+          id: remoteLine.id,
+          status: remoteLine.status,
+          currentOpId: remoteLine.currentOpId,
+        });
       });
 
       inMemoryLines = Array.from(existingMap.values());
@@ -757,13 +764,25 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
         }))
         .filter((op) => !deletedIds.has(op.id) && !isMockOp(op)); // NEVER bring back deleted or mock items!
 
-      // Intelligent merge: keep local edits as authoritative, but add new remote OPs
+      // Supabase é a fonte de verdade: dados remotos sempre substituem o cache local.
+      // Exceção: se o cache local tiver um campo crítico que o remoto não tem (ex.: producedQuantity
+      // gravado offline), mantemos o valor local apenas para esse campo específico.
       const localMap = new Map<string, ProductionOrder>();
       inMemoryOps.forEach(op => localMap.set(op.id, op));
 
       remoteOps.forEach(remoteOp => {
-        if (!localMap.has(remoteOp.id)) {
+        const local = localMap.get(remoteOp.id);
+        if (!local) {
+          // OP nova — usa remoto diretamente
           localMap.set(remoteOp.id, remoteOp);
+        } else {
+          // OP existente — remoto é autoridade; preserva campos locais só se remoto vier zerado/nulo
+          localMap.set(remoteOp.id, {
+            ...remoteOp,
+            producedQuantity: remoteOp.producedQuantity > 0
+              ? remoteOp.producedQuantity
+              : local.producedQuantity,
+          });
         }
       });
 
@@ -1022,60 +1041,24 @@ export const getLeaderRotation = async (
   const cleanEmail = (leaderEmail || '').trim().toLowerCase();
   const cleanName = (leaderName || '').trim().toLowerCase();
 
-  // 1. Direct lookup in inMemoryRotations by ID, email, or lowercased email
-  if (leaderId && inMemoryRotations[leaderId]) {
-    return inMemoryRotations[leaderId];
-  }
-  if (cleanEmail && inMemoryRotations[cleanEmail]) {
-    return inMemoryRotations[cleanEmail];
-  }
-  if (leaderEmail && inMemoryRotations[leaderEmail]) {
-    return inMemoryRotations[leaderEmail];
-  }
-
-  // 2. Cross-reference profiles to see if another key matches this user
-  const matchingProfile = inMemoryProfiles.find(p => 
-    (leaderId && p.uid === leaderId) || 
+  const matchingProfile = inMemoryProfiles.find(p =>
+    (leaderId && p.uid === leaderId) ||
     (cleanEmail && p.email && p.email.toLowerCase() === cleanEmail) ||
     (cleanName && p.name && p.name.toLowerCase() === cleanName)
   );
 
-  if (matchingProfile) {
-    if (matchingProfile.uid && inMemoryRotations[matchingProfile.uid]) {
-      return inMemoryRotations[matchingProfile.uid];
-    }
-    if (matchingProfile.email && inMemoryRotations[matchingProfile.email.toLowerCase()]) {
-      return inMemoryRotations[matchingProfile.email.toLowerCase()];
-    }
-    if (matchingProfile.email && inMemoryRotations[matchingProfile.email]) {
-      return inMemoryRotations[matchingProfile.email];
-    }
-    if ((matchingProfile as any).lineId) {
-      return (matchingProfile as any).lineId;
-    }
-  }
-
-  // 3. Search key-value entries in inMemoryRotations for any email / uid substring match
-  for (const [key, lineVal] of Object.entries(inMemoryRotations)) {
-    if (cleanEmail && key.toLowerCase() === cleanEmail) return lineVal;
-    if (cleanEmail && (key.toLowerCase().includes(cleanEmail) || cleanEmail.includes(key.toLowerCase()))) return lineVal;
-    if (leaderId && key === leaderId) return lineVal;
-  }
-
-  // 4. Query Supabase across multiple candidate IDs
+  // Supabase é sempre a fonte primária — o coordenador pode ter trocado a linha
+  // em outro dispositivo e o cache local estaria desatualizado.
   try {
-    const candidateIds = [
+    const canonicalId = matchingProfile?.uid || leaderId;
+    const candidateIds = Array.from(new Set([
+      canonicalId,
       leaderId,
-      cleanEmail,
-      leaderEmail,
-      matchingProfile?.uid,
-      matchingProfile?.email?.toLowerCase(),
-      matchingProfile?.email,
-    ].filter(Boolean) as string[];
+      cleanEmail || null,
+      matchingProfile?.email?.toLowerCase() || null,
+    ].filter(Boolean))) as string[];
 
-    const uniqueCandidates = Array.from(new Set(candidateIds));
-
-    for (const cId of uniqueCandidates) {
+    for (const cId of candidateIds) {
       let { data, error } = await supabase
         .from('weekly_rotations')
         .select('line_id')
@@ -1093,28 +1076,30 @@ export const getLeaderRotation = async (
 
       if (data?.line_id) {
         const resolvedLine = String(data.line_id);
-        inMemoryRotations[leaderId] = resolvedLine;
+        // Atualiza cache local com o valor remoto
+        inMemoryRotations[canonicalId] = resolvedLine;
         if (cleanEmail) inMemoryRotations[cleanEmail] = resolvedLine;
-        if (matchingProfile?.uid) inMemoryRotations[matchingProfile.uid] = resolvedLine;
         persistRotations();
         return resolvedLine;
       }
     }
   } catch (err) {
-    console.warn('Consulta de rotação no Supabase:', err);
+    console.warn('Consulta de rotação no Supabase — usando cache local:', err);
   }
 
-  // 5. Fallback: Check if an active / in_progress OP has this leader assigned
-  const foundOp = inMemoryOps.find(o => 
-    (leaderId && o.leaderId === leaderId) || 
+  // Fallback offline: cache local e depois perfil
+  if (leaderId && inMemoryRotations[leaderId]) return inMemoryRotations[leaderId];
+  if (cleanEmail && inMemoryRotations[cleanEmail]) return inMemoryRotations[cleanEmail];
+  if (matchingProfile?.uid && inMemoryRotations[matchingProfile.uid]) return inMemoryRotations[matchingProfile.uid];
+  if ((matchingProfile as any)?.lineId) return (matchingProfile as any).lineId;
+
+  // Último recurso: OP ativa associada ao líder
+  const foundOp = inMemoryOps.find(o =>
+    (leaderId && o.leaderId === leaderId) ||
     (cleanEmail && o.leaderId && o.leaderId.toLowerCase() === cleanEmail) ||
     (matchingProfile?.uid && o.leaderId === matchingProfile.uid)
   );
-  if (foundOp?.lineId) {
-    return foundOp.lineId;
-  }
-
-  return inMemoryRotations[leaderId] || inMemoryRotations[cleanEmail] || null;
+  return foundOp?.lineId || null;
 };
 
 export const getAllRotations = async (): Promise<Record<string, string>> => {
