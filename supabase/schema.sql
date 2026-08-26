@@ -267,3 +267,248 @@ ON public.rotations FOR ALL
 TO authenticated
 USING (public.is_coordinator())
 WITH CHECK (public.is_coordinator());
+
+-- ==============================================================================
+-- Migração 001: profiles first_access
+-- ==============================================================================
+
+-- 1. Adiciona a coluna must_change_password
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS must_change_password boolean NOT NULL DEFAULT false;
+
+-- 2. Atualiza a constraint de verificação de status para permitir 'first_access'
+DO $$
+DECLARE
+  v_con_name text;
+BEGIN
+  SELECT con.conname INTO v_con_name
+  FROM pg_constraint con
+  INNER JOIN pg_class rel ON rel.oid = con.conrelid
+  INNER JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+  WHERE rel.relname = 'profiles'
+    AND con.contype = 'c'
+    AND pg_get_constraintdef(con.oid) ILIKE '%status%';
+
+  IF v_con_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE public.profiles DROP CONSTRAINT IF EXISTS %I', v_con_name);
+  END IF;
+END $$;
+
+ALTER TABLE public.profiles
+  ADD CONSTRAINT profiles_status_check
+  CHECK (status IN ('active', 'inactive', 'suspended', 'first_access'));
+
+-- 3. Atualiza policy de inserção e atualização para primeiro acesso
+DROP POLICY IF EXISTS "profiles_insert_policy" ON public.profiles;
+CREATE POLICY "profiles_insert_policy"
+  ON public.profiles
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    auth.uid() = id
+    AND (status IS NULL OR status IN ('active', 'first_access'))
+  );
+
+DROP POLICY IF EXISTS "profiles_self_update_policy" ON public.profiles;
+CREATE POLICY "profiles_self_update_policy"
+  ON public.profiles
+  FOR UPDATE
+  TO authenticated
+  USING (auth.uid() = id)
+  WITH CHECK (auth.uid() = id);
+
+-- 4. Atualiza trigger check_profile_role_update para permitir que o usuário atualize seu próprio status no primeiro acesso
+CREATE OR REPLACE FUNCTION public.check_profile_role_update()
+RETURNS trigger AS $$
+BEGIN
+  IF (NEW.role != OLD.role OR NEW.cargo != OLD.cargo OR NEW.status != OLD.status) THEN
+    -- Permite que o próprio usuário atualize status durante o primeiro acesso
+    IF NOT (public.is_coordinator() OR (
+      auth.uid() = NEW.id
+      AND OLD.status = 'first_access'
+      AND NEW.status = 'active'
+      AND NEW.must_change_password = false
+      AND OLD.role = NEW.role
+      AND OLD.cargo = NEW.cargo
+    )) THEN
+      RAISE EXCEPTION 'Apenas coordenadores podem alterar cargos, permissões ou status de usuários.';
+    END IF;
+  END IF;
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==============================================================================
+-- Migração 002: aliases de tabelas e colunas de ops
+-- ==============================================================================
+
+-- 1. Adiciona as colunas na tabela ops
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS op_number text GENERATED ALWAYS AS (number) STORED,
+  ADD COLUMN IF NOT EXISTS lote text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS granel text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS scheduled_date date,
+  ADD COLUMN IF NOT EXISTS scheduled_shift text;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'ops_scheduled_shift_check'
+  ) THEN
+    ALTER TABLE public.ops
+      ADD CONSTRAINT ops_scheduled_shift_check
+      CHECK (scheduled_shift IS NULL OR scheduled_shift IN ('Manhã', 'Tarde', 'Noite'));
+  END IF;
+END $$;
+
+-- 2. Views com security_invoker = true
+CREATE OR REPLACE VIEW public.production_orders AS
+  SELECT * FROM public.ops
+  WITH CHECK OPTION;
+ALTER VIEW public.production_orders SET (security_invoker = true);
+
+CREATE OR REPLACE VIEW public.production_lines AS
+  SELECT * FROM public.lines
+  WITH CHECK OPTION;
+ALTER VIEW public.production_lines SET (security_invoker = true);
+
+CREATE OR REPLACE VIEW public.production_events AS
+  SELECT * FROM public.events
+  WITH CHECK OPTION;
+ALTER VIEW public.production_events SET (security_invoker = true);
+
+CREATE OR REPLACE VIEW public.weekly_rotations AS
+  SELECT * FROM public.rotations
+  WITH CHECK OPTION;
+ALTER VIEW public.weekly_rotations SET (security_invoker = true);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.production_orders TO authenticated, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.production_lines TO authenticated, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.production_events TO authenticated, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.weekly_rotations TO authenticated, anon;
+
+-- ==============================================================================
+-- Migração 003: rotations constraint e RLS líderes
+-- ==============================================================================
+
+-- 1. Limpeza de duplicados
+DELETE FROM public.rotations a
+USING public.rotations b
+WHERE a.leader_id = b.leader_id
+  AND a.ctid < b.ctid
+  AND (
+    COALESCE(a.created_at, NOW()) < COALESCE(b.created_at, NOW())
+    OR (
+      COALESCE(a.created_at, NOW()) = COALESCE(b.created_at, NOW())
+      AND a.ctid < b.ctid
+    )
+  );
+
+-- 2. Constraint UNIQUE (leader_id)
+DO $$
+DECLARE
+  v_con_name text;
+BEGIN
+  FOR v_con_name IN (
+    SELECT con.conname
+    FROM pg_constraint con
+    INNER JOIN pg_class rel ON rel.oid = con.conrelid
+    WHERE rel.relname = 'rotations'
+      AND con.contype = 'u'
+  ) LOOP
+    EXECUTE format('ALTER TABLE public.rotations DROP CONSTRAINT IF EXISTS %I', v_con_name);
+  END LOOP;
+END $$;
+
+ALTER TABLE public.rotations
+  ADD CONSTRAINT rotations_leader_id_key UNIQUE (leader_id);
+
+-- 3. Políticas de RLS para rotação individual de líderes
+DROP POLICY IF EXISTS "Leader can upsert own rotation" ON public.rotations;
+DROP POLICY IF EXISTS "Leader can update own rotation" ON public.rotations;
+DROP POLICY IF EXISTS "Leader can select own rotation" ON public.rotations;
+
+CREATE POLICY "Leader can select own rotation"
+  ON public.rotations FOR SELECT
+  TO authenticated
+  USING (leader_id = auth.uid() OR public.is_coordinator());
+
+CREATE POLICY "Leader can upsert own rotation"
+  ON public.rotations FOR INSERT
+  TO authenticated
+  WITH CHECK (leader_id = auth.uid() OR public.is_coordinator());
+
+CREATE POLICY "Leader can update own rotation"
+  ON public.rotations FOR UPDATE
+  TO authenticated
+  USING (leader_id = auth.uid() OR public.is_coordinator())
+  WITH CHECK (leader_id = auth.uid() OR public.is_coordinator());
+
+-- 4. Função determinística para rotação
+CREATE OR REPLACE FUNCTION public.get_leader_assigned_line(p_leader_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_line_id text;
+BEGIN
+  SELECT line_id INTO v_line_id
+  FROM public.rotations
+  WHERE leader_id = p_leader_id
+  ORDER BY updated_at DESC, created_at DESC
+  LIMIT 1;
+
+  RETURN v_line_id;
+END;
+$$;
+
+-- ==============================================================================
+-- Migração 004: Habilitação do Supabase Realtime nas tabelas do sistema
+-- ==============================================================================
+
+ALTER TABLE public.ops REPLICA IDENTITY FULL;
+ALTER TABLE public.lines REPLICA IDENTITY FULL;
+ALTER TABLE public.events REPLICA IDENTITY FULL;
+ALTER TABLE public.rotations REPLICA IDENTITY FULL;
+ALTER TABLE public.profiles REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'ops'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.ops;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'lines'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.lines;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'events'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.events;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'rotations'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.rotations;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'profiles'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.profiles;
+  END IF;
+END $$;

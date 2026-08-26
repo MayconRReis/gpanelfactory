@@ -26,9 +26,11 @@ import {
   FileSpreadsheet,
   AlertCircle,
   Award,
-  Sparkles
+  Sparkles,
+  Info
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent } from '../types';
+import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 interface HomeDashboardProps {
   lines: ProductionLine[];
@@ -39,6 +41,69 @@ interface HomeDashboardProps {
   rotations?: Record<string, string>;
   onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events') => void;
   onNewOp: () => void;
+}
+
+/**
+ * Calcula o tempo total real de pausas (em horas decimais) a partir dos eventos.
+ * Para cada evento PAUSED, pareia com o próximo evento cronológico RESUMED ou FINISHED
+ * de mesma opId e calcula a diferença de createdAt.
+ * Retorna 0 se não houver pares completos ou se events for vazio.
+ * Pausas abertas sem retomada são desconsideradas.
+ */
+export function calculateTotalPauseHours(events: ProductionEvent[]): number {
+  if (!events || events.length === 0) return 0;
+
+  // Ordena os eventos em ordem cronológica crescente
+  const sorted = [...events].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  // Agrupa eventos por opId
+  const eventsByOp: Record<string, ProductionEvent[]> = {};
+  for (const ev of sorted) {
+    const key = ev.opId || 'global';
+    if (!eventsByOp[key]) eventsByOp[key] = [];
+    eventsByOp[key].push(ev);
+  }
+
+  let totalMs = 0;
+
+  for (const opId of Object.keys(eventsByOp)) {
+    const opEvents = eventsByOp[opId];
+    let pauseStartTime: number | null = null;
+
+    for (const ev of opEvents) {
+      const time = new Date(ev.createdAt).getTime();
+      if (isNaN(time)) continue;
+
+      if (ev.type === 'PAUSED') {
+        pauseStartTime = time;
+      } else if (
+        (ev.type === 'RESUMED' || ev.type === 'FINISHED') &&
+        pauseStartTime !== null
+      ) {
+        const diff = time - pauseStartTime;
+        if (diff > 0) {
+          totalMs += diff;
+        }
+        pauseStartTime = null; // encerra o par completo
+      }
+    }
+  }
+
+  return totalMs / (1000 * 60 * 60);
+}
+
+/**
+ * Formata um número decimal de horas em string "Xh Ymin"
+ * Ex: 2.75 -> "2h 45min" | 0 -> "0h 0min"
+ */
+export function formatHoursAndMinutes(decimalHours: number): string {
+  if (!decimalHours || decimalHours <= 0 || isNaN(decimalHours)) return '0h 0min';
+  const totalMinutes = Math.round(decimalHours * 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}min`;
 }
 
 export function HomeDashboard({
@@ -184,7 +249,9 @@ export function HomeDashboard({
   const workHoursTotal = Math.floor(workHoursTotalDecimal);
   const workMinutesTotal = Math.round((workHoursTotalDecimal - workHoursTotal) * 60);
 
-  const idleHoursTotalDecimal = (events.filter((e) => e.type === 'PAUSED').length * 2.5) + 14.8;
+  // Cálculo real baseado nos eventos PAUSED -> RESUMED/FINISHED
+  const idleHoursTotalDecimal = useMemo(() => calculateTotalPauseHours(events), [events]);
+  const formattedIdleTotal = useMemo(() => formatHoursAndMinutes(idleHoursTotalDecimal), [idleHoursTotalDecimal]);
   const idleHoursTotal = Math.floor(idleHoursTotalDecimal);
   const idleMinutesTotal = Math.round((idleHoursTotalDecimal - idleHoursTotal) * 60);
 
@@ -348,7 +415,7 @@ export function HomeDashboard({
             {idleHoursToday}h {idleMinutesToday}m
           </div>
           <div className="text-[10px] text-orange-100/90 font-medium truncate">
-            total: {idleHoursTotal}h {idleMinutesTotal}m ociosos
+            total: {formattedIdleTotal} ociosos
           </div>
         </div>
 
@@ -696,14 +763,23 @@ export function HomeDashboard({
           <div className="bg-[#0f0f14] border border-[#22222b] rounded-2xl shadow-xl overflow-hidden">
             
             {/* Título da Tabela */}
-            <div className="p-4 border-b border-[#1f1f28] flex items-center justify-between">
-              <div className="flex items-center gap-2">
+            <div className="p-4 border-b border-[#1f1f28] flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
                   FAROL DE OPS — STATUS DE PRODUÇÃO E GARGALOS
                 </h3>
                 <span className="text-xs font-bold text-blue-400 bg-blue-950/60 border border-blue-900/40 px-2 py-0.5 rounded-lg">
                   {filteredOps.length} OP(s)
                 </span>
+                {INTEGRATIONS_ARE_MOCKED && (
+                  <span
+                    className="inline-flex items-center gap-1 bg-amber-950/80 text-amber-300 border border-amber-700/60 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide cursor-help"
+                    title="Integração Farol / EstoqueMais em modo simulado. Valores fictícios para testes."
+                  >
+                    <AlertTriangle className="w-3 h-3 text-amber-400" />
+                    Farol Simulado
+                  </span>
+                )}
               </div>
 
               <button
@@ -727,7 +803,19 @@ export function HomeDashboard({
                     <th className="py-3 px-3">PROGRESSO</th>
                     <th className="py-3 px-3">LINHA</th>
                     <th className="py-3 px-3 text-center">SITUAÇÃO</th>
-                    <th className="py-3 px-3 text-center bg-[#092e20]/40 text-[#34d399]">STATUS ME</th>
+                    <th className="py-3 px-3 text-center bg-[#092e20]/40 text-[#34d399]">
+                      <div className="flex items-center justify-center gap-1">
+                        <span>STATUS ME</span>
+                        {INTEGRATIONS_ARE_MOCKED && (
+                          <span
+                            className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1 py-0.2 rounded text-[9px] font-bold"
+                            title="Dado de embalagem simulado — integração com estoque pendente"
+                          >
+                            Simulado
+                          </span>
+                        )}
+                      </div>
+                    </th>
                     <th className="py-3 px-3 text-center bg-[#092e20]/40 text-[#34d399]">STATUS MP</th>
                     <th className="py-3 px-3 text-center bg-[#1e1b4b]/40 text-[#818cf8]">TEMPO PARADO</th>
                     <th className="py-3 px-3 text-center">PRIORIDADE</th>

@@ -73,6 +73,7 @@ import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar } from 'lucide-react';
+import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 export function CoordinatorDashboard() {
   const { profile, signOut } = useAuthStore();
@@ -2363,7 +2364,18 @@ WHERE email IN (
               </div>
 
               <div className="space-y-1">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
+                <div className="flex items-center justify-between">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
+                  {INTEGRATIONS_ARE_MOCKED && (
+                    <span
+                      className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                      title="Integração com EstoqueMais pendente — valor simulado/manual"
+                    >
+                      <AlertTriangle className="w-2.5 h-2.5" />
+                      Simulado
+                    </span>
+                  )}
+                </div>
                 <Input
                   type="number"
                   placeholder="Ex: 5000"

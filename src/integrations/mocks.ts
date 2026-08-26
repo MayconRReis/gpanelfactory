@@ -1,4 +1,6 @@
 // Integrations helper
+export const INTEGRATIONS_ARE_MOCKED = true;
+
 export const getFarolPriorities = async () => {
   return [];
 };

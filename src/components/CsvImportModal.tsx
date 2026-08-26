@@ -16,6 +16,7 @@ import {
 import { Button } from './ui/button';
 import { importOPsBatch } from '../services/db';
 import { ProductionOrder } from '../types';
+import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 export interface ParsedCsvOp {
   id?: string;
@@ -728,6 +729,15 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
                       {invalidRows.length > 0 && (
                         <span className="text-[10px] text-amber-400 bg-amber-950/70 border border-amber-800/40 px-2 py-0.2 rounded-full font-bold">
                           {invalidRows.length} ajustadas
+                        </span>
+                      )}
+                      {INTEGRATIONS_ARE_MOCKED && (
+                        <span
+                          className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-300 border border-amber-800/40 px-2 py-0.2 rounded-full text-[10px] font-semibold cursor-help"
+                          title="Estoque de embalagens (10.000 un) e prioridade Farol preenchidos em modo simulado"
+                        >
+                          <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
+                          Integração Simulada
                         </span>
                       )}
                     </div>
