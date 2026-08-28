@@ -6,6 +6,7 @@ export interface UserProfile {
   role: Role;
   name: string;
   cargo?: string;
+  area?: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação';
   status?: 'active' | 'inactive' | 'pending' | 'first_access';
   mustChangePassword?: boolean;
   defaultPassword?: string;
@@ -38,7 +39,24 @@ export interface ProductionOrder {
   sequence: number;
   scheduledDate?: string;
   scheduledShift?: string;
+  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+  unidade?: 'Un' | 'Kg' | 'Qtd';
+  rejectedQuantity?: number;
+  plannedHours?: number;
+  tipoDocumento?: 'OP' | 'OSM';
+  finishedShift?: 'Manhã' | 'Tarde';
   createdAt: string;
+}
+
+export interface MonthlyGoal {
+  id: string;
+  lineId: string;
+  year: number;
+  month: number;
+  goalQuantity: number;
+  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type EventType = 'STARTED' | 'PAUSED' | 'RESUMED' | 'FINISHED' | 'QUANTITY_REPORTED';

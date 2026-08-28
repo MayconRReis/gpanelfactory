@@ -272,8 +272,11 @@ WITH CHECK (public.is_coordinator());
 -- Migração 001: profiles first_access
 -- ==============================================================================
 
--- 1. Adiciona a coluna must_change_password
+-- 1. Garante a existência de todas as colunas necessárias na tabela profiles
 ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'leader',
+  ADD COLUMN IF NOT EXISTS cargo text NOT NULL DEFAULT 'Líder de Produção',
+  ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active',
   ADD COLUMN IF NOT EXISTS must_change_password boolean NOT NULL DEFAULT false;
 
 -- 2. Atualiza a constraint de verificação de status para permitir 'first_access'
@@ -299,6 +302,7 @@ ALTER TABLE public.profiles
   CHECK (status IN ('active', 'inactive', 'suspended', 'first_access'));
 
 -- 3. Atualiza policy de inserção e atualização para primeiro acesso
+DROP POLICY IF EXISTS "Users can insert their own initial leader profile" ON public.profiles;
 DROP POLICY IF EXISTS "profiles_insert_policy" ON public.profiles;
 CREATE POLICY "profiles_insert_policy"
   ON public.profiles
@@ -309,6 +313,7 @@ CREATE POLICY "profiles_insert_policy"
     AND (status IS NULL OR status IN ('active', 'first_access'))
   );
 
+DROP POLICY IF EXISTS "Users can update own basic info or coordinator can update all" ON public.profiles;
 DROP POLICY IF EXISTS "profiles_self_update_policy" ON public.profiles;
 CREATE POLICY "profiles_self_update_policy"
   ON public.profiles
@@ -393,7 +398,24 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.weekly_rotations TO authenticated
 -- Migração 003: rotations constraint e RLS líderes
 -- ==============================================================================
 
--- 1. Limpeza de duplicados
+-- 1. Adiciona coluna updated_at e trigger de atualização automática
+ALTER TABLE public.rotations
+  ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS tr_rotations_updated_at ON public.rotations;
+CREATE TRIGGER tr_rotations_updated_at
+BEFORE UPDATE ON public.rotations
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- 2. Limpeza de duplicados
 DELETE FROM public.rotations a
 USING public.rotations b
 WHERE a.leader_id = b.leader_id
@@ -406,7 +428,7 @@ WHERE a.leader_id = b.leader_id
     )
   );
 
--- 2. Constraint UNIQUE (leader_id)
+-- 3. Constraint UNIQUE (leader_id)
 DO $$
 DECLARE
   v_con_name text;
@@ -425,7 +447,9 @@ END $$;
 ALTER TABLE public.rotations
   ADD CONSTRAINT rotations_leader_id_key UNIQUE (leader_id);
 
--- 3. Políticas de RLS para rotação individual de líderes
+-- 4. Políticas de RLS para rotação individual de líderes
+DROP POLICY IF EXISTS "Rotations viewable by authenticated users" ON public.rotations;
+DROP POLICY IF EXISTS "Only coordinators can manage rotations" ON public.rotations;
 DROP POLICY IF EXISTS "Leader can upsert own rotation" ON public.rotations;
 DROP POLICY IF EXISTS "Leader can update own rotation" ON public.rotations;
 DROP POLICY IF EXISTS "Leader can select own rotation" ON public.rotations;
@@ -446,7 +470,7 @@ CREATE POLICY "Leader can update own rotation"
   USING (leader_id = auth.uid() OR public.is_coordinator())
   WITH CHECK (leader_id = auth.uid() OR public.is_coordinator());
 
--- 4. Função determinística para rotação
+-- 5. Função determinística para rotação
 CREATE OR REPLACE FUNCTION public.get_leader_assigned_line(p_leader_id uuid)
 RETURNS text
 LANGUAGE plpgsql
@@ -512,3 +536,92 @@ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.profiles;
   END IF;
 END $$;
+
+-- ==============================================================================
+-- Migração 005: setor/OEE em ops e tabela monthly_goals
+-- ==============================================================================
+
+-- 1. Campos de setor, unidade, refugo e horas planejadas em ops
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS setor text
+  CHECK (setor IS NULL OR setor IN ('Pesagem', 'Manipulação', 'Envase', 'Geral'));
+
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS unidade text
+  CHECK (unidade IS NULL OR unidade IN ('Un', 'Kg', 'Qtd'));
+
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS rejected_quantity integer NOT NULL DEFAULT 0;
+
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS planned_hours numeric(5,2);
+
+-- 2. Tabela de metas mensais por linha e setor
+CREATE TABLE IF NOT EXISTS public.monthly_goals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  line_id text NOT NULL REFERENCES public.lines(id) ON DELETE CASCADE,
+  year integer NOT NULL,
+  month integer NOT NULL CHECK (month BETWEEN 1 AND 12),
+  goal_quantity integer NOT NULL DEFAULT 0,
+  setor text CHECK (setor IN ('Pesagem', 'Manipulação', 'Envase', 'Geral')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (line_id, year, month, setor)
+);
+
+-- RLS: apenas coordenador gerencia metas; líder só lê
+ALTER TABLE public.monthly_goals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Coordinator manages goals" ON public.monthly_goals;
+CREATE POLICY "Coordinator manages goals"
+  ON public.monthly_goals FOR ALL
+  TO authenticated
+  USING (public.is_coordinator())
+  WITH CHECK (public.is_coordinator());
+
+DROP POLICY IF EXISTS "Leaders can read goals" ON public.monthly_goals;
+CREATE POLICY "Leaders can read goals"
+  ON public.monthly_goals FOR SELECT
+  TO authenticated
+  USING (true);
+
+-- Trigger updated_at
+DROP TRIGGER IF EXISTS tr_monthly_goals_updated_at ON public.monthly_goals;
+CREATE TRIGGER tr_monthly_goals_updated_at
+  BEFORE UPDATE ON public.monthly_goals
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+-- Realtime
+ALTER TABLE public.monthly_goals REPLICA IDENTITY FULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'monthly_goals'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.monthly_goals;
+  END IF;
+END $$;
+
+-- ==============================================================================
+-- Migração 006: tipo_documento OSM, finished_shift e area do líder
+-- ==============================================================================
+
+-- 1. Tipo de documento e turno de finalização em ops
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS tipo_documento text NOT NULL DEFAULT 'OP'
+  CHECK (tipo_documento IN ('OP', 'OSM'));
+
+ALTER TABLE public.ops
+  ADD COLUMN IF NOT EXISTS finished_shift text
+  CHECK (finished_shift IS NULL OR finished_shift IN ('Manhã', 'Tarde'));
+
+-- Índices para acelerar consultas por tipo de documento e setor
+CREATE INDEX IF NOT EXISTS idx_ops_tipo_documento ON public.ops (tipo_documento);
+CREATE INDEX IF NOT EXISTS idx_ops_setor ON public.ops (setor);
+
+-- 2. Campo area na tabela profiles
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS area text
+  CHECK (area IS NULL OR area IN ('Envase', 'Pesagem', 'Manipulação', 'Coordenação'));
+

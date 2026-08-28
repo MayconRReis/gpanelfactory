@@ -86,6 +86,7 @@ export function LeaderScreen() {
   const [quantity, setQuantity] = useState('');
 
   const [isFinishOpen, setIsFinishOpen] = useState(false);
+  const [finishShift, setFinishShift] = useState<'Manhã' | 'Tarde' | null>(null);
   const [isLineSelectOpen, setIsLineSelectOpen] = useState(false);
 
   // Relógio em tempo real
@@ -161,7 +162,6 @@ export function LeaderScreen() {
 
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_rotations' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stable)
@@ -183,11 +183,20 @@ export function LeaderScreen() {
     return lines.find(l => l.id === selectedLineId) || lines[0] || null;
   }, [lines, selectedLineId]);
 
-  // OPs da linha atual
+  // Filtro automático de documentos por área do líder
+  const visibleOps = useMemo(() => {
+    if (!profile?.area) return allOps; // sem área definida → vê tudo (compatibilidade)
+    if (profile.area === 'Envase') return allOps.filter(op => op.tipoDocumento === 'OP' || !op.tipoDocumento);
+    if (profile.area === 'Pesagem') return allOps.filter(op => op.tipoDocumento === 'OSM' && op.setor === 'Pesagem');
+    if (profile.area === 'Manipulação') return allOps.filter(op => op.tipoDocumento === 'OSM' && op.setor === 'Manipulação');
+    return allOps;
+  }, [allOps, profile?.area]);
+
+  // OPs da linha atual (baseado nos documentos visíveis para a área do líder)
   const lineOps = useMemo(() => {
     if (!currentLine) return [];
-    return allOps.filter(op => op.lineId === currentLine.id);
-  }, [allOps, currentLine]);
+    return visibleOps.filter(op => op.lineId === currentLine.id);
+  }, [visibleOps, currentLine]);
 
   // OP ativa da linha (em progresso, pausada ou primeira pendente)
   const activeOp = useMemo(() => {
@@ -266,8 +275,16 @@ export function LeaderScreen() {
 
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
-    await finishOP(activeOp.id, currentLine.id, profile.uid);
+    if (profile.area === 'Manipulação' && !finishShift) return;
+
+    await finishOP(
+      activeOp.id,
+      currentLine.id,
+      profile.uid,
+      profile.area === 'Manipulação' && finishShift ? finishShift : undefined
+    );
     setIsFinishOpen(false);
+    setFinishShift(null);
     await fetchData(true);
   };
 
@@ -422,6 +439,25 @@ export function LeaderScreen() {
 
   const missingQty = activeOp ? Math.max(activeOp.plannedQuantity - activeOp.producedQuantity, 0) : 0;
 
+  // Variáveis contextuais por Área de Atuação do Líder
+  const isManipulacao = profile?.area === 'Manipulação';
+  const isPesagem = profile?.area === 'Pesagem';
+  const isOsmArea = isManipulacao || isPesagem;
+
+  const docTypeLabel = isOsmArea ? 'OSM' : 'OP';
+  const displayUnit = isManipulacao ? 'Kg' : isPesagem ? 'Qtd' : (activeOp?.unidade || 'un');
+  const qtyProducedLabel = isManipulacao 
+    ? 'Kg manipulados' 
+    : isPesagem 
+    ? 'Bateladas pesadas' 
+    : 'Volume Produzido';
+
+  const reportButtonLabel = isManipulacao
+    ? 'APONTAR KG MANIPULADOS'
+    : isPesagem
+    ? 'APONTAR BATELADAS'
+    : 'APONTAR PRODUÇÃO';
+
   return (
     <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white">
       
@@ -445,6 +481,16 @@ export function LeaderScreen() {
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-950 text-blue-400 border border-blue-800/40">
                     {profile?.cargo || 'Líder de Produção'}
                   </span>
+                  {profile?.area && (
+                    <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-md border uppercase tracking-wider ${
+                      profile.area === 'Envase' ? 'bg-blue-950/80 text-[#3b82f6] border-blue-500/40' :
+                      profile.area === 'Pesagem' ? 'bg-purple-950/80 text-[#a855f7] border-purple-500/40' :
+                      profile.area === 'Manipulação' ? 'bg-cyan-950/80 text-[#06b6d4] border-cyan-500/40' :
+                      'bg-zinc-800 text-zinc-300 border-zinc-700'
+                    }`}>
+                      {profile.area}
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-[#a1a1aa] font-medium flex items-center gap-1.5 truncate">
                   <span>{profile?.name}</span>
@@ -638,7 +684,7 @@ export function LeaderScreen() {
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-[#20202a]">
                   <div className="flex items-center gap-2.5 flex-wrap">
                     <span className="px-3 py-1 rounded-xl bg-[#1a1a24] border border-[#2d2d3c] text-xs font-mono font-bold text-blue-400">
-                      OP #{activeOp.number}
+                      {docTypeLabel} #{activeOp.number}
                     </span>
                     {activeOp.lote && (
                       <span className="px-2.5 py-1 rounded-xl bg-[#16161e] border border-[#272733] text-xs font-mono text-[#a1a1aa] flex items-center gap-1">
@@ -708,14 +754,14 @@ export function LeaderScreen() {
                   <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
                     <div>
                       <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
-                        Volume Produzido
+                        {qtyProducedLabel}
                       </span>
                       <div className="flex items-baseline gap-2 mt-0.5">
                         <span className="text-3xl sm:text-4xl font-black text-white font-mono">
                           {activeOp.producedQuantity.toLocaleString('pt-BR')}
                         </span>
                         <span className="text-sm font-semibold text-[#71717a] font-mono">
-                          / {activeOp.plannedQuantity.toLocaleString('pt-BR')} un
+                          / {activeOp.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
                         </span>
                       </div>
                     </div>
@@ -725,7 +771,7 @@ export function LeaderScreen() {
                         Faltam para Concluir
                       </span>
                       <span className="text-lg font-bold text-blue-400 font-mono">
-                        {missingQty.toLocaleString('pt-BR')} un ({opProgress}%)
+                        {missingQty.toLocaleString('pt-BR')} {displayUnit} ({opProgress}%)
                       </span>
                     </div>
                   </div>
@@ -753,7 +799,7 @@ export function LeaderScreen() {
                       className="col-span-full h-14 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm uppercase tracking-wider rounded-2xl shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-2.5 transition-all"
                     >
                       <Play className="w-5 h-5 fill-current" />
-                      <span>INICIAR PRODUÇÃO DESTA OP</span>
+                      <span>INICIAR PRODUÇÃO DESTA {docTypeLabel}</span>
                     </Button>
                   )}
 
@@ -766,7 +812,7 @@ export function LeaderScreen() {
                         className="h-14 bg-blue-600 hover:bg-blue-500 text-white font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl shadow-lg shadow-blue-950/50 flex items-center justify-center gap-2 transition-all col-span-1 sm:col-span-2"
                       >
                         <Package className="w-5 h-5" />
-                        <span>APONTAR PRODUÇÃO</span>
+                        <span>{reportButtonLabel}</span>
                       </Button>
 
                       {/* Pausar Linha */}
@@ -780,11 +826,14 @@ export function LeaderScreen() {
 
                       {/* Finalizar OP */}
                       <Button
-                        onClick={() => setIsFinishOpen(true)}
+                        onClick={() => {
+                          setFinishShift(null);
+                          setIsFinishOpen(true);
+                        }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
                       >
                         <CheckCircle2 className="w-5 h-5" />
-                        <span>CONCLUIR OP</span>
+                        <span>CONCLUIR {docTypeLabel}</span>
                       </Button>
                     </>
                   )}
@@ -801,11 +850,14 @@ export function LeaderScreen() {
                       </Button>
 
                       <Button
-                        onClick={() => setIsFinishOpen(true)}
+                        onClick={() => {
+                          setFinishShift(null);
+                          setIsFinishOpen(true);
+                        }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 border border-emerald-500/30 font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2"
                       >
                         <CheckCircle2 className="w-5 h-5" />
-                        <span>CONCLUIR OP</span>
+                        <span>CONCLUIR {docTypeLabel}</span>
                       </Button>
                     </>
                   )}
@@ -819,7 +871,7 @@ export function LeaderScreen() {
                   <Package className="w-7 h-7" />
                 </div>
                 <h3 className="text-base font-bold text-white">
-                  Nenhuma OP em andamento nesta linha
+                  Nenhuma {docTypeLabel} em andamento nesta linha
                 </h3>
                 <p className="text-xs text-[#71717a] max-w-md mx-auto">
                   Aguardando programação da coordenação ou selecione outra linha para operar.
@@ -833,7 +885,7 @@ export function LeaderScreen() {
                 <div className="flex items-center gap-2">
                   <ListOrdered className="w-4 h-4 text-blue-400" />
                   <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                    Fila Sequenciada da Linha ({queuedOps.length} OPs na espera)
+                    Fila Sequenciada da Linha ({queuedOps.length} {docTypeLabel}s na espera)
                   </h3>
                 </div>
                 <span className="text-[11px] text-[#71717a]">
@@ -851,7 +903,7 @@ export function LeaderScreen() {
                       <div className="space-y-1">
                         <div className="flex items-center justify-between">
                           <span className="text-[10px] font-bold text-blue-400 font-mono bg-blue-950/50 px-2 py-0.5 rounded-md border border-blue-800/30">
-                            #{idx + 1} • OP {op.number}
+                            #{idx + 1} • {docTypeLabel} {op.number}
                           </span>
                           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
                             op.priority === 'Crítica' ? 'bg-rose-950 text-rose-400' :
@@ -864,7 +916,7 @@ export function LeaderScreen() {
                           {op.product}
                         </h4>
                         <p className="text-[11px] text-[#71717a] font-mono">
-                          Lote: {op.lote || 'N/A'} • Meta: {op.plannedQuantity.toLocaleString('pt-BR')} un
+                          Lote: {op.lote || 'N/A'} • Meta: {op.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
                         </p>
                       </div>
 
@@ -1023,14 +1075,21 @@ export function LeaderScreen() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="font-bold text-white truncate">
-                              {event.type === 'QUANTITY_REPORTED' ? `Apontamento de +${event.quantity} un` :
+                              {event.type === 'QUANTITY_REPORTED' ? `Apontamento de +${event.quantity} ${displayUnit}` :
                                event.type === 'STARTED' ? 'Início de Produção' :
                                event.type === 'PAUSED' ? `Pausa: ${event.reason || 'Operacional'}` :
-                               event.type === 'RESUMED' ? 'Retomada de Produção' : 'OP Finalizada com Sucesso'}
+                               event.type === 'RESUMED' ? 'Retomada de Produção' : 
+                               (() => {
+                                 const relatedOp = allOps.find(o => o.id === event.opId || o.number === event.opNumber);
+                                 if (relatedOp?.finishedShift) {
+                                   return `Finalizado · Turno da ${relatedOp.finishedShift}`;
+                                 }
+                                 return `${docTypeLabel} Finalizada com Sucesso`;
+                               })()}
                             </span>
                             {event.opNumber && (
                               <span className="text-[10px] font-mono text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded">
-                                OP {event.opNumber}
+                                {docTypeLabel} {event.opNumber}
                               </span>
                             )}
                           </div>
@@ -1309,17 +1368,17 @@ export function LeaderScreen() {
 
           <div className="space-y-5 py-3">
             <div className="bg-[#181822] p-3.5 rounded-2xl border border-[#2c2c3c] text-xs space-y-1">
-              <span className="text-[10px] uppercase font-bold text-[#71717a] block">OP Atual</span>
-              <p className="font-bold text-white">OP {activeOp?.number} • {activeOp?.product}</p>
+              <span className="text-[10px] uppercase font-bold text-[#71717a] block">{docTypeLabel} Atual</span>
+              <p className="font-bold text-white">{docTypeLabel} {activeOp?.number} • {activeOp?.product}</p>
               <p className="text-[#a1a1aa] font-mono">
-                Já produzido: {activeOp?.producedQuantity.toLocaleString('pt-BR')} / {activeOp?.plannedQuantity.toLocaleString('pt-BR')} un
+                Já produzido: {activeOp?.producedQuantity.toLocaleString('pt-BR')} / {activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
               </p>
             </div>
 
             {/* Botões Rápidos de Incremento */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Incremento Rápido de Peças
+                {isManipulacao ? 'Incremento Rápido de Kg' : isPesagem ? 'Incremento Rápido de Bateladas' : 'Incremento Rápido de Peças'}
               </Label>
               <div className="grid grid-cols-4 gap-2">
                 {[50, 100, 250, 500].map(amt => (
@@ -1329,7 +1388,7 @@ export function LeaderScreen() {
                     onClick={() => handleReport(amt)}
                     className="py-2.5 rounded-xl bg-[#1c1c27] hover:bg-blue-600 hover:text-white border border-[#2d2d3f] text-xs font-black font-mono transition-all"
                   >
-                    +{amt}
+                    +{amt} {displayUnit}
                   </button>
                 ))}
               </div>
@@ -1338,14 +1397,14 @@ export function LeaderScreen() {
             {/* Entrada Manual de Quantidade */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Ou Digite a Quantidade a Adicionar
+                {isManipulacao ? 'Ou Digite os Kg a Adicionar' : isPesagem ? 'Ou Digite as Bateladas a Adicionar' : 'Ou Digite a Quantidade a Adicionar'}
               </Label>
               <Input
                 type="number"
                 value={quantity}
                 onChange={e => setQuantity(e.target.value)}
                 className="bg-[#181822] border-[#2c2c3c] text-xl font-mono text-white h-12 rounded-xl text-center font-black focus:border-blue-500"
-                placeholder="Ex: 300"
+                placeholder={isManipulacao ? 'Ex: 250' : isPesagem ? 'Ex: 10' : 'Ex: 300'}
                 autoFocus
               />
             </div>
@@ -1431,43 +1490,84 @@ export function LeaderScreen() {
         </DialogContent>
       </Dialog>
 
-      {/* MODAL 3: FINALIZAR OP */}
+      {/* MODAL 3: FINALIZAR OP / OSM */}
       <Dialog open={isFinishOpen} onOpenChange={setIsFinishOpen}>
-        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+        <DialogContent className="bg-[#121214] border-[#27272a] text-[#f4f4f5] max-w-md rounded-3xl p-6">
           <DialogHeader>
             <DialogTitle className="uppercase tracking-wider text-sm font-black text-emerald-400 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5" />
-              Finalizar Ordem de Produção
+              Finalizar {docTypeLabel === 'OSM' ? 'Ordem de Serviço (OSM)' : 'Ordem de Produção (OP)'}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4 py-3">
-            <div className="bg-[#181822] p-4 rounded-2xl border border-[#2c2c3c] text-xs space-y-2">
+            <div className="bg-[#181822] p-4 rounded-2xl border border-[#27272a] text-xs space-y-2">
               <p className="text-white font-bold">
-                OP {activeOp?.number} • {activeOp?.product}
+                {docTypeLabel} {activeOp?.number} • {activeOp?.product}
               </p>
               <div className="grid grid-cols-2 gap-2 text-[#a1a1aa] font-mono pt-1">
-                <div>Planejado: <strong className="text-white">{activeOp?.plannedQuantity.toLocaleString('pt-BR')} un</strong></div>
-                <div>Produzido: <strong className="text-emerald-400">{activeOp?.producedQuantity.toLocaleString('pt-BR')} un</strong></div>
+                <div>Planejado: <strong className="text-white">{activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
+                <div>Produzido: <strong className="text-emerald-400">{activeOp?.producedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
               </div>
             </div>
 
+            {/* Seleção de Turno Obrigatória para Líderes de Manipulação (2 turnos) */}
+            {isManipulacao && (
+              <div className="space-y-2 pt-2 border-t border-[#27272a]">
+                <Label className="text-xs font-bold uppercase text-[#a1a1aa] flex items-center justify-between">
+                  <span>Qual turno está finalizando esta OSM? *</span>
+                  <span className="text-[10px] text-cyan-400 font-normal">Obrigatório</span>
+                </Label>
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setFinishShift('Manhã')}
+                    className={`py-3 px-4 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
+                      finishShift === 'Manhã'
+                        ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-950/60 ring-2 ring-blue-400/30'
+                        : 'bg-[#181822] text-[#a1a1aa] border-[#27272a] hover:border-blue-500/50 hover:text-white hover:bg-[#20202c]'
+                    }`}
+                  >
+                    <span className={`w-2.5 h-2.5 rounded-full ${finishShift === 'Manhã' ? 'bg-amber-300 animate-pulse' : 'bg-amber-400/60'}`} />
+                    <span>Manhã</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFinishShift('Tarde')}
+                    className={`py-3 px-4 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
+                      finishShift === 'Tarde'
+                        ? 'bg-cyan-600 text-white border-cyan-500 shadow-lg shadow-cyan-950/60 ring-2 ring-cyan-400/30'
+                        : 'bg-[#181822] text-[#a1a1aa] border-[#27272a] hover:border-cyan-500/50 hover:text-white hover:bg-[#20202c]'
+                    }`}
+                  >
+                    <span className={`w-2.5 h-2.5 rounded-full ${finishShift === 'Tarde' ? 'bg-cyan-300 animate-pulse' : 'bg-cyan-400/60'}`} />
+                    <span>Tarde</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <p className="text-xs text-[#a1a1aa]">
-              Ao confirmar a finalização, a OP será marcada como <strong>Concluída</strong> e a linha ficará livre para a próxima ordem da fila.
+              Ao confirmar a finalização, a {docTypeLabel} será marcada como <strong>Concluída</strong> e a linha ficará livre para a próxima ordem da fila.
             </p>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               variant="outline"
-              onClick={() => setIsFinishOpen(false)}
-              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+              onClick={() => {
+                setIsFinishOpen(false);
+                setFinishShift(null);
+              }}
+              className="border-[#27272a] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
             >
               Cancelar
             </Button>
             <Button
               onClick={handleFinish}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+              disabled={isManipulacao && !finishShift}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-black uppercase tracking-wider"
             >
               Confirmar Conclusão
             </Button>
@@ -1488,7 +1588,7 @@ export function LeaderScreen() {
           <div className="space-y-2.5 py-3">
             {lines.map(l => {
               const isSelected = l.id === selectedLineId;
-              const opCount = allOps.filter(o => o.lineId === l.id && o.status !== 'completed').length;
+              const opCount = visibleOps.filter(o => o.lineId === l.id && o.status !== 'completed').length;
               return (
                 <button
                   key={l.id}

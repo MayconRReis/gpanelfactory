@@ -29,8 +29,20 @@ import {
   Sparkles,
   Info
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal } from '../types';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
+import { calculateOEE, groupProductionByDayAndSetor, groupProductionByMonth } from '../services/db';
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  ReferenceLine,
+  CartesianGrid,
+} from 'recharts';
 
 interface HomeDashboardProps {
   lines: ProductionLine[];
@@ -39,6 +51,7 @@ interface HomeDashboardProps {
   allUsers: UserProfile[];
   events: ProductionEvent[];
   rotations?: Record<string, string>;
+  goals?: MonthlyGoal[];
   onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events') => void;
   onNewOp: () => void;
 }
@@ -113,9 +126,13 @@ export function HomeDashboard({
   allUsers,
   events,
   rotations = {},
+  goals = [],
   onNavigateTab,
   onNewOp,
 }: HomeDashboardProps) {
+  // Constante para indicar estimativa visual nas métricas operacionais não auditadas
+  const WORK_HOURS_ARE_ESTIMATED = true;
+
   // Sub-aba ativa no Painel PCP: 'farol' | 'curva_a'
   const [activeSubTab, setActiveSubTab] = useState<'farol' | 'curva_a'>('farol');
 
@@ -341,9 +358,755 @@ export function HomeDashboard({
     return `${d}, ${h}`;
   }, []);
 
+  // ---------------- NOVO PAINEL DE CONTROLE DE PRODUÇÃO: CÁLCULOS ----------------
+  
+  // 1. KPIs de Volume por Setor (Mês e Ano)
+  const sectorKpis = useMemo(() => {
+    const getOpDate = (op: ProductionOrder) => {
+      if (op.scheduledDate) {
+        const parts = op.scheduledDate.split('-');
+        if (parts.length >= 2) {
+          return { year: parseInt(parts[0], 10), month: parseInt(parts[1], 10) - 1 };
+        }
+      }
+      if (op.createdAt) {
+        const d = new Date(op.createdAt);
+        if (!isNaN(d.getTime())) return { year: d.getFullYear(), month: d.getMonth() };
+      }
+      return { year: currentYear, month: currentMonth };
+    };
+
+    let pesagemMes = 0;
+    let pesagemAno = 0;
+    let manipMes = 0;
+    let manipAno = 0;
+    let envaseMes = 0;
+    let envaseAno = 0;
+
+    for (const op of ops) {
+      const d = getOpDate(op);
+      const isYear = d.year === currentYear;
+      const isMonth = isYear && d.month === currentMonth;
+      const qty = Number(op.producedQuantity || 0);
+
+      const s = op.setor;
+      if (s === 'Pesagem') {
+        if (isYear) pesagemAno += qty;
+        if (isMonth) pesagemMes += qty;
+      } else if (s === 'Manipulação') {
+        if (isYear) manipAno += qty;
+        if (isMonth) manipMes += qty;
+      } else if (s === 'Envase') {
+        if (isYear) envaseAno += qty;
+        if (isMonth) envaseMes += qty;
+      } else {
+        // Fallback setor geral / não especificado -> somar no Envase (padrão de saída final)
+        if (isYear) envaseAno += qty;
+        if (isMonth) envaseMes += qty;
+      }
+    }
+
+    return {
+      pesagem: { mes: pesagemMes, ano: pesagemAno, unidade: 'Qtd' },
+      manipulacao: { mes: manipMes, ano: manipAno, unidade: 'Kg' },
+      envase: { mes: envaseMes, ano: envaseAno, unidade: 'Un' },
+    };
+  }, [ops, currentYear, currentMonth]);
+
+  // 2. OEE (Disponibilidade, Performance, Qualidade, Geral)
+  const oeeMetrics = useMemo(() => {
+    return calculateOEE(ops, events);
+  }, [ops, events]);
+
+  // 3. Meta Diária do Mês Atual
+  const daysInCurrentMonth = useMemo(() => {
+    return new Date(currentYear, currentMonth + 1, 0).getDate();
+  }, [currentYear, currentMonth]);
+
+  const activeMonthGoal = useMemo(() => {
+    if (goals && goals.length > 0) {
+      const found = goals.filter(g => g.year === currentYear && g.month === (currentMonth + 1));
+      if (found.length > 0) {
+        return found.reduce((acc, g) => acc + (g.goalQuantity || 0), 0);
+      }
+    }
+    return monthlyGoal;
+  }, [goals, currentYear, currentMonth, monthlyGoal]);
+
+  const dailyGoalValue = useMemo(() => {
+    return Math.round(activeMonthGoal / Math.max(1, daysInCurrentMonth));
+  }, [activeMonthGoal, daysInCurrentMonth]);
+
+  // 4. Gráfico Diário por Turno (1º Turno e 2º Turno)
+  const dailyTurnoChartData = useMemo(() => {
+    const dayMap = new Map<number, { day: number; label: string; turno1: number; turno2: number; total: number }>();
+    for (let i = 1; i <= daysInCurrentMonth; i++) {
+      dayMap.set(i, {
+        day: i,
+        label: `${i}`,
+        turno1: 0,
+        turno2: 0,
+        total: 0,
+      });
+    }
+
+    for (const op of ops) {
+      if (!op.producedQuantity) continue;
+      let opYear = currentYear;
+      let opMonth = currentMonth;
+      let opDay = 1;
+
+      if (op.scheduledDate) {
+        const parts = op.scheduledDate.split('-');
+        if (parts.length === 3) {
+          opYear = parseInt(parts[0], 10);
+          opMonth = parseInt(parts[1], 10) - 1;
+          opDay = parseInt(parts[2], 10);
+        }
+      } else if (op.createdAt) {
+        const d = new Date(op.createdAt);
+        if (!isNaN(d.getTime())) {
+          opYear = d.getFullYear();
+          opMonth = d.getMonth();
+          opDay = d.getDate();
+        }
+      }
+
+      if (opYear === currentYear && opMonth === currentMonth && dayMap.has(opDay)) {
+        const item = dayMap.get(opDay)!;
+        const shift = (op.scheduledShift || '').toLowerCase();
+        const qty = Number(op.producedQuantity || 0);
+
+        if (shift.includes('2') || shift.includes('tarde') || shift.includes('noite')) {
+          item.turno2 += qty;
+        } else {
+          item.turno1 += qty;
+        }
+        item.total += qty;
+      }
+    }
+
+    return Array.from(dayMap.values());
+  }, [ops, currentYear, currentMonth, daysInCurrentMonth]);
+
+  // 5. Rendimento & Ociosidade
+  const rendimentoPercent = useMemo(() => {
+    if (totalPlanned <= 0) return totalProduced > 0 ? 100 : 0;
+    return Math.min(100, Math.round((totalProduced / totalPlanned) * 1000) / 10);
+  }, [totalProduced, totalPlanned]);
+
+  const ociosidadePercent = useMemo(() => {
+    const totalHours = workHoursTodayDecimal + idleHoursTodayDecimal;
+    if (totalHours <= 0) return 0;
+    return Math.min(100, Math.round((idleHoursTodayDecimal / totalHours) * 1000) / 10);
+  }, [workHoursTodayDecimal, idleHoursTodayDecimal]);
+
+  // 6. Gráfico Mensal (12 Meses) com Média/Realizado e Meta
+  const monthlyChartData = useMemo(() => {
+    const grouped = groupProductionByMonth(ops, currentYear);
+    const avgHistorical = Math.round(activeMonthGoal * 0.85); // Referência de média anterior
+
+    return grouped.map((item) => {
+      let goalVal = activeMonthGoal;
+      if (goals && goals.length > 0) {
+        const gForMonth = goals.filter(g => g.year === currentYear && g.month === (item.month + 1));
+        if (gForMonth.length > 0) {
+          goalVal = gForMonth.reduce((sum, g) => sum + g.goalQuantity, 0);
+        }
+      }
+      return {
+        monthName: item.label,
+        month: item.month,
+        realizado: item.quantity,
+        mediaAnterior: avgHistorical,
+        meta: goalVal,
+        isCurrent: item.month === currentMonth,
+      };
+    });
+  }, [ops, goals, currentYear, currentMonth, activeMonthGoal]);
+
+  // 7. Cards de Turno: Manipulação (Bateladas) & Envase (Mil Un)
+  const manipCardsData = useMemo(() => {
+    const manipOps = ops.filter(o => o.setor === 'Manipulação');
+    let turno1 = 0;
+    let turno2 = 0;
+    const dayTotals: Record<string, number> = {};
+    let record = 0;
+
+    for (const o of manipOps) {
+      const shift = (o.scheduledShift || '').toLowerCase();
+      const qty = Number(o.producedQuantity || 0);
+      if (shift.includes('2') || shift.includes('tarde') || shift.includes('noite')) {
+        turno2 += qty;
+      } else {
+        turno1 += qty;
+      }
+
+      const dateKey = o.scheduledDate || (o.createdAt ? o.createdAt.substring(0, 10) : 'today');
+      dayTotals[dateKey] = (dayTotals[dateKey] || 0) + qty;
+      if (dayTotals[dateKey] > record) {
+        record = dayTotals[dateKey];
+      }
+    }
+
+    let bestMonth = 0;
+    for (const [key, val] of Object.entries(dayTotals)) {
+      if (key.startsWith(`${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`)) {
+        if (val > bestMonth) bestMonth = val;
+      }
+    }
+    if (bestMonth === 0 && record > 0) bestMonth = record;
+
+    return {
+      turno1,
+      turno2,
+      melhor: bestMonth,
+      record: Math.max(record, bestMonth),
+    };
+  }, [ops, currentYear, currentMonth]);
+
+  const envaseCardsData = useMemo(() => {
+    const envaseOps = ops.filter(o => o.setor === 'Envase' || (!o.setor && o.product));
+    let turno1 = 0;
+    let turno2 = 0;
+    const dayTotals: Record<string, number> = {};
+    let record = 0;
+
+    for (const o of envaseOps) {
+      const shift = (o.scheduledShift || '').toLowerCase();
+      const qty = Number(o.producedQuantity || 0);
+      if (shift.includes('2') || shift.includes('tarde') || shift.includes('noite')) {
+        turno2 += qty;
+      } else {
+        turno1 += qty;
+      }
+
+      const dateKey = o.scheduledDate || (o.createdAt ? o.createdAt.substring(0, 10) : 'today');
+      dayTotals[dateKey] = (dayTotals[dateKey] || 0) + qty;
+      if (dayTotals[dateKey] > record) {
+        record = dayTotals[dateKey];
+      }
+    }
+
+    let bestMonth = 0;
+    for (const [key, val] of Object.entries(dayTotals)) {
+      if (key.startsWith(`${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`)) {
+        if (val > bestMonth) bestMonth = val;
+      }
+    }
+    if (bestMonth === 0 && record > 0) bestMonth = record;
+
+    return {
+      turno1,
+      turno2,
+      melhor: bestMonth,
+      record: Math.max(record, bestMonth),
+    };
+  }, [ops, currentYear, currentMonth]);
+
+  // Velocímetro / Cadência (totalProduced / 1000)
+  const speedometerValue = useMemo(() => {
+    return Math.round(totalProduced / 1000 * 10) / 10;
+  }, [totalProduced]);
+
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
       
+      {/* ========================================================================= */}
+      {/* NOVO PAINEL DE CONTROLE DE PRODUÇÃO (REFERÊNCIA PCP / OEE) */}
+      {/* ========================================================================= */}
+      <div className="space-y-4">
+        
+        {/* ── LINHA 1: KPIs de Volume por Setor ── */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          
+          {/* Card Pesagem (Roxo) */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden transition-all hover:border-purple-500/40 shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-purple-500 inline-block shadow-[0_0_8px_rgba(168,85,247,0.8)]"></span>
+                PESAGEM ({sectorKpis.pesagem.unidade})
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-950/60 text-purple-300 border border-purple-800/40">
+                Setor 1
+              </span>
+            </div>
+            <div className="my-3">
+              <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
+                {sectorKpis.pesagem.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
+                <span className="text-[#71717a] font-normal mx-2">/</span>
+                <span className="text-lg text-[#a1a1aa]">{sectorKpis.pesagem.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+              </div>
+            </div>
+            <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
+              <span>Volume acumulado</span>
+              <span className="text-purple-400 font-bold">{sectorKpis.pesagem.unidade}</span>
+            </div>
+          </div>
+
+          {/* Card Manipulação (Ciano) */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden transition-all hover:border-cyan-500/40 shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-cyan-500 inline-block shadow-[0_0_8px_rgba(6,182,212,0.8)]"></span>
+                MANIPULAÇÃO ({sectorKpis.manipulacao.unidade})
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-800/40">
+                Setor 2
+              </span>
+            </div>
+            <div className="my-3">
+              <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
+                {sectorKpis.manipulacao.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
+                <span className="text-[#71717a] font-normal mx-2">/</span>
+                <span className="text-lg text-[#a1a1aa]">{sectorKpis.manipulacao.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+              </div>
+            </div>
+            <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
+              <span>Massa produzida</span>
+              <span className="text-cyan-400 font-bold">{sectorKpis.manipulacao.unidade}</span>
+            </div>
+          </div>
+
+          {/* Card Envase (Azul) */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between relative overflow-hidden transition-all hover:border-blue-500/40 shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-500 inline-block shadow-[0_0_8px_rgba(59,130,246,0.8)]"></span>
+                ENVASE ({sectorKpis.envase.unidade})
+              </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-950/60 text-blue-300 border border-blue-800/40">
+                Setor 3
+              </span>
+            </div>
+            <div className="my-3">
+              <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
+                {sectorKpis.envase.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
+                <span className="text-[#71717a] font-normal mx-2">/</span>
+                <span className="text-lg text-[#a1a1aa]">{sectorKpis.envase.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+              </div>
+            </div>
+            <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
+              <span>Unidades envasadas</span>
+              <span className="text-blue-400 font-bold">{sectorKpis.envase.unidade}</span>
+            </div>
+          </div>
+
+        </div>
+
+        {/* ── LINHA 2: OEE + Velocímetro ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          
+          {/* DISPONIBILIDADE */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-3 flex flex-col items-center justify-between min-h-[145px]">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] text-center">
+              DISPONIBILIDADE
+            </span>
+            <div className="relative flex items-center justify-center my-1">
+              <svg width="74" height="74" className="-rotate-90">
+                <circle cx="37" cy="37" r="30" stroke="#27272a" strokeWidth="6" fill="transparent" />
+                {oeeMetrics.disponibilidade !== null && (
+                  <circle
+                    cx="37"
+                    cy="37"
+                    r="30"
+                    stroke="#3b82f6"
+                    strokeWidth="6"
+                    fill="transparent"
+                    strokeDasharray={188.5}
+                    strokeDashoffset={188.5 - (Math.min(1, Math.max(0, oeeMetrics.disponibilidade)) * 188.5)}
+                    strokeLinecap="round"
+                  />
+                )}
+              </svg>
+              <span className="absolute text-sm font-black text-[#f4f4f5] font-mono">
+                {oeeMetrics.disponibilidade !== null ? `${Math.round(oeeMetrics.disponibilidade * 100)}%` : '—'}
+              </span>
+            </div>
+            <span className="text-[9px] text-[#71717a] font-medium text-center truncate">
+              {oeeMetrics.disponibilidade !== null ? 'Tempo de máquina ativo' : 'Aguardando plannedHours'}
+            </span>
+          </div>
+
+          {/* PERFORMANCE */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-3 flex flex-col items-center justify-between min-h-[145px]">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] text-center">
+              PERFORMANCE
+            </span>
+            <div className="relative flex items-center justify-center my-1">
+              <svg width="74" height="74" className="-rotate-90">
+                <circle cx="37" cy="37" r="30" stroke="#27272a" strokeWidth="6" fill="transparent" />
+                {oeeMetrics.performance !== null && (
+                  <circle
+                    cx="37"
+                    cy="37"
+                    r="30"
+                    stroke="#06b6d4"
+                    strokeWidth="6"
+                    fill="transparent"
+                    strokeDasharray={188.5}
+                    strokeDashoffset={188.5 - (Math.min(1, Math.max(0, oeeMetrics.performance)) * 188.5)}
+                    strokeLinecap="round"
+                  />
+                )}
+              </svg>
+              <span className="absolute text-sm font-black text-[#f4f4f5] font-mono">
+                {oeeMetrics.performance !== null ? `${Math.round(oeeMetrics.performance * 100)}%` : '—'}
+              </span>
+            </div>
+            <span className="text-[9px] text-[#71717a] font-medium text-center truncate">
+              {oeeMetrics.performance !== null ? 'Produzido vs Planejado' : 'Sem ordens ativas'}
+            </span>
+          </div>
+
+          {/* QUALIDADE */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-3 flex flex-col items-center justify-between min-h-[145px]">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] text-center">
+              QUALIDADE
+            </span>
+            <div className="relative flex items-center justify-center my-1">
+              <svg width="74" height="74" className="-rotate-90">
+                <circle cx="37" cy="37" r="30" stroke="#27272a" strokeWidth="6" fill="transparent" />
+                {oeeMetrics.qualidade !== null && (
+                  <circle
+                    cx="37"
+                    cy="37"
+                    r="30"
+                    stroke="#22c55e"
+                    strokeWidth="6"
+                    fill="transparent"
+                    strokeDasharray={188.5}
+                    strokeDashoffset={188.5 - (Math.min(1, Math.max(0, oeeMetrics.qualidade)) * 188.5)}
+                    strokeLinecap="round"
+                  />
+                )}
+              </svg>
+              <span className="absolute text-sm font-black text-[#f4f4f5] font-mono">
+                {oeeMetrics.qualidade !== null ? `${Math.round(oeeMetrics.qualidade * 100)}%` : '—'}
+              </span>
+            </div>
+            <span className="text-[9px] text-[#71717a] font-medium text-center truncate">
+              {oeeMetrics.qualidade !== null ? 'Itens conformes' : 'Sem rejeições registradas'}
+            </span>
+          </div>
+
+          {/* OEE GERAL */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-3 flex flex-col items-center justify-between min-h-[145px] relative overflow-hidden bg-gradient-to-b from-[#18181b] to-[#121214]">
+            <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 text-center flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-purple-400" />
+              OEE GLOBAL
+            </span>
+            <div className="relative flex items-center justify-center my-1">
+              <svg width="74" height="74" className="-rotate-90">
+                <circle cx="37" cy="37" r="30" stroke="#27272a" strokeWidth="7" fill="transparent" />
+                {oeeMetrics.oee !== null && (
+                  <circle
+                    cx="37"
+                    cy="37"
+                    r="30"
+                    stroke="#a855f7"
+                    strokeWidth="7"
+                    fill="transparent"
+                    strokeDasharray={188.5}
+                    strokeDashoffset={188.5 - (Math.min(1, Math.max(0, oeeMetrics.oee)) * 188.5)}
+                    strokeLinecap="round"
+                  />
+                )}
+              </svg>
+              <span className="absolute text-base font-black text-[#f4f4f5] font-mono">
+                {oeeMetrics.oee !== null ? `${Math.round(oeeMetrics.oee * 100)}%` : '—'}
+              </span>
+            </div>
+            <span className="text-[9px] font-bold text-purple-300 px-2 py-0.5 rounded-md bg-purple-950/80 border border-purple-800/40">
+              {oeeMetrics.oee !== null ? (oeeMetrics.oee >= 0.85 ? 'Classe Mundial' : oeeMetrics.oee >= 0.65 ? 'Operação Típica' : 'Em Otimização') : 'Dados Parciais'}
+            </span>
+          </div>
+
+          {/* VELOCÍMETRO */}
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-3 flex flex-col items-center justify-between min-h-[145px] col-span-2 sm:col-span-1">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] text-center">
+              VELOCÍMETRO
+            </span>
+            <div className="relative w-28 h-12 flex items-end justify-center overflow-hidden my-1">
+              <svg viewBox="0 0 100 50" className="w-28 h-12">
+                <path
+                  d="M 12 48 A 38 38 0 0 1 88 48"
+                  fill="none"
+                  stroke="#27272a"
+                  strokeWidth="8"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M 12 48 A 38 38 0 0 1 88 48"
+                  fill="none"
+                  stroke="url(#speedo-grad)"
+                  strokeWidth="8"
+                  strokeDasharray="120"
+                  strokeDashoffset={120 - Math.min(1, Math.max(0.1, speedometerValue / 100)) * 120}
+                  strokeLinecap="round"
+                />
+                <defs>
+                  <linearGradient id="speedo-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#3b82f6" />
+                    <stop offset="50%" stopColor="#22c55e" />
+                    <stop offset="100%" stopColor="#f97316" />
+                  </linearGradient>
+                </defs>
+              </svg>
+              <div
+                className="absolute bottom-0 w-1 h-8 bg-amber-400 origin-bottom rounded-full transition-transform duration-500"
+                style={{ transform: `rotate(${-90 + Math.min(1, Math.max(0.05, speedometerValue / 100)) * 180}deg)` }}
+              />
+              <div className="absolute bottom-0 w-2.5 h-2.5 bg-white rounded-full -mb-1 shadow" />
+            </div>
+            <div className="text-center">
+              <span className="text-sm font-black text-[#f4f4f5] font-mono">
+                {speedometerValue}k
+              </span>
+              <span className="text-[9px] text-[#71717a] font-medium ml-1">prod / 1k</span>
+            </div>
+          </div>
+
+        </div>
+
+        {/* ── LINHA 3: Gráfico Diário por Turno + Rendimento + Ociosidade ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          
+          {/* Gráfico Diário por Turno (8 cols) */}
+          <div className="lg:col-span-8 bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between min-h-[300px]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <div>
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-blue-400" />
+                  Produção Diária por Turno
+                </h3>
+                <p className="text-[10px] text-[#71717a]">
+                  Volume diário distribuído em 1º e 2º Turnos vs Meta Diária ({dailyGoalValue.toLocaleString('pt-BR')} un/dia)
+                </p>
+              </div>
+              <div className="flex items-center gap-3 text-[10px]">
+                <span className="flex items-center gap-1 text-cyan-400 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-cyan-500"></span> 1º Turno (Manhã)
+                </span>
+                <span className="flex items-center gap-1 text-blue-400 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-blue-600"></span> 2º Turno (Tarde)
+                </span>
+                <span className="flex items-center gap-1 text-red-400 font-medium">
+                  <span className="w-3 h-0.5 bg-red-500 border-t border-dashed"></span> Meta
+                </span>
+              </div>
+            </div>
+
+            <div className="h-[210px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={dailyTurnoChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="label" stroke="#71717a" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                    formatter={(value: any, name: any) => [
+                      `${Number(value || 0).toLocaleString('pt-BR')} un`,
+                      name === 'turno1' ? '1º Turno' : name === 'turno2' ? '2º Turno' : name
+                    ]}
+                    labelFormatter={(label) => `Dia ${label}`}
+                  />
+                  <ReferenceLine y={dailyGoalValue} stroke="#ef4444" strokeDasharray="3 3" strokeWidth={1.5} label={{ value: 'Meta', fill: '#ef4444', fontSize: 9, position: 'insideTopRight' }} />
+                  <Bar dataKey="turno1" stackId="a" fill="#06b6d4" radius={[0, 0, 0, 0]} name="1º Turno" />
+                  <Bar dataKey="turno2" stackId="a" fill="#3b82f6" radius={[4, 4, 0, 0]} name="2º Turno" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Cards Laterais: Rendimento + Ociosidade (4 cols) */}
+          <div className="lg:col-span-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
+            
+            {/* RENDIMENTO */}
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  RENDIMENTO GLOBAL
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950/60 text-emerald-300 border border-emerald-800/40">
+                  {rendimentoPercent >= 90 ? 'Excelente' : rendimentoPercent >= 75 ? 'Regular' : 'Atenção'}
+                </span>
+              </div>
+              <div className="my-2">
+                <div className="text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
+                  {rendimentoPercent}%
+                </div>
+                <div className="w-full bg-[#27272a] h-2 rounded-full overflow-hidden mt-2">
+                  <div
+                    className="bg-emerald-500 h-full rounded-full transition-all duration-500"
+                    style={{ width: `${Math.min(100, Math.max(0, rendimentoPercent))}%` }}
+                  />
+                </div>
+              </div>
+              <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between pt-1 border-t border-[#27272a]/60">
+                <span>{totalProduced.toLocaleString('pt-BR')} un realizadas</span>
+                <span>Meta: {totalPlanned.toLocaleString('pt-BR')} un</span>
+              </div>
+            </div>
+
+            {/* OCIOSIDADE */}
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-wider text-orange-400 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  OCIOSIDADE DO DIA
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-orange-950/60 text-orange-300 border border-orange-800/40">
+                  {ociosidadePercent}%
+                </span>
+              </div>
+              <div className="my-2">
+                <div className="text-2xl font-black text-[#f4f4f5] tracking-tight font-mono">
+                  {idleHoursToday}h {idleMinutesToday}min
+                </div>
+                <p className="text-[10px] text-[#71717a] mt-1">
+                  Tempo acumulado de paradas e espera operacional hoje.
+                </p>
+              </div>
+              <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between pt-1 border-t border-[#27272a]/60">
+                <span>Total histórico: {formattedIdleTotal}</span>
+                <span className="text-orange-400 font-bold">{pausedLinesCount} linhas pausadas</span>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+        {/* ── LINHA 4: Gráfico Mensal 12 Meses + Cards de Turno ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          
+          {/* Gráfico Mensal (8 cols) */}
+          <div className="lg:col-span-8 bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between min-h-[300px]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <div>
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-purple-400" />
+                  Produção Mensal ({currentYear})
+                </h3>
+                <p className="text-[10px] text-[#71717a]">
+                  Comparativo de 12 meses: volume realizado vs média histórica e meta
+                </p>
+              </div>
+              <div className="flex items-center gap-3 text-[10px]">
+                <span className="flex items-center gap-1 text-[#a1a1aa] font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#52525b]"></span> Média Anterior
+                </span>
+                <span className="flex items-center gap-1 text-red-400 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-red-500"></span> Realizado
+                </span>
+                <span className="flex items-center gap-1 text-blue-400 font-medium">
+                  <span className="w-3 h-0.5 bg-blue-500 border-t border-dashed"></span> Meta
+                </span>
+              </div>
+            </div>
+
+            <div className="h-[210px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                    formatter={(value: any, name: any) => [
+                      `${Number(value || 0).toLocaleString('pt-BR')} un`,
+                      name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name
+                    ]}
+                  />
+                  <ReferenceLine y={activeMonthGoal} stroke="#3b82f6" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: 'Meta Mês', fill: '#3b82f6', fontSize: 9, position: 'insideTopRight' }} />
+                  <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
+                  <Bar dataKey="realizado" fill="#ef4444" radius={[4, 4, 0, 0]} name="Realizado" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Cards de Turno: Manipulação e Envase (4 cols) */}
+          <div className="lg:col-span-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
+            
+            {/* CARD MANIPULAÇÃO: Bateladas */}
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                  <Package className="w-3.5 h-3.5" />
+                  MANIPULAÇÃO (Bateladas)
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-800/40 font-mono">
+                  {(manipCardsData.turno1 + manipCardsData.turno2).toLocaleString('pt-BR')} Kg
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 my-2.5">
+                <div className="bg-[#121214] border border-[#27272a] rounded-xl p-2.5 text-center">
+                  <span className="text-[9px] text-[#a1a1aa] block font-bold">1º TURNO</span>
+                  <span className="text-base font-black text-[#f4f4f5] font-mono">{manipCardsData.turno1.toLocaleString('pt-BR')}</span>
+                  <span className="text-[8px] text-[#71717a] block">Kg produzidos</span>
+                </div>
+                <div className="bg-[#121214] border border-[#27272a] rounded-xl p-2.5 text-center">
+                  <span className="text-[9px] text-[#a1a1aa] block font-bold">2º TURNO</span>
+                  <span className="text-base font-black text-[#f4f4f5] font-mono">{manipCardsData.turno2.toLocaleString('pt-BR')}</span>
+                  <span className="text-[8px] text-[#71717a] block">Kg produzidos</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[10px] pt-1.5 border-t border-[#27272a]/60">
+                <span className="text-[#a1a1aa]">
+                  Melhor Dia: <strong className="text-cyan-400 font-mono">{manipCardsData.melhor.toLocaleString('pt-BR')} Kg</strong>
+                </span>
+                <span className="text-[#a1a1aa]">
+                  Récord: <strong className="text-emerald-400 font-mono">{manipCardsData.record.toLocaleString('pt-BR')} Kg</strong>
+                </span>
+              </div>
+            </div>
+
+            {/* CARD ENVASE: Mil Unidades */}
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                  <Box className="w-3.5 h-3.5" />
+                  ENVASE (Mil Unidades)
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-950/60 text-blue-300 border border-blue-800/40 font-mono">
+                  {((envaseCardsData.turno1 + envaseCardsData.turno2) / 1000).toFixed(1)}k Un
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 my-2.5">
+                <div className="bg-[#121214] border border-[#27272a] rounded-xl p-2.5 text-center">
+                  <span className="text-[9px] text-[#a1a1aa] block font-bold">1º TURNO</span>
+                  <span className="text-base font-black text-[#f4f4f5] font-mono">{(envaseCardsData.turno1 / 1000).toFixed(1)}k</span>
+                  <span className="text-[8px] text-[#71717a] block">Unidades</span>
+                </div>
+                <div className="bg-[#121214] border border-[#27272a] rounded-xl p-2.5 text-center">
+                  <span className="text-[9px] text-[#a1a1aa] block font-bold">2º TURNO</span>
+                  <span className="text-base font-black text-[#f4f4f5] font-mono">{(envaseCardsData.turno2 / 1000).toFixed(1)}k</span>
+                  <span className="text-[8px] text-[#71717a] block">Unidades</span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between text-[10px] pt-1.5 border-t border-[#27272a]/60">
+                <span className="text-[#a1a1aa]">
+                  Melhor Dia: <strong className="text-blue-400 font-mono">{(envaseCardsData.melhor / 1000).toFixed(1)}k Un</strong>
+                </span>
+                <span className="text-[#a1a1aa]">
+                  Récord: <strong className="text-emerald-400 font-mono">{(envaseCardsData.record / 1000).toFixed(1)}k Un</strong>
+                </span>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
       {/* ========================================================================= */}
       {/* BANNER DE INFORMAÇÕES OPERACIONAIS: HORÁRIO ADMINISTRATIVO & ESTRUTURA DE LINHAS */}
       {/* ========================================================================= */}
@@ -408,8 +1171,18 @@ export function HomeDashboard({
 
         {/* CARD 3: LARANJA (Tempo Ocioso Dia / Total / Em Atenção) */}
         <div className="bg-[#f97316] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
-          <div className="text-[10px] font-black uppercase tracking-wider text-orange-100 truncate">
-            TEMPO OCIOSO (DIA / TOT)
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-black uppercase tracking-wider text-orange-100 truncate">
+              TEMPO OCIOSO (DIA / TOT)
+            </span>
+            {WORK_HOURS_ARE_ESTIMATED && (
+              <span
+                className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0"
+                title="Métrica baseada em estimativa do ritmo diário"
+              >
+                Estimado
+              </span>
+            )}
           </div>
           <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
             {idleHoursToday}h {idleMinutesToday}m
@@ -421,14 +1194,32 @@ export function HomeDashboard({
 
         {/* CARD 4: VERDE ESMERALDA (Tempo de Trabalho Dia / Total) */}
         <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
-          <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
-            TEMPO TRABALHO (DIA)
+          <div className="flex items-center justify-between gap-1">
+            <span className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
+              TEMPO TRABALHO (DIA)
+            </span>
+            {WORK_HOURS_ARE_ESTIMATED && (
+              <span
+                className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0"
+                title="Métrica estimada: horas de turno e ritmo médio"
+              >
+                Estimado
+              </span>
+            )}
           </div>
-          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
-            {workHoursToday}h {workMinutesToday}m
+          <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono flex items-center justify-between">
+            <span>{workHoursToday}h {workMinutesToday}m</span>
           </div>
-          <div className="text-[10px] text-emerald-100/90 font-medium truncate">
-            total: {workHoursTotal}h {workMinutesTotal}m ativos
+          <div className="text-[10px] text-emerald-100/90 font-medium truncate flex items-center justify-between gap-1">
+            <span>total: {workHoursTotal}h {workMinutesTotal}m ativos</span>
+            {WORK_HOURS_ARE_ESTIMATED && (
+              <span
+                className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1 py-0.2 rounded text-[8px] font-bold"
+                title="Total estimado pelo volume produzido"
+              >
+                Estimado
+              </span>
+            )}
           </div>
         </div>
 

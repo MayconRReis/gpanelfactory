@@ -39,7 +39,8 @@ import {
   FlaskConical,
   Database,
   Menu,
-  KeyRound
+  KeyRound,
+  Edit2
 } from 'lucide-react';
 import { 
   getLines, 
@@ -63,9 +64,11 @@ import {
   getPauseReasons,
   resetProductionDatabase,
   generateTemporaryPassword,
-  generateLeaderEmail
+  generateLeaderEmail,
+  getMonthlyGoals,
+  getTipoDocumento
 } from '../services/db';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
@@ -91,6 +94,7 @@ export function CoordinatorDashboard() {
   const [rotations, setRotations] = useState<Record<string, string>>({});
   const [events, setEvents] = useState<ProductionEvent[]>([]);
   const [pauseReasons, setPauseReasons] = useState<PauseReason[]>([]);
+  const [goals, setGoals] = useState<MonthlyGoal[]>([]);
 
   // UI state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -99,10 +103,15 @@ export function CoordinatorDashboard() {
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState<'all' | 'pending' | 'coordinator' | 'leader'>('all');
   
-  // Modal: Nova OP
+  // Modal: Nova OP / Editar OP
   const [showNewOpModal, setShowNewOpModal] = useState(false);
+  const [editingOp, setEditingOp] = useState<ProductionOrder | null>(null);
   const [newOpNumber, setNewOpNumber] = useState('');
   const [newOpProduct, setNewOpProduct] = useState('');
+  const [newOpSetor, setNewOpSetor] = useState<'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'>('Envase');
+  const [newOpUnidade, setNewOpUnidade] = useState<'Un' | 'Kg' | 'Qtd'>('Un');
+  const [newOpPlannedHours, setNewOpPlannedHours] = useState('');
+  const [newOpRejectedQuantity, setNewOpRejectedQuantity] = useState('');
   const [newOpLote, setNewOpLote] = useState('');
   const [newOpPlanned, setNewOpPlanned] = useState('');
   const [newOpGranel, setNewOpGranel] = useState('');
@@ -135,6 +144,7 @@ export function CoordinatorDashboard() {
   const [newLeaderEmail, setNewLeaderEmail] = useState('');
   const [newLeaderLineId, setNewLeaderLineId] = useState('');
   const [newLeaderCargo, setNewLeaderCargo] = useState('Líder de Produção');
+  const [newLeaderArea, setNewLeaderArea] = useState<'Envase' | 'Pesagem' | 'Manipulação'>('Envase');
   const [isSubmittingLeader, setIsSubmittingLeader] = useState(false);
   const [isAutoEmail, setIsAutoEmail] = useState(true);
 
@@ -144,6 +154,7 @@ export function CoordinatorDashboard() {
     email: string;
     password: string;
     cargo: string;
+    area?: string;
     lineName?: string;
   } | null>(null);
 
@@ -170,7 +181,8 @@ export function CoordinatorDashboard() {
 
   const loadData = async () => {
     try {
-      const [ls, os, lds, usrs, rots, evts, prs] = await Promise.all([
+      const currentYear = new Date().getFullYear();
+      const [ls, os, lds, usrs, rots, evts, prs, gls] = await Promise.all([
         getLines(),
         getAllOPs(),
         getLeaders(),
@@ -178,6 +190,7 @@ export function CoordinatorDashboard() {
         getAllRotations(),
         getRecentEvents(),
         getPauseReasons(),
+        getMonthlyGoals(currentYear),
       ]);
       setLines(ls);
       setOps(os);
@@ -186,6 +199,7 @@ export function CoordinatorDashboard() {
       setRotations(rots);
       setEvents(evts);
       setPauseReasons(prs);
+      setGoals(gls || []);
     } catch (e) {
       console.warn('Erro ao carregar dados do coordenador:', e);
     }
@@ -204,8 +218,8 @@ export function CoordinatorDashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'weekly_rotations' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => loadData())
       .subscribe();
 
     // Fallback sync every 4 seconds
@@ -379,16 +393,66 @@ WHERE email IN (
     await loadData();
   };
 
-  const handleCreateOP = async (e: React.FormEvent) => {
+  const handleOpenCreateOPModal = (lineId?: string) => {
+    setEditingOp(null);
+    setNewOpNumber('');
+    setNewOpProduct('');
+    setNewOpSetor('Envase');
+    setNewOpUnidade('Un');
+    setNewOpPlannedHours('');
+    setNewOpRejectedQuantity('');
+    setNewOpLote('');
+    setNewOpPlanned('');
+    setNewOpGranel('');
+    setNewOpPriority('Normal');
+    setNewOpLineId(lineId || '');
+    setNewOpPackage('1000');
+    setShowNewOpModal(true);
+  };
+
+  const handleOpenEditOPModal = (op: ProductionOrder) => {
+    setEditingOp(op);
+    setNewOpNumber(op.number || '');
+    setNewOpProduct(op.product || '');
+    const currentSetor = op.setor || 'Envase';
+    setNewOpSetor(currentSetor);
+    setNewOpUnidade(op.unidade || (currentSetor === 'Manipulação' ? 'Kg' : currentSetor === 'Pesagem' ? 'Qtd' : 'Un'));
+    setNewOpPlannedHours(op.plannedHours !== undefined && op.plannedHours !== null ? String(op.plannedHours) : '');
+    setNewOpRejectedQuantity(op.rejectedQuantity !== undefined && op.rejectedQuantity !== null ? String(op.rejectedQuantity) : '0');
+    setNewOpLote(op.lote || '');
+    setNewOpPlanned(String(op.plannedQuantity || ''));
+    setNewOpGranel(op.granel || '');
+    setNewOpPriority(op.priority || 'Normal');
+    setNewOpLineId(op.lineId || '');
+    setNewOpPackage(String(op.packageAvailability || 1000));
+    setShowNewOpModal(true);
+  };
+
+  const handleSaveOP = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newOpNumber.trim() || !newOpProduct.trim() || !newOpPlanned) {
       showToast('Preencha os campos obrigatórios da OP.', 'error');
       return;
     }
 
+    if (!newOpSetor) {
+      showToast('Selecione o setor da OP antes de salvar.', 'error');
+      return;
+    }
+
+    const rejQty = newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0;
+    const prodQty = Number(editingOp?.producedQuantity || 0);
+    if (rejQty > prodQty) {
+      showToast('Quantidade refugada não pode ser maior que a produzida.', 'error');
+      return;
+    }
+
     setIsSubmittingOp(true);
     try {
-      await createOP({
+      const tipoDocumento = getTipoDocumento(newOpSetor);
+      const docLabel = tipoDocumento === 'OSM' ? 'Ordem de Serviço (OSM)' : 'Ordem de Produção (OP)';
+
+      const opPayload = {
         number: newOpNumber.trim(),
         product: newOpProduct.trim(),
         lote: newOpLote.trim() || undefined,
@@ -397,12 +461,29 @@ WHERE email IN (
         priority: newOpPriority,
         lineId: newOpLineId || null,
         packageAvailability: Number(newOpPackage) || 0,
-      });
+        setor: newOpSetor,
+        tipoDocumento,
+        unidade: newOpUnidade,
+        plannedHours: newOpPlannedHours ? Number(newOpPlannedHours) : undefined,
+        rejectedQuantity: newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0,
+      };
 
-      showToast(`Ordem de Produção OP ${newOpNumber} criada com sucesso no estoque!`);
+      if (editingOp) {
+        await updateOP(editingOp.id, opPayload);
+        showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
+      } else {
+        await createOP(opPayload);
+        showToast(`${docLabel} ${newOpNumber} criada com sucesso no estoque!`);
+      }
+
       setShowNewOpModal(false);
+      setEditingOp(null);
       setNewOpNumber('');
       setNewOpProduct('');
+      setNewOpSetor('Envase');
+      setNewOpUnidade('Un');
+      setNewOpPlannedHours('');
+      setNewOpRejectedQuantity('');
       setNewOpLote('');
       setNewOpPlanned('');
       setNewOpGranel('');
@@ -410,7 +491,7 @@ WHERE email IN (
       setNewOpLineId('');
       await loadData();
     } catch {
-      showToast('Falha ao registrar nova OP.', 'error');
+      showToast(editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.', 'error');
     } finally {
       setIsSubmittingOp(false);
     }
@@ -533,6 +614,12 @@ WHERE email IN (
       showToast('Por favor, informe o nome e o e-mail do líder.', 'error');
       return;
     }
+
+    if (!newLeaderArea) {
+      showToast('Por favor, selecione a área de atuação do líder.', 'error');
+      return;
+    }
+
     setIsSubmittingLeader(true);
     // Gera uma senha temporária única para este líder — nunca reutilizamos a mesma para todos
     const tempPassword = generateTemporaryPassword();
@@ -542,6 +629,7 @@ WHERE email IN (
         email,
         role: 'leader',
         cargo: newLeaderCargo.trim() || 'Líder de Produção',
+        area: newLeaderArea,
         lineId: newLeaderLineId || undefined,
         mustChangePassword: true,
         defaultPassword: tempPassword,
@@ -557,6 +645,7 @@ WHERE email IN (
           email,
           password: tempPassword,
           cargo: newLeaderCargo.trim() || 'Líder de Produção',
+          area: newLeaderArea,
           lineName: assignedLineObj?.name,
         });
 
@@ -564,6 +653,7 @@ WHERE email IN (
         setNewLeaderEmail('');
         setNewLeaderLineId('');
         setNewLeaderCargo('Líder de Produção');
+        setNewLeaderArea('Envase');
         setIsAutoEmail(true);
         setShowNewLeaderModal(false);
         await loadData();
@@ -720,7 +810,7 @@ WHERE email IN (
         usersCount={allUsers.length}
         pendingCount={pendingUsersCount}
         profile={profile}
-        onNewOp={() => setShowNewOpModal(true)}
+        onNewOp={() => handleOpenCreateOPModal()}
         onRefresh={handleManualRefresh}
         onSignOut={() => signOut()}
         isRefreshing={isRefreshing}
@@ -784,6 +874,7 @@ WHERE email IN (
                 allUsers={allUsers}
                 events={events}
                 rotations={rotations}
+                goals={goals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
               />
@@ -1095,10 +1186,7 @@ WHERE email IN (
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => {
-                                setNewOpLineId(line.id);
-                                setShowNewOpModal(true);
-                              }}
+                              onClick={() => handleOpenCreateOPModal(line.id)}
                               className="h-8 px-2.5 bg-[#171720] hover:bg-[#22222e] border-[#2a2a38] text-[#a1a1aa] hover:text-white text-xs rounded-lg"
                               title="Criar nova OP manual para esta linha"
                             >
@@ -1158,7 +1246,7 @@ WHERE email IN (
                   </Button>
 
                   <Button
-                    onClick={() => setShowNewOpModal(true)}
+                    onClick={() => handleOpenCreateOPModal()}
                     className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(37,99,235,0.3)] transition-all"
                   >
                     <Plus className="w-4 h-4" />
@@ -1325,16 +1413,37 @@ WHERE email IN (
                           return (
                             <tr key={op.id} className="hover:bg-[#16161b] transition-colors">
                               
-                              {/* OP */}
+                              {/* OP / OSM */}
                               <td className="py-3.5 px-4">
-                                <span className="font-mono font-black text-blue-400 bg-blue-950/60 border border-blue-800/40 px-2 py-1 rounded-lg text-xs">
-                                  {op.number}
-                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${
+                                    (op.tipoDocumento === 'OSM' || op.setor === 'Pesagem' || op.setor === 'Manipulação')
+                                      ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40'
+                                      : 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40'
+                                  }`}>
+                                    {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
+                                  </span>
+                                  <span className="font-mono font-black text-[#f4f4f5] bg-[#1a1a22] border border-[#2c2c38] px-2 py-0.5 rounded-lg text-xs">
+                                    {op.number}
+                                  </span>
+                                </div>
                               </td>
 
                               {/* NOME DO PRODUTO */}
                               <td className="py-3.5 px-4 font-bold text-[#f4f4f5] max-w-xs">
-                                <div className="truncate">{op.product}</div>
+                                <div className="truncate flex items-center gap-1.5">
+                                  <span>{op.product}</span>
+                                  {op.setor && (
+                                    <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border ${
+                                      op.setor === 'Pesagem' ? 'bg-purple-950/60 text-purple-300 border-purple-800/40' :
+                                      op.setor === 'Manipulação' ? 'bg-cyan-950/60 text-cyan-300 border-cyan-800/40' :
+                                      op.setor === 'Envase' ? 'bg-blue-950/60 text-blue-300 border-blue-800/40' :
+                                      'bg-zinc-800 text-zinc-300 border-zinc-700'
+                                    }`}>
+                                      {op.setor}
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="text-[10px] text-[#71717a] font-normal mt-0.5">
                                   Prioridade: <span className="font-semibold text-[#d4d4d8]">{op.priority}</span>
                                 </div>
@@ -1354,11 +1463,11 @@ WHERE email IN (
                               {/* QUANTIDADE */}
                               <td className="py-3.5 px-4 text-right">
                                 <div className="font-mono font-black text-[#f4f4f5] text-xs">
-                                  {op.plannedQuantity.toLocaleString('pt-BR')} un
+                                  {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
                                 </div>
                                 {op.producedQuantity > 0 && (
                                   <div className="text-[10px] text-emerald-400 font-mono font-semibold">
-                                    {op.producedQuantity.toLocaleString('pt-BR')} un ({progress}%)
+                                    {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} ({progress}%)
                                   </div>
                                 )}
                               </td>
@@ -1422,6 +1531,17 @@ WHERE email IN (
                               {/* AÇÕES */}
                               <td className="py-3.5 px-4 text-right">
                                 <div className="flex items-center justify-end gap-1.5">
+                                  {/* Botão de Editar OP */}
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleOpenEditOPModal(op)}
+                                    className="h-7 w-7 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors"
+                                    title={`Editar OP ${op.number}`}
+                                  >
+                                    <Edit2 className="w-3.5 h-3.5" />
+                                  </Button>
+
                                   {/* Botão de Atribuir à Linha / Cronograma */}
                                   <Button
                                     size="sm"
@@ -1809,14 +1929,27 @@ WHERE email IN (
                               </td>
 
                               <td className="py-3.5 px-4">
-                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                                  isCoordinator
-                                    ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
-                                    : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
-                                }`}>
-                                  {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
-                                  <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
-                                </span>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
+                                    isCoordinator
+                                      ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
+                                      : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
+                                  }`}>
+                                    {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
+                                    <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
+                                  </span>
+
+                                  {user.area && (
+                                    <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider ${
+                                      user.area === 'Envase' ? 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40' :
+                                      user.area === 'Pesagem' ? 'bg-purple-950/70 text-[#a855f7] border-purple-500/40' :
+                                      user.area === 'Manipulação' ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40' :
+                                      'bg-zinc-800 text-zinc-300 border-zinc-700'
+                                    }`}>
+                                      {user.area}
+                                    </span>
+                                  )}
+                                </div>
                               </td>
 
                               <td className="py-3.5 px-4">
@@ -2255,7 +2388,7 @@ WHERE email IN (
         </div>
       )}
 
-      {/* ---------------- MODAL: NOVA OP ---------------- */}
+      {/* ---------------- MODAL: NOVA OP / EDITAR OP ---------------- */}
       {showNewOpModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#121216] border border-[#27272e] w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -2263,23 +2396,36 @@ WHERE email IN (
               <div className="flex items-center gap-2">
                 <Package className="w-4 h-4 text-blue-400" />
                 <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                  Cadastrar Ordem de Produção (OP)
+                  {editingOp 
+                    ? (newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
+                        ? `Editar Ordem de Serviço de Manipulação (OSM ${editingOp.number})`
+                        : `Editar Ordem de Produção (OP ${editingOp.number})`)
+                    : (newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
+                        ? 'Nova Ordem de Serviço de Manipulação (OSM)'
+                        : 'Nova Ordem de Produção (OP)')}
                 </h3>
               </div>
               <button
-                onClick={() => setShowNewOpModal(false)}
+                onClick={() => {
+                  setShowNewOpModal(false);
+                  setEditingOp(null);
+                }}
                 className="text-[#71717a] hover:text-white"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateOP} className="p-5 space-y-4">
+            <form onSubmit={handleSaveOP} className="p-5 space-y-4 max-h-[85vh] overflow-y-auto">
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Número da OP *</Label>
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
+                    {newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
+                      ? 'Número da OSM (ex: 310-450) *'
+                      : 'Número da OP (ex: 410-150) *'}
+                  </Label>
                   <Input
-                    placeholder="Ex: 40236"
+                    placeholder={newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação' ? 'Ex: 310-450' : 'Ex: 40236'}
                     value={newOpNumber}
                     onChange={(e) => setNewOpNumber(e.target.value)}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
@@ -2313,6 +2459,53 @@ WHERE email IN (
                 />
               </div>
 
+              {/* SETOR E UNIDADE DE MEDIDA */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa] flex items-center justify-between">
+                    <span>Setor *</span>
+                    <span className="text-[9px] font-normal text-blue-400">OEE / Métricas</span>
+                  </Label>
+                  <select
+                    value={newOpSetor}
+                    onChange={(e) => {
+                      const selectedSetor = e.target.value as 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+                      setNewOpSetor(selectedSetor);
+                      // Auto-fill unidade based on setor
+                      if (selectedSetor === 'Pesagem') {
+                        setNewOpUnidade('Qtd');
+                      } else if (selectedSetor === 'Manipulação') {
+                        setNewOpUnidade('Kg');
+                      } else if (selectedSetor === 'Envase') {
+                        setNewOpUnidade('Un');
+                      } else {
+                        setNewOpUnidade('Un');
+                      }
+                    }}
+                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
+                    required
+                  >
+                    <option value="Envase">Envase</option>
+                    <option value="Manipulação">Manipulação</option>
+                    <option value="Pesagem">Pesagem</option>
+                    <option value="Geral">Geral</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Unidade de Medida</Label>
+                  <select
+                    value={newOpUnidade}
+                    onChange={(e) => setNewOpUnidade(e.target.value as 'Un' | 'Kg' | 'Qtd')}
+                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
+                  >
+                    <option value="Un">Un (Unidades)</option>
+                    <option value="Kg">Kg (Quilogramas)</option>
+                    <option value="Qtd">Qtd (Quantidade)</option>
+                  </select>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Lote do Produto</Label>
@@ -2337,7 +2530,7 @@ WHERE email IN (
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada (un) *</Label>
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
                   <Input
                     type="number"
                     placeholder="Ex: 2500"
@@ -2363,33 +2556,94 @@ WHERE email IN (
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
-                  {INTEGRATIONS_ARE_MOCKED && (
-                    <span
-                      className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
-                      title="Integração com EstoqueMais pendente — valor simulado/manual"
-                    >
-                      <AlertTriangle className="w-2.5 h-2.5" />
-                      Simulado
-                    </span>
-                  )}
+              {/* HORAS DO TURNO & QUANTIDADE REFUGADA */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Horas do Turno (para OEE)</Label>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={1}
+                    max={12}
+                    placeholder="Ex: 8"
+                    value={newOpPlannedHours}
+                    onChange={(e) => setNewOpPlannedHours(e.target.value)}
+                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
+                  />
                 </div>
-                <Input
-                  type="number"
-                  placeholder="Ex: 5000"
-                  value={newOpPackage}
-                  onChange={(e) => setNewOpPackage(e.target.value)}
-                  className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
-                />
+
+                {editingOp && (editingOp.status === 'completed' || editingOp.status === 'in_progress') ? (
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-red-400 flex items-center justify-between">
+                      <span>Qtd Refugada</span>
+                      <span className="text-[9px] font-normal text-[#a1a1aa]">Perdas / Scrap</span>
+                    </Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      placeholder="Ex: 15"
+                      value={newOpRejectedQuantity}
+                      onChange={(e) => setNewOpRejectedQuantity(e.target.value)}
+                      className="bg-[#0b0b0e] border-red-900/50 text-xs font-mono text-red-400 font-bold"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
+                      {INTEGRATIONS_ARE_MOCKED && (
+                        <span
+                          className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                          title="Integração com EstoqueMais pendente — valor simulado/manual"
+                        >
+                          <AlertTriangle className="w-2.5 h-2.5" />
+                          Simulado
+                        </span>
+                      )}
+                    </div>
+                    <Input
+                      type="number"
+                      placeholder="Ex: 5000"
+                      value={newOpPackage}
+                      onChange={(e) => setNewOpPackage(e.target.value)}
+                      className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
+                    />
+                  </div>
+                )}
               </div>
+
+              {editingOp && (editingOp.status === 'completed' || editingOp.status === 'in_progress') && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
+                    {INTEGRATIONS_ARE_MOCKED && (
+                      <span
+                        className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
+                        title="Integração com EstoqueMais pendente — valor simulado/manual"
+                      >
+                        <AlertTriangle className="w-2.5 h-2.5" />
+                        Simulado
+                      </span>
+                    )}
+                  </div>
+                  <Input
+                    type="number"
+                    placeholder="Ex: 5000"
+                    value={newOpPackage}
+                    onChange={(e) => setNewOpPackage(e.target.value)}
+                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
+                  />
+                </div>
+              )}
 
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={() => setShowNewOpModal(false)}
+                  onClick={() => {
+                    setShowNewOpModal(false);
+                    setEditingOp(null);
+                  }}
                   className="h-9 text-xs text-[#a1a1aa] hover:text-white"
                 >
                   Cancelar
@@ -2399,7 +2653,7 @@ WHERE email IN (
                   disabled={isSubmittingOp}
                   className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl"
                 >
-                  {isSubmittingOp ? 'Gravando no Supabase...' : 'Confirmar e Salvar no Estoque'}
+                  {isSubmittingOp ? 'Gravando no Supabase...' : editingOp ? 'Salvar Alterações' : 'Confirmar e Salvar no Estoque'}
                 </Button>
               </div>
             </form>
@@ -2703,6 +2957,23 @@ WHERE email IN (
                   onChange={(e) => setNewLeaderCargo(e.target.value)}
                   className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-semibold text-[#a1a1aa] flex items-center justify-between">
+                  <span>Área de Atuação *</span>
+                  <span className="text-[10px] text-blue-400 font-normal">Define tipo de documento (OP/OSM)</span>
+                </Label>
+                <select
+                  value={newLeaderArea}
+                  onChange={(e) => setNewLeaderArea(e.target.value as 'Envase' | 'Pesagem' | 'Manipulação')}
+                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500 font-semibold"
+                  required
+                >
+                  <option value="Envase">Envase (Ordem de Produção - OP)</option>
+                  <option value="Pesagem">Pesagem (Ordem de Serviço - OSM · 1 Turno)</option>
+                  <option value="Manipulação">Manipulação (Ordem de Serviço - OSM · 2 Turnos)</option>
+                </select>
               </div>
 
               {/* Actions */}

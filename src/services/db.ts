@@ -1,6 +1,253 @@
 import { createClient } from '@supabase/supabase-js';
 import { supabase, supabaseUrl, supabaseAnonKey } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
+
+/**
+ * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
+ */
+export function calculateTotalPauseHours(events: ProductionEvent[]): number {
+  if (!events || events.length === 0) return 0;
+  try {
+    const sorted = [...events].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+
+    const eventsByOp: Record<string, ProductionEvent[]> = {};
+    for (const ev of sorted) {
+      const key = ev.opId || 'global';
+      if (!eventsByOp[key]) eventsByOp[key] = [];
+      eventsByOp[key].push(ev);
+    }
+
+    let totalMs = 0;
+    for (const opId of Object.keys(eventsByOp)) {
+      const opEvents = eventsByOp[opId];
+      let pauseStartTime: number | null = null;
+
+      for (const ev of opEvents) {
+        const time = new Date(ev.createdAt).getTime();
+        if (isNaN(time)) continue;
+
+        if (ev.type === 'PAUSED') {
+          pauseStartTime = time;
+        } else if ((ev.type === 'RESUMED' || ev.type === 'FINISHED') && pauseStartTime !== null) {
+          const diff = time - pauseStartTime;
+          if (diff > 0) totalMs += diff;
+          pauseStartTime = null;
+        }
+      }
+    }
+    return totalMs / (1000 * 60 * 60);
+  } catch (err) {
+    console.warn('Erro ao calcular horas de pausa:', err);
+    return 0;
+  }
+}
+
+/**
+ * Calcula os 3 componentes do OEE e o OEE final.
+ *
+ * Disponibilidade = tempo_real_produzindo / tempo_planejado_total
+ *   tempo_real_produzindo  = planned_hours - horas de pausa reais (calculateTotalPauseHours)
+ *   tempo_planejado_total  = soma de planned_hours de todas as OPs do período
+ *
+ * Performance = producedQuantity / plannedQuantity  (para OPs concluídas ou em progresso)
+ *
+ * Qualidade = (producedQuantity - rejectedQuantity) / producedQuantity
+ *
+ * OEE = Disponibilidade × Performance × Qualidade
+ *
+ * Retorna valores entre 0 e 1 (multiplique por 100 para exibir como %).
+ * Retorna null para cada componente quando não há dados suficientes.
+ */
+export function calculateOEE(
+  ops: ProductionOrder[],
+  events: ProductionEvent[]
+): {
+  disponibilidade: number | null;
+  performance: number | null;
+  qualidade: number | null;
+  oee: number | null;
+} {
+  try {
+    if (!ops || ops.length === 0) {
+      return { disponibilidade: null, performance: null, qualidade: null, oee: null };
+    }
+
+    // 1. Disponibilidade = tempo_real_produzindo / tempo_planejado_total
+    const opsWithPlannedHours = ops.filter(op => op.plannedHours != null && op.plannedHours > 0);
+    let disponibilidade: number | null = null;
+
+    if (opsWithPlannedHours.length > 0) {
+      const tempoPlanejadoTotal = opsWithPlannedHours.reduce(
+        (sum, op) => sum + (op.plannedHours || 0),
+        0
+      );
+
+      if (tempoPlanejadoTotal > 0) {
+        const relevantOpIds = new Set(opsWithPlannedHours.map(op => op.id));
+        const relevantEvents = events ? events.filter(e => e.opId && relevantOpIds.has(e.opId)) : [];
+        const pauseHours = calculateTotalPauseHours(relevantEvents.length > 0 ? relevantEvents : events || []);
+        
+        const tempoRealProduzindo = Math.max(0, tempoPlanejadoTotal - pauseHours);
+        disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
+      }
+    }
+
+    // 2. Performance = producedQuantity / plannedQuantity (para OPs concluídas, pausadas ou em progresso)
+    const activeOrFinishedOps = ops.filter(
+      op => (op.status === 'completed' || op.status === 'in_progress' || op.status === 'paused') && op.plannedQuantity > 0
+    );
+    let performance: number | null = null;
+
+    if (activeOrFinishedOps.length > 0) {
+      const totalPlanned = activeOrFinishedOps.reduce((sum, op) => sum + (op.plannedQuantity || 0), 0);
+      const totalProduced = activeOrFinishedOps.reduce((sum, op) => sum + (op.producedQuantity || 0), 0);
+
+      if (totalPlanned > 0) {
+        performance = Math.max(0, totalProduced / totalPlanned);
+      }
+    }
+
+    // 3. Qualidade = (producedQuantity - rejectedQuantity) / producedQuantity
+    const opsWithProduction = ops.filter(op => (op.producedQuantity || 0) > 0);
+    let qualidade: number | null = null;
+
+    if (opsWithProduction.length > 0) {
+      const totalProduced = opsWithProduction.reduce((sum, op) => sum + (op.producedQuantity || 0), 0);
+      const totalRejected = opsWithProduction.reduce((sum, op) => sum + (op.rejectedQuantity || 0), 0);
+
+      if (totalProduced > 0) {
+        const goodQuantity = Math.max(0, totalProduced - totalRejected);
+        qualidade = Math.max(0, Math.min(1, goodQuantity / totalProduced));
+      }
+    }
+
+    // OEE = Disponibilidade × Performance × Qualidade
+    let oee: number | null = null;
+    if (disponibilidade !== null && performance !== null && qualidade !== null) {
+      oee = disponibilidade * performance * qualidade;
+    }
+
+    return { disponibilidade, performance, qualidade, oee };
+  } catch (err) {
+    console.warn('Erro ao calcular OEE:', err);
+    return { disponibilidade: null, performance: null, qualidade: null, oee: null };
+  }
+}
+
+/**
+ * Agrupa producedQuantity por dia e por setor (para o gráfico de barras diário).
+ * Retorna um array de objetos com: { day: number, setor: string, quantity: number }
+ * ordenado por dia crescente, filtrado pelo mês e ano fornecidos.
+ */
+export function groupProductionByDayAndSetor(
+  ops: ProductionOrder[],
+  month: number,
+  year: number
+): Array<{ day: number; setor: string; quantity: number }> {
+  if (!ops || ops.length === 0) return [];
+  try {
+    const targetMonth1to12 = month >= 1 && month <= 12 ? month : (month + 1);
+    const map = new Map<string, { day: number; setor: string; quantity: number }>();
+
+    for (const op of ops) {
+      if (!op || (op.producedQuantity == null)) continue;
+
+      let opDate: Date | null = null;
+      if (op.scheduledDate) {
+        const parts = op.scheduledDate.split('-');
+        if (parts.length === 3) {
+          const y = parseInt(parts[0], 10);
+          const m = parseInt(parts[1], 10);
+          const d = parseInt(parts[2], 10);
+          if (y === year && m === targetMonth1to12) {
+            opDate = new Date(y, m - 1, d);
+          }
+        }
+      }
+
+      if (!opDate && op.createdAt) {
+        const d = new Date(op.createdAt);
+        if (!isNaN(d.getTime())) {
+          if (d.getFullYear() === year && (d.getMonth() + 1) === targetMonth1to12) {
+            opDate = d;
+          }
+        }
+      }
+
+      if (!opDate) continue;
+
+      const day = opDate.getDate();
+      const setor = op.setor || 'Geral';
+      const key = `${day}-${setor}`;
+
+      const existing = map.get(key);
+      if (existing) {
+        existing.quantity += Number(op.producedQuantity || 0);
+      } else {
+        map.set(key, { day, setor, quantity: Number(op.producedQuantity || 0) });
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.day - b.day || a.setor.localeCompare(b.setor));
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por dia e setor:', err);
+    return [];
+  }
+}
+
+/**
+ * Agrupa producedQuantity por mês (para o gráfico de barras mensal).
+ * Retorna um array de 12 posições (jan=0 … dez=11) com a quantidade produzida.
+ * Filtra pelo ano fornecido.
+ */
+export function groupProductionByMonth(
+  ops: ProductionOrder[],
+  year: number
+): Array<{ month: number; label: string; quantity: number }> {
+  const monthLabels = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const result = monthLabels.map((label, idx) => ({
+    month: idx,
+    label,
+    quantity: 0,
+  }));
+
+  if (!ops || ops.length === 0) return result;
+
+  try {
+    for (const op of ops) {
+      if (!op || !op.producedQuantity) continue;
+
+      let opYear: number | null = null;
+      let opMonth0: number | null = null;
+
+      if (op.scheduledDate) {
+        const parts = op.scheduledDate.split('-');
+        if (parts.length >= 2) {
+          opYear = parseInt(parts[0], 10);
+          opMonth0 = parseInt(parts[1], 10) - 1;
+        }
+      }
+
+      if ((opYear === null || opMonth0 === null) && op.createdAt) {
+        const d = new Date(op.createdAt);
+        if (!isNaN(d.getTime())) {
+          opYear = d.getFullYear();
+          opMonth0 = d.getMonth();
+        }
+      }
+
+      if (opYear === year && opMonth0 !== null && opMonth0 >= 0 && opMonth0 < 12) {
+        result[opMonth0].quantity += Number(op.producedQuantity || 0);
+      }
+    }
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por mês:', err);
+  }
+
+  return result;
+}
 
 /**
  * Gera uma senha temporária segura para o primeiro acesso do líder.
@@ -62,6 +309,7 @@ const STORAGE_KEYS = {
   rotations: 'SIG_PROD_ROTATIONS_STORAGE_V5',
   pauseReasons: 'SIG_PROD_PAUSE_REASONS_STORAGE_V5',
   profiles: 'SIG_PROD_PROFILES_STORAGE_V5',
+  monthlyGoals: 'SIG_PROD_MONTHLY_GOALS_V5',
 };
 
 // Safe storage utilities
@@ -216,6 +464,7 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         name: data.name || data.email?.split('@')[0] || 'Usuário',
         role: isCoord ? 'coordinator' : 'leader',
         cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
+        area: data.area || undefined,
         status: isFirstAccess ? 'first_access' : (data.status || 'active'),
         mustChangePassword: isFirstAccess,
         // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
@@ -262,6 +511,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           name: d.name || d.email?.split('@')[0] || 'Colaborador',
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
+          area: d.area || undefined,
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
           // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
@@ -377,6 +627,7 @@ export const preAuthorizeUser = async (data: {
   name: string;
   role: 'coordinator' | 'leader';
   cargo?: string;
+  area?: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação';
   lineId?: string;
   mustChangePassword?: boolean;
   defaultPassword?: string;
@@ -386,6 +637,7 @@ export const preAuthorizeUser = async (data: {
     const name = data.name.trim();
     const role = data.role;
     const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
+    const area = data.area || (role === 'coordinator' ? 'Coordenação' : undefined);
     const isFirstAccess = data.mustChangePassword !== false;
     // Gera uma senha temporária única por usuário; nunca reutiliza a mesma senha para todos
     const defaultPassword = data.defaultPassword || generateTemporaryPassword();
@@ -404,6 +656,7 @@ export const preAuthorizeUser = async (data: {
       name,
       role,
       cargo,
+      area: area || undefined,
       status: isFirstAccess ? 'first_access' : 'active',
       mustChangePassword: isFirstAccess,
       defaultPassword: isFirstAccess ? defaultPassword : undefined,
@@ -445,6 +698,7 @@ export const preAuthorizeUser = async (data: {
               name,
               role,
               cargo,
+              area: area || null,
               must_change_password: isFirstAccess,
             },
           },
@@ -477,6 +731,7 @@ export const preAuthorizeUser = async (data: {
             role, 
             name, 
             cargo, 
+            area: area || null,
             status: isFirstAccess ? 'first_access' : 'active',
             must_change_password: isFirstAccess,
           })
@@ -487,6 +742,7 @@ export const preAuthorizeUser = async (data: {
             role, 
             name, 
             cargo,
+            area: area || null,
             status: isFirstAccess ? 'first_access' : 'active',
             must_change_password: isFirstAccess,
           }).eq('email', email);
@@ -500,6 +756,7 @@ export const preAuthorizeUser = async (data: {
         name,
         role,
         cargo,
+        area: area || null,
         status: isFirstAccess ? 'first_access' : 'active',
         must_change_password: isFirstAccess,
         created_at: new Date().toISOString(),
@@ -520,6 +777,7 @@ export const preAuthorizeUser = async (data: {
               name, 
               role, 
               cargo, 
+              area: area || null,
               status: isFirstAccess ? 'first_access' : 'active',
               must_change_password: isFirstAccess,
             }, { onConflict: 'email' });
@@ -621,9 +879,9 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
     if (targetEmail) delete inMemoryRotations[targetEmail];
     persistRotations();
 
-    // 2. Remove from Supabase profiles and leader_rotations
+    // 2. Remove from Supabase profiles and rotations
     try {
-      await supabase.from('leader_rotations').delete().eq('leader_id', userId);
+      await supabase.from('rotations').delete().eq('leader_id', userId);
     } catch {}
 
     try {
@@ -725,6 +983,17 @@ export const createLine = async (name: string): Promise<ProductionLine> => {
 };
 
 // ---------------- PRODUCTION ORDERS (OPS) ----------------
+
+/**
+ * Deriva o tipo de documento a partir do setor.
+ * Pesagem e Manipulação usam OSM; demais usam OP.
+ */
+export function getTipoDocumento(
+  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'
+): 'OP' | 'OSM' {
+  return setor === 'Pesagem' || setor === 'Manipulação' ? 'OSM' : 'OP';
+}
+
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {
   // 1. Immediately read from localStorage
   const localOps = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, inMemoryOps);
@@ -760,6 +1029,12 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           sequence: Number(d.sequence || 1),
           scheduledDate: d.scheduled_date || d.scheduledDate || undefined,
           scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
+          setor: d.setor || undefined,
+          unidade: d.unidade || undefined,
+          rejectedQuantity: Number(d.rejected_quantity || d.rejectedQuantity || 0),
+          plannedHours: d.planned_hours != null ? Number(d.planned_hours) : (d.plannedHours != null ? Number(d.plannedHours) : undefined),
+          tipoDocumento: d.tipo_documento || 'OP',
+          finishedShift: d.finished_shift || undefined,
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
         .filter((op) => !deletedIds.has(op.id) && !isMockOp(op)); // NEVER bring back deleted or mock items!
@@ -798,6 +1073,52 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
   return inMemoryOps;
 };
 
+export const getOPById = async (opId: string): Promise<ProductionOrder | null> => {
+  const localOps = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, inMemoryOps);
+  const foundLocal = localOps.find(o => o.id === opId);
+
+  try {
+    let { data, error } = await supabase.from('production_orders').select('*').eq('id', opId).maybeSingle();
+    if (error || !data) {
+      const res = await supabase.from('ops').select('*').eq('id', opId).maybeSingle();
+      data = res.data;
+      error = res.error;
+    }
+
+    if (data && !error) {
+      const d: any = data;
+      return {
+        id: String(d.id),
+        number: String(d.number || d.op_number || ''),
+        product: d.product || d.product_name || 'Produto',
+        lote: d.lote || d.batch || d.numero_lote || '',
+        plannedQuantity: Number(d.planned_quantity || d.plannedQuantity || 0),
+        producedQuantity: Number(d.produced_quantity || d.producedQuantity || 0),
+        granel: d.granel || d.bulk || d.lote_granel || d.cod_granel || '',
+        priority: (d.priority || 'Normal') as any,
+        status: (d.status || 'pending') as any,
+        lineId: d.line_id ? String(d.line_id) : (d.lineId ? String(d.lineId) : null),
+        leaderId: d.leader_id ? String(d.leader_id) : (d.leaderId ? String(d.leaderId) : null),
+        packageAvailability: Number(d.package_availability || d.packageAvailability || 0),
+        sequence: Number(d.sequence || 1),
+        scheduledDate: d.scheduled_date || d.scheduledDate || undefined,
+        scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
+        setor: d.setor || undefined,
+        unidade: d.unidade || undefined,
+        rejectedQuantity: Number(d.rejected_quantity || d.rejectedQuantity || 0),
+        plannedHours: d.planned_hours != null ? Number(d.planned_hours) : (d.plannedHours != null ? Number(d.plannedHours) : undefined),
+        tipoDocumento: d.tipo_documento || 'OP',
+        finishedShift: d.finished_shift || undefined,
+        createdAt: d.created_at || d.createdAt || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    console.warn('Consulta getOPById no Supabase:', err);
+  }
+
+  return foundLocal || null;
+};
+
 export const createOP = async (newOpData: {
   number: string;
   product: string;
@@ -810,7 +1131,14 @@ export const createOP = async (newOpData: {
   sequence?: number;
   scheduledDate?: string;
   scheduledShift?: string;
+  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+  unidade?: 'Un' | 'Kg' | 'Qtd';
+  rejectedQuantity?: number;
+  plannedHours?: number;
+  tipoDocumento?: 'OP' | 'OSM';
 }): Promise<ProductionOrder> => {
+  const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
+
   const newOp: ProductionOrder = {
     id: `prod-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     number: newOpData.number.trim(),
@@ -827,6 +1155,11 @@ export const createOP = async (newOpData: {
     sequence: Number(newOpData.sequence || (inMemoryOps.length + 1)),
     scheduledDate: newOpData.scheduledDate,
     scheduledShift: newOpData.scheduledShift,
+    setor: newOpData.setor,
+    unidade: newOpData.unidade,
+    rejectedQuantity: Number(newOpData.rejectedQuantity || 0),
+    plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
+    tipoDocumento: tipoDoc,
     createdAt: new Date().toISOString(),
   };
 
@@ -851,6 +1184,11 @@ export const createOP = async (newOpData: {
       sequence: newOp.sequence,
       scheduled_date: newOp.scheduledDate,
       scheduled_shift: newOp.scheduledShift,
+      setor: newOp.setor || null,
+      unidade: newOp.unidade || null,
+      rejected_quantity: newOp.rejectedQuantity || 0,
+      planned_hours: newOp.plannedHours ?? null,
+      tipo_documento: newOp.tipoDocumento || 'OP',
       created_at: newOp.createdAt,
     };
 
@@ -895,6 +1233,12 @@ export const importOPsBatch = async (
     packageAvailability?: number;
     scheduledDate?: string;
     scheduledShift?: string;
+    setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+    unidade?: 'Un' | 'Kg' | 'Qtd';
+    rejectedQuantity?: number;
+    plannedHours?: number;
+    tipoDocumento?: 'OP' | 'OSM';
+    finishedShift?: 'Manhã' | 'Tarde';
   }>
 ): Promise<{ successCount: number; imported: ProductionOrder[] }> => {
   const newCreated: ProductionOrder[] = [];
@@ -902,6 +1246,7 @@ export const importOPsBatch = async (
 
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
+    const tipoDoc = it.tipoDocumento || getTipoDocumento(it.setor);
     const op: ProductionOrder = {
       id: `prod-op-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`,
       number: it.number.trim(),
@@ -918,6 +1263,12 @@ export const importOPsBatch = async (
       sequence: startSeq + i,
       scheduledDate: it.scheduledDate,
       scheduledShift: it.scheduledShift,
+      setor: it.setor,
+      unidade: it.unidade,
+      rejectedQuantity: Number(it.rejectedQuantity || 0),
+      plannedHours: it.plannedHours != null ? Number(it.plannedHours) : undefined,
+      tipoDocumento: tipoDoc,
+      finishedShift: it.finishedShift,
       createdAt: new Date().toISOString(),
     };
     newCreated.push(op);
@@ -944,6 +1295,12 @@ export const importOPsBatch = async (
       sequence: op.sequence,
       scheduled_date: op.scheduledDate,
       scheduled_shift: op.scheduledShift,
+      setor: op.setor || null,
+      unidade: op.unidade || null,
+      rejected_quantity: op.rejectedQuantity || 0,
+      planned_hours: op.plannedHours ?? null,
+      tipo_documento: op.tipoDocumento || 'OP',
+      finished_shift: op.finishedShift || null,
       created_at: op.createdAt,
     }));
 
@@ -984,6 +1341,12 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   if (updates.sequence !== undefined) dbPayload.sequence = updates.sequence;
   if (updates.scheduledDate !== undefined) dbPayload.scheduled_date = updates.scheduledDate;
   if (updates.scheduledShift !== undefined) dbPayload.scheduled_shift = updates.scheduledShift;
+  if (updates.setor !== undefined) dbPayload.setor = updates.setor;
+  if (updates.unidade !== undefined) dbPayload.unidade = updates.unidade;
+  if (updates.rejectedQuantity !== undefined) dbPayload.rejected_quantity = updates.rejectedQuantity;
+  if (updates.plannedHours !== undefined) dbPayload.planned_hours = updates.plannedHours;
+  if (updates.tipoDocumento !== undefined) dbPayload.tipo_documento = updates.tipoDocumento;
+  if (updates.finishedShift !== undefined) dbPayload.finished_shift = updates.finishedShift;
 
   try {
     await Promise.allSettled([
@@ -992,6 +1355,98 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
     ]);
   } catch (err) {
     console.warn('Atualização de OP no Supabase:', err);
+  }
+};
+
+/**
+ * Busca as metas mensais do banco para o ano atual.
+ * Retorna array de MonthlyGoal ou array vazio em caso de erro.
+ */
+export const getMonthlyGoals = async (year: number): Promise<MonthlyGoal[]> => {
+  let localGoals = loadFromStorage<MonthlyGoal[]>(STORAGE_KEYS.monthlyGoals, []);
+  try {
+    const { data, error } = await supabase
+      .from('monthly_goals')
+      .select('*')
+      .eq('year', year)
+      .order('month', { ascending: true });
+
+    if (data && !error && data.length > 0) {
+      const mapped: MonthlyGoal[] = data.map((d: any) => ({
+        id: String(d.id),
+        lineId: String(d.line_id),
+        year: Number(d.year),
+        month: Number(d.month),
+        goalQuantity: Number(d.goal_quantity || 0),
+        setor: d.setor || undefined,
+        createdAt: d.created_at || new Date().toISOString(),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+
+      saveToStorage(STORAGE_KEYS.monthlyGoals, mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas mensais no Supabase:', err);
+  }
+
+  return localGoals.filter(g => g.year === year);
+};
+
+/**
+ * Salva ou atualiza uma meta mensal.
+ * Usa upsert com onConflict: 'line_id, year, month, setor'.
+ */
+export const saveMonthlyGoal = async (
+  goal: Omit<MonthlyGoal, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<boolean> => {
+  try {
+    const payload: any = {
+      line_id: goal.lineId,
+      year: goal.year,
+      month: goal.month,
+      goal_quantity: goal.goalQuantity,
+      setor: goal.setor || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('monthly_goals')
+      .upsert(payload, { onConflict: 'line_id, year, month, setor' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta mensal no Supabase:', error);
+    }
+
+    // Atualiza cache local
+    const localGoals = loadFromStorage<MonthlyGoal[]>(STORAGE_KEYS.monthlyGoals, []);
+    const idx = localGoals.findIndex(
+      g => g.lineId === goal.lineId && g.year === goal.year && g.month === goal.month && (g.setor || null) === (goal.setor || null)
+    );
+
+    const updatedItem: MonthlyGoal = {
+      id: idx !== -1 ? localGoals[idx].id : `goal-${Date.now()}`,
+      lineId: goal.lineId,
+      year: goal.year,
+      month: goal.month,
+      goalQuantity: goal.goalQuantity,
+      setor: goal.setor,
+      createdAt: idx !== -1 ? localGoals[idx].createdAt : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (idx !== -1) {
+      localGoals[idx] = updatedItem;
+    } else {
+      localGoals.push(updatedItem);
+    }
+
+    saveToStorage(STORAGE_KEYS.monthlyGoals, localGoals);
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta mensal:', err);
+    return false;
   }
 };
 
@@ -1384,11 +1839,20 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
   }
 };
 
-export const finishOP = async (opId: string, lineId: string, leaderId: string) => {
+export const finishOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  finishedShift?: 'Manhã' | 'Tarde'
+) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
 
-  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'completed' } : op);
+  inMemoryOps = inMemoryOps.map(op => 
+    op.id === opId 
+      ? { ...op, status: 'completed', finishedShift: finishedShift || undefined } 
+      : op
+  );
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
 
   persistOps();
@@ -1409,8 +1873,8 @@ export const finishOP = async (opId: string, lineId: string, leaderId: string) =
 
   try {
     await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'completed' }).eq('id', opId),
-      supabase.from('ops').update({ status: 'completed' }).eq('id', opId),
+      supabase.from('production_orders').update({ status: 'completed', finished_shift: finishedShift || null }).eq('id', opId),
+      supabase.from('ops').update({ status: 'completed', finished_shift: finishedShift || null }).eq('id', opId),
       supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
       supabase.from('lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
       supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'FINISHED', created_at: newEvent.createdAt }),
