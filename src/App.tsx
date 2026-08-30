@@ -5,6 +5,8 @@ import { useAuthStore } from './store/authStore';
 import { Login } from './pages/Login';
 import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
 import { LeaderScreen } from './pages/LeaderScreen';
+import { PesagemScreen } from './pages/PesagemScreen';
+import { ManipulacaoScreen } from './pages/ManipulacaoScreen';
 import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -50,7 +52,18 @@ function MainRoute() {
   if (isCoordinator) {
     return <CoordinatorDashboard />;
   }
-  
+
+  const area = profile?.area;
+
+  if (area === 'Pesagem') {
+    return <PesagemScreen />;
+  }
+
+  if (area === 'Manipulação') {
+    return <ManipulacaoScreen />;
+  }
+
+  // Se area === 'Envase' ou indefinida/outra, renderiza LeaderScreen por compatibilidade
   return <LeaderScreen />;
 }
 

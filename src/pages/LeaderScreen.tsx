@@ -100,6 +100,13 @@ export function LeaderScreen() {
   const manualLineRef = useRef<string | null>(null);
   const manualLineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Ref para manter o selectedLineId sincronizado sem invalidar o useCallback do fetchData
+  const selectedLineIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedLineIdRef.current = selectedLineId;
+  }, [selectedLineId]);
+
   // Ref estável para fetchData — resolve stale closure no Realtime/setInterval
   const fetchDataRef = useRef<(showRefreshing?: boolean) => Promise<void>>();
 
@@ -107,8 +114,11 @@ export function LeaderScreen() {
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!profile) return;
     try {
-      if (showRefreshing) setIsRefreshing(true);
-      else setLoading(true);
+      if (showRefreshing) {
+        setIsRefreshing(true);
+      } else {
+        setLoading(true);
+      }
 
       const [loadedLines, loadedOps, loadedEvents, loadedReasons] = await Promise.all([
         getLines(),
@@ -134,7 +144,7 @@ export function LeaderScreen() {
         );
         if (assignedLineId && loadedLines.some(l => l.id === assignedLineId)) {
           setSelectedLineId(assignedLineId);
-        } else if (!selectedLineId) {
+        } else if (!selectedLineIdRef.current) {
           setSelectedLineId(loadedLines[0]?.id || 'line-1');
         }
       }
@@ -144,7 +154,7 @@ export function LeaderScreen() {
       setLoading(false);
       setIsRefreshing(false);
     }
-  }, [profile, selectedLineId]);
+  }, [profile]);
 
   // Mantém a ref sempre apontando para a versão mais recente do fetchData
   // — isso resolve a stale closure no Realtime e no setInterval
@@ -158,7 +168,7 @@ export function LeaderScreen() {
 
     fetchDataRef.current?.();
 
-    const stable = () => fetchDataRef.current?.();
+    const stable = () => fetchDataRef.current?.(true);
 
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
@@ -170,7 +180,7 @@ export function LeaderScreen() {
       .subscribe();
 
     // Fallback: polling a cada 5s mesmo se Realtime cair
-    const interval = setInterval(stable, 5000);
+    const interval = setInterval(() => fetchDataRef.current?.(true), 5000);
 
     return () => {
       supabase.removeChannel(channel);

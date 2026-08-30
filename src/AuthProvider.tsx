@@ -65,6 +65,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             dbStatus = profileById.status || 'active';
             if (profileById.must_change_password === true || profileById.status === 'first_access') {
               dbMustChange = true;
+            } else if (profileById.must_change_password === false || profileById.status === 'active') {
+              dbMustChange = false;
             }
             dbCreatedAt = profileById.created_at || dbCreatedAt;
           }
@@ -88,6 +90,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               dbStatus = profileByEmail.status || dbStatus;
               if (profileByEmail.must_change_password === true || profileByEmail.status === 'first_access') {
                 dbMustChange = true;
+              } else if (profileByEmail.must_change_password === false || profileByEmail.status === 'active') {
+                dbMustChange = false;
               }
               dbCreatedAt = profileByEmail.created_at || dbCreatedAt;
             }
@@ -102,6 +106,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const metaName = user.user_metadata?.name;
         if (user.user_metadata?.must_change_password === true || user.app_metadata?.must_change_password === true) {
           dbMustChange = true;
+        } else if (user.user_metadata?.must_change_password === false || user.app_metadata?.must_change_password === false) {
+          dbMustChange = false;
         }
 
         // Determina se é Coordenador

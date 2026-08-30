@@ -457,7 +457,15 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
 
     if (data && !error) {
       const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && data.cargo.toLowerCase().includes('coordenador'));
-      const isFirstAccess = data.must_change_password === true || data.status === 'first_access' || (foundLocal?.mustChangePassword === true);
+      let isFirstAccess = false;
+      if (data.must_change_password === true || data.status === 'first_access') {
+        isFirstAccess = true;
+      } else if (data.must_change_password === false || data.status === 'active') {
+        isFirstAccess = false;
+      } else {
+        isFirstAccess = foundLocal?.mustChangePassword === true || foundLocal?.status === 'first_access';
+      }
+
       const profile: UserProfile = {
         uid: data.id,
         email: data.email,
@@ -504,7 +512,16 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
       const remoteUsers: UserProfile[] = data.map((d: any) => {
         const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && d.cargo.toLowerCase().includes('coordenador'));
         const localMatch = inMemoryProfiles.find(p => p.uid === d.id || (d.email && p.email?.toLowerCase() === d.email.toLowerCase()));
-        const isFirstAccess = d.must_change_password === true || d.status === 'first_access' || (localMatch?.mustChangePassword === true);
+        
+        let isFirstAccess = false;
+        if (d.must_change_password === true || d.status === 'first_access') {
+          isFirstAccess = true;
+        } else if (d.must_change_password === false || d.status === 'active') {
+          isFirstAccess = false;
+        } else {
+          isFirstAccess = localMatch?.mustChangePassword === true || localMatch?.status === 'first_access';
+        }
+
         return {
           uid: String(d.id || d.uid || `usr-${d.email}`),
           email: d.email || '',
@@ -591,26 +608,39 @@ export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'l
   }
 };
 
-export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending'): Promise<boolean> => {
+export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending' | 'first_access'): Promise<boolean> => {
   try {
+    const isFirstAccess = newStatus === 'first_access';
     // 1. Update in-memory / local storage immediately
     inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
     const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
     if (target) {
       target.status = newStatus;
+      target.mustChangePassword = isFirstAccess;
+      if (!isFirstAccess) {
+        delete target.defaultPassword;
+      }
       persistProfiles();
     }
 
     // 2. Update Supabase
     let { error } = await supabase
       .from('profiles')
-      .update({ status: newStatus })
+      .update({
+        status: newStatus,
+        must_change_password: isFirstAccess,
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', userId);
 
     if (error) {
       const res = await supabase
         .from('profiles')
-        .update({ status: newStatus })
+        .update({
+          status: newStatus,
+          must_change_password: isFirstAccess,
+          updated_at: new Date().toISOString(),
+        })
         .eq('email', userId);
       error = res.error;
     }

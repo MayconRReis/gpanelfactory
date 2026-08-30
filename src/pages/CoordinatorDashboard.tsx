@@ -639,6 +639,16 @@ WHERE email IN (
     }
   };
 
+  const handleMarkAsActive = async (user: UserProfile) => {
+    try {
+      await updateUserStatus(user.uid, 'active');
+      showToast(`Status de ${user.name} atualizado para Ativo.`);
+      await loadData();
+    } catch (err: any) {
+      showToast('Erro ao atualizar status do colaborador.', 'error');
+    }
+  };
+
   const handleCreateLeader = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const name = newLeaderName.trim();
@@ -1449,7 +1459,7 @@ WHERE email IN (
                               
                               {/* OP / OSM */}
                               <td className="py-3.5 px-4">
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex items-center gap-1.5 flex-wrap">
                                   <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${
                                     (op.tipoDocumento === 'OSM' || op.setor === 'Pesagem' || op.setor === 'Manipulação')
                                       ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40'
@@ -1460,6 +1470,11 @@ WHERE email IN (
                                   <span className="font-mono font-black text-[#f4f4f5] bg-[#1a1a22] border border-[#2c2c38] px-2 py-0.5 rounded-lg text-xs">
                                     {op.number}
                                   </span>
+                                  {op.setor === 'Pesagem' && op.status === 'completed' && (
+                                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
+                                      Pronta p/ Manipulação
+                                    </span>
+                                  )}
                                 </div>
                               </td>
 
@@ -1713,6 +1728,17 @@ WHERE email IN (
                                     <KeyRound className="w-2.5 h-2.5" />
                                     Redefinir Senha
                                   </button>
+                                  {isFirstAccess && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleMarkAsActive(ldr)}
+                                      className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-semibold flex items-center gap-0.5"
+                                      title="Marcar colaborador como Ativo diretamente"
+                                    >
+                                      <CheckCircle2 className="w-2.5 h-2.5" />
+                                      Marcar Ativo
+                                    </button>
+                                  )}
                                 </p>
                               </div>
                             </div>
@@ -2017,16 +2043,29 @@ WHERE email IN (
                                 <div className="flex items-center justify-end gap-1.5">
                                   {/* Botão Copiar Acesso Inicial se 1º acesso */}
                                   {(user.status === 'first_access' || user.mustChangePassword) && (
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => handleCopyLeaderCredentials(user)}
-                                      className="h-7 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
-                                      title="Copiar e-mail e senha padrão"
-                                    >
-                                      <Copy className="w-3 h-3" />
-                                      <span>Copiar Acesso</span>
-                                    </Button>
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handleCopyLeaderCredentials(user)}
+                                        className="h-7 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
+                                        title="Copiar e-mail e senha padrão"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                        <span>Copiar Acesso</span>
+                                      </Button>
+
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => handleMarkAsActive(user)}
+                                        className="h-7 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
+                                        title="Confirmar acesso e marcar como Ativo"
+                                      >
+                                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                        <span>Marcar Ativo</span>
+                                      </Button>
+                                    </>
                                   )}
 
                                   {/* Botão Redefinir Senha */}
