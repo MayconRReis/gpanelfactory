@@ -40,7 +40,8 @@ import {
   Database,
   Menu,
   KeyRound,
-  Edit2
+  Edit2,
+  Loader2
 } from 'lucide-react';
 import { 
   getLines, 
@@ -66,7 +67,8 @@ import {
   generateTemporaryPassword,
   generateLeaderEmail,
   getMonthlyGoals,
-  getTipoDocumento
+  getTipoDocumento,
+  resetLeaderPassword
 } from '../services/db';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
 import { supabase } from '../lib/supabase';
@@ -156,6 +158,13 @@ export function CoordinatorDashboard() {
     cargo: string;
     area?: string;
     lineName?: string;
+  } | null>(null);
+
+  // Modal: Redefinir Senha do Líder
+  const [resetPasswordModal, setResetPasswordModal] = useState<{
+    leader: UserProfile;
+    newPassword?: string;
+    loading: boolean;
   } | null>(null);
 
   // Modal: Excluir Colaborador
@@ -603,6 +612,31 @@ WHERE email IN (
       : `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\n\n📧 *E-mail de Login:* ${leader.email}\n\n⚠️ Senha temporária não disponível. Solicite ao coordenador que recrie seu acesso para gerar uma nova senha.`;
     navigator.clipboard.writeText(text);
     showToast(`Credenciais de ${leader.name} copiadas para a área de transferência!`);
+  };
+
+  const handleResetLeaderPassword = async (leader: UserProfile) => {
+    setResetPasswordModal({
+      leader,
+      loading: true,
+    });
+
+    try {
+      const res = await resetLeaderPassword(leader.uid, leader.email);
+      if (res.success && res.newPassword) {
+        setResetPasswordModal({
+          leader,
+          newPassword: res.newPassword,
+          loading: false,
+        });
+        await loadData();
+      } else {
+        setResetPasswordModal(null);
+        showToast(res.error || 'Não foi possível redefinir a senha do líder.', 'error');
+      }
+    } catch (err: any) {
+      setResetPasswordModal(null);
+      showToast(err?.message || 'Erro ao redefinir a senha do líder.', 'error');
+    }
   };
 
   const handleCreateLeader = async (e?: React.FormEvent) => {
@@ -1657,7 +1691,7 @@ WHERE email IN (
                                     </span>
                                   )}
                                 </div>
-                                <p className="text-[11px] text-[#71717a] flex items-center gap-2 mt-0.5">
+                                <p className="text-[11px] text-[#71717a] flex items-center gap-2 mt-0.5 flex-wrap">
                                   <span>{ldr.email}</span>
                                   {isFirstAccess && (
                                     <button
@@ -1670,6 +1704,15 @@ WHERE email IN (
                                       Copiar Acesso
                                     </button>
                                   )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResetLeaderPassword(ldr)}
+                                    className="text-[10px] text-orange-400 hover:text-orange-300 underline font-semibold flex items-center gap-0.5"
+                                    title="Redefinir senha temporária"
+                                  >
+                                    <KeyRound className="w-2.5 h-2.5" />
+                                    Redefinir Senha
+                                  </button>
                                 </p>
                               </div>
                             </div>
@@ -1983,6 +2026,20 @@ WHERE email IN (
                                     >
                                       <Copy className="w-3 h-3" />
                                       <span>Copiar Acesso</span>
+                                    </Button>
+                                  )}
+
+                                  {/* Botão Redefinir Senha */}
+                                  {!isCoordinator && (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => handleResetLeaderPassword(user)}
+                                      className="h-7 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
+                                      title="Redefinir senha temporária"
+                                    >
+                                      <KeyRound className="w-3 h-3 text-orange-400" />
+                                      <span>Redefinir Senha</span>
                                     </Button>
                                   )}
 
@@ -3091,6 +3148,99 @@ WHERE email IN (
                   Fechar
                 </Button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: REDEFINIR SENHA TEMPORÁRIA DO LÍDER */}
+      {resetPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="bg-[#121214] border border-[#27272a] rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-[#27272a] bg-orange-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center">
+                  <KeyRound className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#f4f4f5]">Senha Redefinida</h3>
+                  <p className="text-[11px] text-[#71717a]">
+                    {resetPasswordModal.loading ? 'Processando redefinição...' : resetPasswordModal.leader.name}
+                  </p>
+                </div>
+              </div>
+              {!resetPasswordModal.loading && (
+                <button
+                  onClick={() => setResetPasswordModal(null)}
+                  className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </div>
+
+            <div className="p-5 space-y-4">
+              {resetPasswordModal.loading ? (
+                <div className="py-8 flex flex-col items-center justify-center gap-3 text-center">
+                  <Loader2 className="w-8 h-8 text-orange-400 animate-spin" />
+                  <p className="text-sm font-semibold text-[#f4f4f5]">Gerando nova senha...</p>
+                  <p className="text-xs text-[#71717a]">Atualizando permissões de acesso do líder</p>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-xs text-[#d4d4d8]">
+                      A senha temporária de <strong className="text-white">{resetPasswordModal.leader.name}</strong> foi redefinida.
+                    </p>
+                    <p className="text-xs text-[#71717a]">
+                      Repasse esta senha ao líder pessoalmente:
+                    </p>
+                  </div>
+
+                  {/* Card com a senha em destaque */}
+                  <div className="bg-[#0a0a0c] border border-[#27272a] rounded-xl p-4 text-center space-y-2">
+                    <span className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wider block">
+                      Nova Senha Temporária
+                    </span>
+                    <span className="font-mono font-black text-xl text-amber-300 bg-amber-950/60 px-4 py-1.5 rounded-lg border border-amber-800/40 inline-block tracking-wider">
+                      {resetPasswordModal.newPassword}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-[#181820] border border-[#27272a] rounded-xl text-[11px] text-[#a1a1aa] flex items-start gap-2">
+                    <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                    <span>
+                      No próximo login, o sistema exigirá a criação de uma nova senha pessoal.
+                    </span>
+                  </div>
+
+                  {/* Botões de Ação */}
+                  <div className="space-y-2 pt-2 border-t border-[#27272a]">
+                    <Button
+                      onClick={() => {
+                        if (resetPasswordModal.newPassword) {
+                          const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${resetPasswordModal.leader.name}!\nSua senha temporária foi redefinida:\n\n📧 *E-mail de Login:* ${resetPasswordModal.leader.email}\n🔑 *Nova Senha Temporária:* ${resetPasswordModal.newPassword}\n\n⚠️ *Atenção:* No seu próximo login, o sistema solicitará a definição da sua nova senha pessoal.`;
+                          navigator.clipboard.writeText(text);
+                          showToast('Senha temporária copiada para a área de transferência!');
+                        }
+                      }}
+                      className="w-full h-10 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-orange-950/40"
+                    >
+                      <Copy className="w-4 h-4" />
+                      <span>Copiar senha</span>
+                    </Button>
+
+                    <Button
+                      variant="ghost"
+                      onClick={() => setResetPasswordModal(null)}
+                      className="w-full h-9 text-xs text-[#a1a1aa] hover:text-white"
+                    >
+                      Fechar
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

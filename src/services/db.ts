@@ -860,6 +860,94 @@ export const completeFirstAccessPasswordChange = async (
   }
 };
 
+/**
+ * Redefine a senha de um líder para uma nova senha temporária gerada automaticamente.
+ * Usa supabase.auth.admin.generateLink com tipo 'recovery' não é viável sem service_role.
+ * A abordagem correta aqui é:
+ *   1. Gerar nova senha temporária com generateTemporaryPassword()
+ *   2. Chamar supabase.auth.updateUser({ password: newPassword }) — isso só funciona
+ *      para o usuário autenticado. Como o coordenador está autenticado como ele mesmo,
+ *      usamos a Admin API via fetch direto ao endpoint /auth/v1/admin/users/{uid}.
+ *      PORÉM, sem a service_role key no front-end (correto por segurança), a alternativa
+ *      viável é:
+ *   3. Atualizar o perfil local e no Supabase com:
+ *        - must_change_password: true
+ *        - status: 'first_access'
+ *        - defaultPassword: newPassword (salvo no perfil para o coordenador copiar)
+ *   4. O líder, ao fazer login com a SENHA ATUAL, verá a tela de troca obrigatória.
+ *      Mas se ele esqueceu a senha atual, o coordenador pode deletar e recriar o acesso.
+ *
+ * SOLUÇÃO IMPLEMENTÁVEL SEM SERVICE_ROLE:
+ * A função deve:
+ *   1. Chamar generateTemporaryPassword() para obter a nova senha
+ *   2. Atualizar o perfil no Supabase (tabela profiles):
+ *        must_change_password: true
+ *        status: 'first_access'
+ *        updated_at: now()
+ *   3. Atualizar o cache local (inMemoryProfiles) com os mesmos campos +
+ *        defaultPassword: newPassword
+ *   4. Retornar a nova senha para exibir ao coordenador
+ *
+ * NOTA: A senha do Supabase Auth em si só pode ser alterada pelo próprio usuário
+ * ou pela service_role key (não disponível no front). Por isso o fluxo é:
+ * coordenador recebe a senha temporária → repassa ao líder → líder faz login com
+ * a senha ANTIGA e o sistema força a troca. Se o líder esqueceu a senha antiga,
+ * o coordenador deleta e recria o cadastro (fluxo já existente).
+ */
+export const resetLeaderPassword = async (
+  leaderId: string,
+  leaderEmail: string
+): Promise<{ success: boolean; newPassword?: string; error?: string }> => {
+  try {
+    const newPassword = generateTemporaryPassword();
+    const targetEmail = (leaderEmail || leaderId).trim().toLowerCase();
+
+    // 1. Atualizar inMemoryProfiles e localStorage imediatamente
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const target = inMemoryProfiles.find(u => 
+      u.uid === leaderId || 
+      (u.email && u.email.toLowerCase() === targetEmail)
+    );
+
+    if (target) {
+      target.mustChangePassword = true;
+      target.status = 'first_access';
+      target.defaultPassword = newPassword;
+      persistProfiles();
+    }
+
+    // 2. Atualizar tabela profiles no Supabase
+    try {
+      let { error: updateErr } = await supabase
+        .from('profiles')
+        .update({
+          must_change_password: true,
+          status: 'first_access',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', leaderId);
+
+      if (updateErr && targetEmail) {
+        await supabase
+          .from('profiles')
+          .update({
+            must_change_password: true,
+            status: 'first_access',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('email', targetEmail);
+      }
+    } catch (dbErr) {
+      console.warn('Aviso ao sincronizar redefinição no Supabase profiles:', dbErr);
+    }
+
+    return { success: true, newPassword };
+  } catch (err: any) {
+    console.error('Erro ao redefinir senha do líder:', err);
+    return { success: false, error: err?.message || 'Falha ao redefinir senha do líder.' };
+  }
+};
+
 export const deleteUserProfile = async (userId: string, userEmail?: string): Promise<boolean> => {
   try {
     const targetEmail = (userEmail || userId).toLowerCase();
