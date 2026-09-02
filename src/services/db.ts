@@ -1,5 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
-import { supabase, supabaseUrl, supabaseAnonKey } from '../lib/supabase';
+import {
+  supabase,
+  supabaseUrl,
+  supabaseAnonKey,
+  isRetryableError,
+  isFetchOrNetworkError,
+  isSupabaseRuntimeEnabled,
+} from '../lib/supabase';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
 
 /**
@@ -475,8 +482,7 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         area: data.area || undefined,
         status: isFirstAccess ? 'first_access' : (data.status || 'active'),
         mustChangePassword: isFirstAccess,
-        // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
-        defaultPassword: isFirstAccess ? (foundLocal?.defaultPassword || undefined) : undefined,
+        defaultPassword: data.default_password || undefined,
         createdAt: data.created_at || new Date().toISOString(),
       };
       
@@ -531,8 +537,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           area: d.area || undefined,
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
-          // Usa a senha temporária salva no perfil local; se não existir, não expõe fallback fixo
-          defaultPassword: isFirstAccess ? (localMatch?.defaultPassword || undefined) : undefined,
+          defaultPassword: d.default_password || undefined,
           createdAt: d.created_at || new Date().toISOString(),
         };
       });
@@ -669,19 +674,128 @@ export const preAuthorizeUser = async (data: {
     const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
     const area = data.area || (role === 'coordinator' ? 'Coordenação' : undefined);
     const isFirstAccess = data.mustChangePassword !== false;
-    // Gera uma senha temporária única por usuário; nunca reutiliza a mesma senha para todos
     const defaultPassword = data.defaultPassword || generateTemporaryPassword();
 
-    const generatedId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    // Se o Supabase estiver offline (isSupabaseRuntimeEnabled === false), salvar só no localStorage com UUID local
+    if (!isSupabaseRuntimeEnabled || !supabaseUrl || !supabaseAnonKey) {
+      const offlineId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
-    // 1. Save to inMemoryProfiles and localStorage immediately
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === generatedId);
-    
+      const userObj: UserProfile = {
+        uid: offlineId,
+        email,
+        name,
+        role,
+        cargo,
+        area: area || undefined,
+        status: isFirstAccess ? 'first_access' : 'active',
+        mustChangePassword: isFirstAccess,
+        defaultPassword: isFirstAccess ? defaultPassword : undefined,
+        createdAt: new Date().toISOString(),
+      };
+
+      inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+      const existingIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email);
+      if (existingIdx !== -1) {
+        inMemoryProfiles[existingIdx] = {
+          ...userObj,
+          createdAt: inMemoryProfiles[existingIdx].createdAt || userObj.createdAt,
+        };
+      } else {
+        inMemoryProfiles.unshift(userObj);
+      }
+      persistProfiles();
+
+      if (data.lineId) {
+        try {
+          await saveLeaderRotation(offlineId, data.lineId, email, name);
+        } catch (rotErr) {
+          console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
+        }
+      }
+
+      return true;
+    }
+
+    // PASSO 1: Criar usuário no Supabase Auth PRIMEIRO (via ephemeralClient)
+    //          antes de qualquer gravação local
+    let realUserId: string;
+
+    try {
+      const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      });
+
+      const signUpResult = await ephemeralClient.auth.signUp({
+        email,
+        password: defaultPassword,
+        options: {
+          data: {
+            name,
+            role,
+            cargo,
+            area: area || null,
+            must_change_password: isFirstAccess,
+            status: isFirstAccess ? 'first_access' : 'active',
+          },
+        },
+      });
+
+      // Se o signup falhou com "User already registered", buscar o ID existente em profiles
+      if (
+        signUpResult.error?.message?.includes('already registered') ||
+        signUpResult.error?.message?.includes('user_already_exists')
+      ) {
+        const { data: existing, error: fetchErr } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('email', email)
+          .maybeSingle();
+
+        if (fetchErr && (isRetryableError(fetchErr) || isFetchOrNetworkError(fetchErr))) {
+          console.warn('[GPanel] Falha de conexão ao buscar ID de perfil existente:', fetchErr);
+        }
+
+        realUserId = existing?.id || (typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
+      } else if (signUpResult.error) {
+        // Outro erro — salva localmente e retorna true (modo offline)
+        // usa UUID local como fallback
+        if (isRetryableError(signUpResult.error) || isFetchOrNetworkError(signUpResult.error)) {
+          console.warn('[GPanel] Erro de rede no Auth signUp — ativando fallback local:', signUpResult.error);
+        } else {
+          console.warn('[GPanel] Erro no Auth signUp:', signUpResult.error);
+        }
+        realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      } else if (signUpResult.data.user?.id) {
+        realUserId = signUpResult.data.user.id; // ID REAL do Supabase Auth
+      } else {
+        realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      }
+    } catch (authErr: any) {
+      if (isRetryableError(authErr) || isFetchOrNetworkError(authErr)) {
+        console.warn('[GPanel] Erro de conexão no cliente temporário do Auth:', authErr);
+      } else {
+        console.warn('Registro no Auth Supabase via cliente temporário:', authErr);
+      }
+      realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    }
+
+    // PASSO 2: Montar userObj com o ID REAL
     const userObj: UserProfile = {
-      uid: existingLocalIdx !== -1 ? inMemoryProfiles[existingLocalIdx].uid : generatedId,
+      uid: realUserId,
       email,
       name,
       role,
@@ -690,98 +804,28 @@ export const preAuthorizeUser = async (data: {
       status: isFirstAccess ? 'first_access' : 'active',
       mustChangePassword: isFirstAccess,
       defaultPassword: isFirstAccess ? defaultPassword : undefined,
-      createdAt: existingLocalIdx !== -1 ? inMemoryProfiles[existingLocalIdx].createdAt : new Date().toISOString(),
+      createdAt: new Date().toISOString(),
     };
 
+    // PASSO 3: Salvar no localStorage e inMemoryProfiles
+    // (upsert pelo email para não duplicar)
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === realUserId);
+
     if (existingLocalIdx !== -1) {
-      inMemoryProfiles[existingLocalIdx] = userObj;
+      inMemoryProfiles[existingLocalIdx] = {
+        ...userObj,
+        createdAt: inMemoryProfiles[existingLocalIdx].createdAt || userObj.createdAt,
+      };
     } else {
       inMemoryProfiles.unshift(userObj);
     }
     persistProfiles();
 
-    // 2. If lineId provided, allocate rotation immediately
-    if (data.lineId) {
-      try {
-        await saveLeaderRotation(userObj.uid, data.lineId);
-      } catch (rotErr) {
-        console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
-      }
-    }
-
-    // 3. Register user in Supabase Auth via ephemeral client so they can log in directly
-    if (supabaseUrl && supabaseAnonKey) {
-      try {
-        const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
-          auth: {
-            persistSession: false,
-            autoRefreshToken: false,
-            detectSessionInUrl: false,
-          },
-        });
-
-        const { data: signUpData, error: authSignUpErr } = await ephemeralClient.auth.signUp({
-          email,
-          password: defaultPassword,
-          options: {
-            data: {
-              name,
-              role,
-              cargo,
-              area: area || null,
-              must_change_password: isFirstAccess,
-            },
-          },
-        });
-
-        if (!authSignUpErr && signUpData.user?.id) {
-          userObj.uid = signUpData.user.id;
-          persistProfiles();
-        }
-      } catch (authErr) {
-        console.warn('Registro no Auth Supabase via cliente temporário:', authErr);
-      }
-    }
-
-    // 4. Sync with Supabase profiles table
+    // PASSO 4: INSERT/UPSERT em profiles com o ID REAL
     try {
-      const { data: existingUser } = await supabase
-        .from('profiles')
-        .select('id, email')
-        .eq('email', email)
-        .maybeSingle();
-
-      if (existingUser?.id) {
-        userObj.uid = existingUser.id;
-        persistProfiles();
-
-        const { error: updateErr } = await supabase
-          .from('profiles')
-          .update({ 
-            role, 
-            name, 
-            cargo, 
-            area: area || null,
-            status: isFirstAccess ? 'first_access' : 'active',
-            must_change_password: isFirstAccess,
-          })
-          .eq('id', existingUser.id);
-
-        if (updateErr) {
-          await supabase.from('profiles').update({ 
-            role, 
-            name, 
-            cargo,
-            area: area || null,
-            status: isFirstAccess ? 'first_access' : 'active',
-            must_change_password: isFirstAccess,
-          }).eq('email', email);
-        }
-        return true;
-      }
-
-      const payload: any = {
-        id: userObj.uid || generatedId,
+      const { error: upsertErr } = await supabase.from('profiles').upsert({
+        id: realUserId,
         email,
         name,
         role,
@@ -789,37 +833,41 @@ export const preAuthorizeUser = async (data: {
         area: area || null,
         status: isFirstAccess ? 'first_access' : 'active',
         must_change_password: isFirstAccess,
+        default_password: isFirstAccess ? defaultPassword : null,
         created_at: new Date().toISOString(),
-      };
+      }, { onConflict: 'id' });
 
-      const { error: insertErr } = await supabase.from('profiles').insert(payload);
-
-      if (insertErr) {
-        const { error: upsertErr } = await supabase
-          .from('profiles')
-          .upsert(payload, { onConflict: 'email' });
-
-        if (upsertErr) {
-          await supabase
-            .from('profiles')
-            .upsert({ 
-              email, 
-              name, 
-              role, 
-              cargo, 
-              area: area || null,
-              status: isFirstAccess ? 'first_access' : 'active',
-              must_change_password: isFirstAccess,
-            }, { onConflict: 'email' });
+      if (upsertErr) {
+        if (isRetryableError(upsertErr) || isFetchOrNetworkError(upsertErr)) {
+          console.warn('[GPanel] Falha de rede ao persistir perfil no Supabase:', upsertErr);
+        } else {
+          console.warn('[GPanel] Erro ao gravar perfil em profiles no Supabase:', upsertErr);
         }
       }
-    } catch (dbErr) {
-      console.warn('Sincronização do perfil no Supabase (mantido em local storage):', dbErr);
+    } catch (dbErr: any) {
+      if (isRetryableError(dbErr) || isFetchOrNetworkError(dbErr)) {
+        console.warn('[GPanel] Falha de conexão ao sincronizar perfil (mantido no cache local):', dbErr);
+      } else {
+        console.warn('Sincronização do perfil no Supabase (mantido em local storage):', dbErr);
+      }
+    }
+
+    // PASSO 5: Alocar linha se lineId foi fornecido
+    if (data.lineId) {
+      try {
+        await saveLeaderRotation(realUserId, data.lineId, email, name);
+      } catch (rotErr) {
+        console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
+      }
     }
 
     return true;
-  } catch (err) {
-    console.error('Erro ao pré-autorizar usuário:', err);
+  } catch (err: any) {
+    if (isRetryableError(err) || isFetchOrNetworkError(err)) {
+      console.warn('[GPanel] Falha de rede durante pré-autorização:', err);
+    } else {
+      console.error('Erro ao pré-autorizar usuário:', err);
+    }
     return false;
   }
 };
@@ -863,6 +911,7 @@ export const completeFirstAccessPasswordChange = async (
       let { error: updateErr } = await supabase
         .from('profiles')
         .update({
+          default_password: null,
           status: 'active',
           must_change_password: false,
           updated_at: new Date().toISOString(),
@@ -873,6 +922,7 @@ export const completeFirstAccessPasswordChange = async (
         await supabase
           .from('profiles')
           .update({
+            default_password: null,
             status: 'active',
             must_change_password: false,
             updated_at: new Date().toISOString(),
@@ -951,6 +1001,7 @@ export const resetLeaderPassword = async (
       let { error: updateErr } = await supabase
         .from('profiles')
         .update({
+          default_password: newPassword,
           must_change_password: true,
           status: 'first_access',
           updated_at: new Date().toISOString(),
@@ -961,6 +1012,7 @@ export const resetLeaderPassword = async (
         await supabase
           .from('profiles')
           .update({
+            default_password: newPassword,
             must_change_password: true,
             status: 'first_access',
             updated_at: new Date().toISOString(),

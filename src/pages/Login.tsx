@@ -128,36 +128,49 @@ export function Login() {
           password,
         });
 
-        // Fallback: tenta criar a conta no Supabase Auth caso o líder tenha sido
-        // pré-autorizado mas ainda não confirmou o e-mail (fluxo de primeiro acesso).
-        // A verificação usa apenas a senha que o usuário digitou — nunca uma senha fixa.
+        // Fallback: tenta buscar perfil no Supabase para recuperar senha temporária
+        // (funciona mesmo em dispositivos sem o localStorage do coordenador)
         if (signInErr) {
-          const rawProfiles = (typeof window !== 'undefined' && window.localStorage)
-            ? JSON.parse(window.localStorage.getItem('SIG_PROD_PROFILES_STORAGE_V5') || '[]')
-            : [];
-          const matchedProfile = rawProfiles.find(
-            (p: any) => p.email?.toLowerCase() === email.trim().toLowerCase()
-          );
+          try {
+            const { data: profileData } = await supabase
+              .from('profiles')
+              .select('id, email, name, role, cargo, area, status, must_change_password, default_password')
+              .eq('email', email.trim().toLowerCase())
+              .maybeSingle();
 
-          // Só tenta o signup se: (a) existe um perfil local para este e-mail E
-          // (b) o perfil está marcado para primeiro acesso (senha temporária ainda válida)
-          if (matchedProfile && (matchedProfile.mustChangePassword || matchedProfile.status === 'first_access')) {
-            const { error: fallbackSignUpErr } = await supabase.auth.signUp({
-              email: email.trim(),
-              password,
-              options: {
-                data: {
-                  name: matchedProfile.name,
-                  role: matchedProfile.role || 'leader',
-                  cargo: matchedProfile.cargo || 'Líder de Produção',
-                  must_change_password: true,
-                },
-              },
-            });
+            if (profileData && profileData.default_password &&
+                (profileData.status === 'first_access' || profileData.must_change_password)) {
+              
+              // Tenta logar com a senha temporária salva no banco
+              const { error: tempLoginErr } = await supabase.auth.signInWithPassword({
+                email: email.trim(),
+                password: profileData.default_password,
+              });
 
-            if (!fallbackSignUpErr) {
-              signInErr = null;
+              if (!tempLoginErr) {
+                // Login com senha temporária funcionou — limpa o erro e continua
+                signInErr = null;
+              } else {
+                // Senha temporária também não funcionou — tenta criar a conta
+                // (caso o Auth ainda não tenha o usuário registrado)
+                const { error: signUpErr } = await supabase.auth.signUp({
+                  email: email.trim(),
+                  password: profileData.default_password,
+                  options: {
+                    data: {
+                      name: profileData.name,
+                      role: profileData.role || 'leader',
+                      cargo: profileData.cargo || 'Líder de Produção',
+                      area: profileData.area || null,
+                      must_change_password: true,
+                    },
+                  },
+                });
+                if (!signUpErr) signInErr = null;
+              }
             }
+          } catch (fallbackErr) {
+            console.warn('Fallback de login:', fallbackErr);
           }
         }
 

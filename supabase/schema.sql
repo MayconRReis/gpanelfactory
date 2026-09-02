@@ -625,3 +625,12 @@ ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS area text
   CHECK (area IS NULL OR area IN ('Envase', 'Pesagem', 'Manipulação', 'Coordenação'));
 
+-- ==============================================================================
+-- Migração 008: salvar senha temporária no banco para acesso multi-dispositivo
+-- ==============================================================================
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS default_password text;
+
+-- Limpar senha do banco após o líder trocar no primeiro acesso
+-- (será chamado pelo código após completeFirstAccessPasswordChange)
+
