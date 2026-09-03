@@ -534,11 +534,11 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           name: d.name || d.email?.split('@')[0] || 'Colaborador',
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
-          area: d.area || undefined,
+          area: d.area || localMatch?.area || undefined,
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
-          defaultPassword: d.default_password || undefined,
-          createdAt: d.created_at || new Date().toISOString(),
+          defaultPassword: d.default_password || localMatch?.defaultPassword || undefined,
+          createdAt: d.created_at || localMatch?.createdAt || new Date().toISOString(),
         };
       });
 
@@ -554,7 +554,12 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
       // Override / augment with remote profiles
       remoteUsers.forEach(u => {
         const key = u.email ? u.email.toLowerCase().trim() : u.uid;
-        if (key) userMap.set(key, u);
+        const local = userMap.get(key);
+        userMap.set(key, {
+          ...u,
+          area: u.area || local?.area || undefined,
+          defaultPassword: u.defaultPassword || local?.defaultPassword || undefined,
+        });
       });
 
       inMemoryProfiles = Array.from(userMap.values());
@@ -657,6 +662,14 @@ export const updateUserStatus = async (userId: string, newStatus: 'active' | 'in
   }
 };
 
+export interface PreAuthorizeResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+  isOfflineFallback?: boolean;
+  uid?: string;
+}
+
 export const preAuthorizeUser = async (data: {
   email: string;
   name: string;
@@ -666,7 +679,7 @@ export const preAuthorizeUser = async (data: {
   lineId?: string;
   mustChangePassword?: boolean;
   defaultPassword?: string;
-}): Promise<boolean> => {
+}): Promise<PreAuthorizeResult> => {
   try {
     const email = data.email.trim().toLowerCase();
     const name = data.name.trim();
@@ -694,6 +707,7 @@ export const preAuthorizeUser = async (data: {
         defaultPassword: isFirstAccess ? defaultPassword : undefined,
         createdAt: new Date().toISOString(),
       };
+      (userObj as any).pendingSupabaseSync = true;
 
       inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
       const existingIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email);
@@ -715,12 +729,19 @@ export const preAuthorizeUser = async (data: {
         }
       }
 
-      return true;
+      return {
+        success: true,
+        isOfflineFallback: true,
+        uid: offlineId,
+        message: 'Líder salvo no armazenamento local (modo offline ativo).',
+      };
     }
 
     // PASSO 1: Criar usuário no Supabase Auth PRIMEIRO (via ephemeralClient)
-    //          antes de qualquer gravação local
-    let realUserId: string;
+    let realUserId: string | undefined;
+    let isSupabaseAuthCreated = false;
+    let rateLimitExceeded = false;
+    let authErrorMessage: string | undefined;
 
     try {
       const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
@@ -746,56 +767,48 @@ export const preAuthorizeUser = async (data: {
         },
       });
 
-      // Se o signup falhou com "User already registered", buscar o ID existente em profiles
-      if (
-        signUpResult.error?.message?.includes('already registered') ||
-        signUpResult.error?.message?.includes('user_already_exists')
+      const errorMsg = (signUpResult.error?.message || '').toLowerCase();
+
+      if (errorMsg.includes('rate limit') || errorMsg.includes('over_email_send_rate_limit')) {
+        rateLimitExceeded = true;
+        authErrorMessage = 'Limite de e-mails do Supabase atingido. Para permitir cadastros ilimitados sem confirmação por e-mail, acesse o painel do Supabase > Authentication > Providers > Email e desative "Confirm email".';
+        console.warn('[GPanel] Rate limit de envio de e-mail no Supabase Auth:', signUpResult.error);
+      } else if (
+        errorMsg.includes('already registered') ||
+        errorMsg.includes('user_already_exists')
       ) {
-        const { data: existing, error: fetchErr } = await supabase
+        // Usuário já existe no Auth: buscar ID existente em profiles
+        const { data: existing } = await supabase
           .from('profiles')
           .select('id')
           .eq('email', email)
           .maybeSingle();
 
-        if (fetchErr && (isRetryableError(fetchErr) || isFetchOrNetworkError(fetchErr))) {
-          console.warn('[GPanel] Falha de conexão ao buscar ID de perfil existente:', fetchErr);
+        if (existing?.id) {
+          realUserId = existing.id;
+          isSupabaseAuthCreated = true;
         }
-
-        realUserId = existing?.id || (typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
+      } else if (signUpResult.data?.user?.id) {
+        realUserId = signUpResult.data.user.id;
+        isSupabaseAuthCreated = true;
       } else if (signUpResult.error) {
-        // Outro erro — salva localmente e retorna true (modo offline)
-        // usa UUID local como fallback
-        if (isRetryableError(signUpResult.error) || isFetchOrNetworkError(signUpResult.error)) {
-          console.warn('[GPanel] Erro de rede no Auth signUp — ativando fallback local:', signUpResult.error);
-        } else {
-          console.warn('[GPanel] Erro no Auth signUp:', signUpResult.error);
-        }
-        realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      } else if (signUpResult.data.user?.id) {
-        realUserId = signUpResult.data.user.id; // ID REAL do Supabase Auth
-      } else {
-        realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        console.warn('[GPanel] Erro no Auth signUp:', signUpResult.error);
+        authErrorMessage = signUpResult.error.message;
       }
     } catch (authErr: any) {
-      if (isRetryableError(authErr) || isFetchOrNetworkError(authErr)) {
-        console.warn('[GPanel] Erro de conexão no cliente temporário do Auth:', authErr);
-      } else {
-        console.warn('Registro no Auth Supabase via cliente temporário:', authErr);
-      }
-      realUserId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      console.warn('[GPanel] Exceção no cliente temporário do Auth:', authErr);
+      authErrorMessage = authErr?.message;
     }
 
-    // PASSO 2: Montar userObj com o ID REAL
+    // Se falhou no Auth (ex: rate limit de e-mail), cria UUID local provisório
+    const isLocalFallbackId = !realUserId;
+    const finalUserId = realUserId || ((typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
+
+    // PASSO 2: Montar userObj
     const userObj: UserProfile = {
-      uid: realUserId,
+      uid: finalUserId,
       email,
       name,
       role,
@@ -806,11 +819,13 @@ export const preAuthorizeUser = async (data: {
       defaultPassword: isFirstAccess ? defaultPassword : undefined,
       createdAt: new Date().toISOString(),
     };
+    if (isLocalFallbackId) {
+      (userObj as any).pendingSupabaseSync = true;
+    }
 
-    // PASSO 3: Salvar no localStorage e inMemoryProfiles
-    // (upsert pelo email para não duplicar)
+    // PASSO 3: Salvar no localStorage e inMemoryProfiles imediatamente
     inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === realUserId);
+    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === finalUserId);
 
     if (existingLocalIdx !== -1) {
       inMemoryProfiles[existingLocalIdx] = {
@@ -822,54 +837,158 @@ export const preAuthorizeUser = async (data: {
     }
     persistProfiles();
 
-    // PASSO 4: INSERT/UPSERT em profiles com o ID REAL
-    try {
-      const { error: upsertErr } = await supabase.from('profiles').upsert({
-        id: realUserId,
-        email,
-        name,
-        role,
-        cargo,
-        area: area || null,
-        status: isFirstAccess ? 'first_access' : 'active',
-        must_change_password: isFirstAccess,
-        default_password: isFirstAccess ? defaultPassword : null,
-        created_at: new Date().toISOString(),
-      }, { onConflict: 'id' });
+    // PASSO 4: INSERT/UPSERT em profiles se o ID for real do Supabase Auth
+    let databaseSaved = false;
+    if (isSupabaseAuthCreated && realUserId) {
+      try {
+        const fullPayload: any = {
+          id: realUserId,
+          email,
+          name,
+          role,
+          cargo,
+          area: area || null,
+          status: isFirstAccess ? 'first_access' : 'active',
+          must_change_password: isFirstAccess,
+          default_password: isFirstAccess ? defaultPassword : null,
+          created_at: new Date().toISOString(),
+        };
 
-      if (upsertErr) {
-        if (isRetryableError(upsertErr) || isFetchOrNetworkError(upsertErr)) {
-          console.warn('[GPanel] Falha de rede ao persistir perfil no Supabase:', upsertErr);
-        } else {
-          console.warn('[GPanel] Erro ao gravar perfil em profiles no Supabase:', upsertErr);
+        let { error: upsertErr } = await supabase.from('profiles').upsert(fullPayload, { onConflict: 'id' });
+
+        // Fallback resiliente: se a tabela profiles ainda não tem a coluna 'area' ou 'default_password'
+        if (upsertErr && (
+          upsertErr.code === 'PGRST204' ||
+          upsertErr.message?.includes('area') ||
+          upsertErr.message?.includes('default_password')
+        )) {
+          console.warn('[GPanel] profiles.upsert falhou por colunas opcionais, tentando payload base:', upsertErr.message);
+          const basePayload: any = {
+            id: realUserId,
+            email,
+            name,
+            role,
+            cargo,
+            status: isFirstAccess ? 'first_access' : 'active',
+            must_change_password: isFirstAccess,
+            created_at: new Date().toISOString(),
+          };
+          const retryRes = await supabase.from('profiles').upsert(basePayload, { onConflict: 'id' });
+          upsertErr = retryRes.error;
         }
-      }
-    } catch (dbErr: any) {
-      if (isRetryableError(dbErr) || isFetchOrNetworkError(dbErr)) {
-        console.warn('[GPanel] Falha de conexão ao sincronizar perfil (mantido no cache local):', dbErr);
-      } else {
-        console.warn('Sincronização do perfil no Supabase (mantido em local storage):', dbErr);
+
+        if (!upsertErr) {
+          databaseSaved = true;
+          // Limpa flag de pendência
+          const stored = inMemoryProfiles.find(u => u.uid === realUserId || u.email?.toLowerCase() === email);
+          if (stored) {
+            delete (stored as any).pendingSupabaseSync;
+            persistProfiles();
+          }
+        } else {
+          console.warn('[GPanel] Erro ao gravar perfil em profiles no Supabase (RLS ou schema):', upsertErr);
+        }
+      } catch (dbErr: any) {
+        console.warn('[GPanel] Falha ao sincronizar perfil com profiles no Supabase:', dbErr);
       }
     }
 
     // PASSO 5: Alocar linha se lineId foi fornecido
     if (data.lineId) {
       try {
-        await saveLeaderRotation(realUserId, data.lineId, email, name);
+        await saveLeaderRotation(finalUserId, data.lineId, email, name);
       } catch (rotErr) {
         console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
       }
     }
 
-    return true;
+    if (rateLimitExceeded) {
+      return {
+        success: false,
+        error: 'rate_limit',
+        isOfflineFallback: true,
+        uid: finalUserId,
+        message: authErrorMessage || 'Limite de e-mails do Supabase atingido. O líder foi salvo localmente.',
+      };
+    }
+
+    if (!databaseSaved && isLocalFallbackId) {
+      return {
+        success: true,
+        isOfflineFallback: true,
+        uid: finalUserId,
+        message: authErrorMessage
+          ? `Líder salvo localmente (${authErrorMessage}).`
+          : 'Líder salvo localmente (pendente envio ao Supabase).',
+      };
+    }
+
+    return {
+      success: true,
+      isOfflineFallback: false,
+      uid: finalUserId,
+      message: 'Líder registrado com sucesso no Supabase!',
+    };
   } catch (err: any) {
     if (isRetryableError(err) || isFetchOrNetworkError(err)) {
       console.warn('[GPanel] Falha de rede durante pré-autorização:', err);
     } else {
       console.error('Erro ao pré-autorizar usuário:', err);
     }
-    return false;
+    return {
+      success: false,
+      error: err?.message || 'Erro inesperado',
+      message: 'Não foi possível cadastrar o colaborador.',
+    };
   }
+};
+
+/**
+ * Sincroniza colaboradores salvos apenas localmente para o Supabase
+ */
+export const syncPendingLeadersToSupabase = async (): Promise<{
+  total: number;
+  synced: number;
+  failed: number;
+  errors: string[];
+}> => {
+  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+  const pending = inMemoryProfiles.filter(p => 
+    p.role === 'leader' && (
+      (p as any).pendingSupabaseSync === true ||
+      p.uid.startsWith('usr-')
+    )
+  );
+
+  let synced = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const leader of pending) {
+    try {
+      const res = await preAuthorizeUser({
+        name: leader.name,
+        email: leader.email,
+        role: leader.role,
+        cargo: leader.cargo,
+        area: leader.area,
+        mustChangePassword: leader.mustChangePassword,
+        defaultPassword: leader.defaultPassword,
+      });
+
+      if (res.success && !res.isOfflineFallback) {
+        synced++;
+      } else {
+        failed++;
+        if (res.message) errors.push(`${leader.name} (${leader.email}): ${res.message}`);
+      }
+    } catch (e: any) {
+      failed++;
+      errors.push(`${leader.name} (${leader.email}): ${e?.message || 'Falha de conexão'}`);
+    }
+  }
+
+  return { total: pending.length, synced, failed, errors };
 };
 
 /**

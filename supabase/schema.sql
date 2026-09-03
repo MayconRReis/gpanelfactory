@@ -5,18 +5,30 @@
 -- 1. EXTENSIONS & FUNCTIONS
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Helper: Check if the calling user is a coordinator
+-- Helper: Check if the calling user is a coordinator (imune a recursão RLS 42P17)
 CREATE OR REPLACE FUNCTION public.is_coordinator()
 RETURNS boolean AS $$
 BEGIN
+  -- 1. Verifica no metadata do auth.users (sem passar por RLS de profiles, imune a recursão 42P17)
+  IF EXISTS (
+    SELECT 1 FROM auth.users
+    WHERE id = auth.uid()
+      AND (
+        raw_user_meta_data->>'role' = 'coordinator'
+        OR raw_user_meta_data->>'role' = 'coordenador'
+      )
+  ) THEN
+    RETURN true;
+  END IF;
+
+  -- 2. Fallback via profiles
   RETURN EXISTS (
     SELECT 1 FROM public.profiles
     WHERE id = auth.uid()
       AND (role = 'coordinator' OR role = 'coordenador')
-      AND status = 'active'
   );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth;
 
 -- Helper: Get line assigned to a leader in active rotation
 CREATE OR REPLACE FUNCTION public.get_leader_assigned_line(p_leader_id uuid)
@@ -631,6 +643,87 @@ ALTER TABLE public.profiles
 ALTER TABLE public.profiles
   ADD COLUMN IF NOT EXISTS default_password text;
 
--- Limpar senha do banco após o líder trocar no primeiro acesso
--- (será chamado pelo código após completeFirstAccessPasswordChange)
+-- ==============================================================================
+-- Migração 009: Correção Definitiva de RLS, Recursão 42P17 e Cadastro de Líderes
+-- (Garante que líderes de Pesagem, Manipulação e Envase sejam gravados no Supabase)
+-- ==============================================================================
+
+-- 1. Garante colunas necessárias em profiles
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS area text;
+
+ALTER TABLE public.profiles
+  ADD COLUMN IF NOT EXISTS default_password text;
+
+-- Remove constraint restritiva se houver e reaplica segura
+DO $$
+BEGIN
+  ALTER TABLE public.profiles DROP CONSTRAINT IF EXISTS profiles_area_check;
+  ALTER TABLE public.profiles ADD CONSTRAINT profiles_area_check
+    CHECK (area IS NULL OR area IN ('Envase', 'Pesagem', 'Manipulação', 'Coordenação'));
+EXCEPTION WHEN OTHERS THEN
+  NULL;
+END $$;
+
+-- 2. Função is_coordinator() imune a recursão (lê do auth.users.raw_user_meta_data)
+CREATE OR REPLACE FUNCTION public.is_coordinator()
+RETURNS boolean AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM auth.users
+    WHERE id = auth.uid()
+      AND (
+        raw_user_meta_data->>'role' = 'coordinator'
+        OR raw_user_meta_data->>'role' = 'coordenador'
+      )
+  ) THEN
+    RETURN true;
+  END IF;
+
+  RETURN EXISTS (
+    SELECT 1 FROM public.profiles
+    WHERE id = auth.uid()
+      AND (role = 'coordinator' OR role = 'coordenador')
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, auth;
+
+-- 3. Recria policies de profiles sem recursão e permitindo que o coordenador insira líderes
+DROP POLICY IF EXISTS "Profiles are viewable by authenticated users" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_select_policy" ON public.profiles;
+CREATE POLICY "profiles_select_policy"
+  ON public.profiles
+  FOR SELECT
+  TO authenticated, anon
+  USING (true);
+
+DROP POLICY IF EXISTS "Users can insert their own initial leader profile" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_insert_policy" ON public.profiles;
+CREATE POLICY "profiles_insert_policy"
+  ON public.profiles
+  FOR INSERT
+  TO authenticated, anon
+  WITH CHECK (
+    auth.uid() = id
+    OR public.is_coordinator()
+    OR auth.uid() IS NULL
+  );
+
+DROP POLICY IF EXISTS "Users can update own basic info or coordinator can update all" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_self_update_policy" ON public.profiles;
+DROP POLICY IF EXISTS "profiles_update_policy" ON public.profiles;
+CREATE POLICY "profiles_update_policy"
+  ON public.profiles
+  FOR UPDATE
+  TO authenticated
+  USING (auth.uid() = id OR public.is_coordinator())
+  WITH CHECK (auth.uid() = id OR public.is_coordinator());
+
+DROP POLICY IF EXISTS "profiles_delete_policy" ON public.profiles;
+CREATE POLICY "profiles_delete_policy"
+  ON public.profiles
+  FOR DELETE
+  TO authenticated
+  USING (public.is_coordinator());
+
 

@@ -51,6 +51,7 @@ import {
   updateUserRole,
   updateUserStatus,
   preAuthorizeUser,
+  syncPendingLeadersToSupabase,
   deleteUserProfile,
   getAllRotations, 
   saveLeaderRotation, 
@@ -170,6 +171,7 @@ export function CoordinatorDashboard() {
   // Modal: Excluir Colaborador
   const [deleteUserModalData, setDeleteUserModalData] = useState<UserProfile | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
+  const [isSyncingPending, setIsSyncingPending] = useState(false);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
@@ -649,6 +651,25 @@ WHERE email IN (
     }
   };
 
+  const handleSyncPendingLeaders = async () => {
+    setIsSyncingPending(true);
+    try {
+      const res = await syncPendingLeadersToSupabase();
+      if (res.synced > 0) {
+        showToast(`${res.synced} colaborador(es) sincronizado(s) com o Supabase!`);
+      } else if (res.total === 0) {
+        showToast('Todos os colaboradores já estão sincronizados com o Supabase.');
+      } else {
+        showToast(`Falha ao sincronizar: ${res.errors[0] || 'Verifique as permissões ou limite de e-mail.'}`, 'error');
+      }
+      await loadData();
+    } catch (err: any) {
+      showToast(`Erro na sincronização: ${err?.message || 'Falha de conexão'}`, 'error');
+    } finally {
+      setIsSyncingPending(false);
+    }
+  };
+
   const handleCreateLeader = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const name = newLeaderName.trim();
@@ -668,7 +689,7 @@ WHERE email IN (
     // Gera uma senha temporária única para este líder — nunca reutilizamos a mesma para todos
     const tempPassword = generateTemporaryPassword();
     try {
-      const ok = await preAuthorizeUser({
+      const res = await preAuthorizeUser({
         name,
         email,
         role: 'leader',
@@ -679,8 +700,12 @@ WHERE email IN (
         defaultPassword: tempPassword,
       });
 
-      if (ok) {
-        showToast(`Líder ${name} cadastrado com sucesso!`);
+      if (res.success) {
+        if (res.isOfflineFallback) {
+          showToast(`Líder ${name} salvo localmente (pendente envio ao Supabase).`, 'info');
+        } else {
+          showToast(`Líder ${name} cadastrado com sucesso no Supabase!`);
+        }
         const assignedLineObj = lines.find(l => l.id === newLeaderLineId);
 
         // Exibe o modal com os dados de acesso gerados para cópia imediata
@@ -702,7 +727,18 @@ WHERE email IN (
         setShowNewLeaderModal(false);
         await loadData();
       } else {
-        showToast('Falha ao cadastrar líder.', 'error');
+        showToast(res.message || 'Falha ao cadastrar líder.', 'error');
+        if (res.isOfflineFallback) {
+          setCreatedCredentialsModalData({
+            name,
+            email,
+            password: tempPassword,
+            cargo: newLeaderCargo.trim() || 'Líder de Produção',
+            area: newLeaderArea,
+          });
+          setShowNewLeaderModal(false);
+          await loadData();
+        }
       }
     } catch (err: any) {
       showToast(`Erro ao cadastrar: ${err?.message || 'Falha na gravação'}`, 'error');
@@ -739,6 +775,7 @@ WHERE email IN (
   const coordinatorCount = allUsers.filter(u => u.role === 'coordinator').length;
   const leadersCount = allUsers.filter(u => u.role === 'leader').length;
   const pendingCount = allUsers.filter(u => u.status === 'pending' || u.status === 'inactive').length;
+  const pendingSyncCount = allUsers.filter(u => u.role === 'leader' && ((u as any).pendingSupabaseSync || u.uid?.startsWith('usr-'))).length;
 
   // Filtered OPs
   const filteredOps = ops.filter(op => {
@@ -1940,6 +1977,18 @@ WHERE email IN (
                   >
                     Líderes ({leadersCount})
                   </button>
+
+                  {pendingSyncCount > 0 && (
+                    <button
+                      onClick={handleSyncPendingLeaders}
+                      disabled={isSyncingPending}
+                      className="px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 disabled:opacity-50"
+                      title="Gravar no Supabase os líderes salvos localmente"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncingPending ? 'animate-spin' : ''}`} />
+                      <span>Sincronizar no Supabase ({pendingSyncCount})</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1968,6 +2017,7 @@ WHERE email IN (
                           const isSelf = user.uid === profile?.uid;
                           const isCoordinator = user.role === 'coordinator';
                           const isActive = user.status !== 'inactive';
+                          const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
 
                           return (
                             <tr key={user.uid || user.email} className="hover:bg-[#16161b] transition-colors">
@@ -1981,11 +2031,16 @@ WHERE email IN (
                                     {user.name.substring(0, 2)}
                                   </div>
                                   <div>
-                                    <p className="font-bold text-[#f4f4f5] flex items-center gap-1.5">
+                                    <p className="font-bold text-[#f4f4f5] flex items-center gap-1.5 flex-wrap">
                                       <span>{user.name}</span>
                                       {isSelf && (
                                         <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold">
                                           Você
+                                        </span>
+                                      )}
+                                      {isLocalOnly && (
+                                        <span className="text-[9px] bg-amber-950/80 border border-amber-800/40 text-amber-300 px-1.5 py-0.2 rounded font-bold" title="Salvo localmente (pendente envio ao Supabase)">
+                                          Pendente Supabase
                                         </span>
                                       )}
                                     </p>
