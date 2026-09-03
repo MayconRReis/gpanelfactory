@@ -49,6 +49,7 @@ import {
   getLeaders, 
   getAllUsers,
   updateUserRole,
+  updateUserArea,
   updateUserStatus,
   preAuthorizeUser,
   syncPendingLeadersToSupabase,
@@ -275,6 +276,21 @@ export function CoordinatorDashboard() {
       } else {
         showToast('Falha ao atualizar cargo no Supabase.', 'error');
       }
+    }
+  };
+
+  const handleUpdateUserArea = async (user: UserProfile, newArea: 'Envase' | 'Pesagem' | 'Manipulação') => {
+    let newCargo = 'Líder de Produção';
+    if (newArea === 'Pesagem') newCargo = 'Líder de Pesagem';
+    else if (newArea === 'Manipulação') newCargo = 'Líder de Manipulação';
+    else if (newArea === 'Envase') newCargo = 'Líder de Envase';
+
+    const ok = await updateUserArea(user.uid || user.email, newArea, newCargo);
+    if (ok) {
+      showToast(`Área de ${user.name} alterada para ${newArea} (${newCargo})!`);
+      await loadData();
+    } else {
+      showToast('Falha ao atualizar área do colaborador.', 'error');
     }
   };
 
@@ -688,12 +704,21 @@ WHERE email IN (
     setIsSubmittingLeader(true);
     // Gera uma senha temporária única para este líder — nunca reutilizamos a mesma para todos
     const tempPassword = generateTemporaryPassword();
+    const defaultCargoForArea = newLeaderArea === 'Pesagem' 
+      ? 'Líder de Pesagem' 
+      : newLeaderArea === 'Manipulação' 
+      ? 'Líder de Manipulação' 
+      : 'Líder de Envase';
+    const effectiveCargo = newLeaderCargo.trim() && newLeaderCargo.trim() !== 'Líder de Produção' 
+      ? newLeaderCargo.trim() 
+      : defaultCargoForArea;
+
     try {
       const res = await preAuthorizeUser({
         name,
         email,
         role: 'leader',
-        cargo: newLeaderCargo.trim() || 'Líder de Produção',
+        cargo: effectiveCargo,
         area: newLeaderArea,
         lineId: newLeaderLineId || undefined,
         mustChangePassword: true,
@@ -713,7 +738,7 @@ WHERE email IN (
           name,
           email,
           password: tempPassword,
-          cargo: newLeaderCargo.trim() || 'Líder de Produção',
+          cargo: effectiveCargo,
           area: newLeaderArea,
           lineName: assignedLineObj?.name,
         });
@@ -721,7 +746,7 @@ WHERE email IN (
         setNewLeaderName('');
         setNewLeaderEmail('');
         setNewLeaderLineId('');
-        setNewLeaderCargo('Líder de Produção');
+        setNewLeaderCargo('Líder de Envase');
         setNewLeaderArea('Envase');
         setIsAutoEmail(true);
         setShowNewLeaderModal(false);
@@ -733,7 +758,7 @@ WHERE email IN (
             name,
             email,
             password: tempPassword,
-            cargo: newLeaderCargo.trim() || 'Líder de Produção',
+            cargo: effectiveCargo,
             area: newLeaderArea,
           });
           setShowNewLeaderModal(false);
@@ -2053,7 +2078,7 @@ WHERE email IN (
                               </td>
 
                               <td className="py-3.5 px-4">
-                                <div className="flex items-center gap-1.5 flex-wrap">
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
                                     isCoordinator
                                       ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
@@ -2063,14 +2088,20 @@ WHERE email IN (
                                     <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
                                   </span>
 
-                                  {user.area && (
-                                    <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider ${
-                                      user.area === 'Envase' ? 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40' :
-                                      user.area === 'Pesagem' ? 'bg-purple-950/70 text-[#a855f7] border-purple-500/40' :
-                                      user.area === 'Manipulação' ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40' :
-                                      'bg-zinc-800 text-zinc-300 border-zinc-700'
-                                    }`}>
-                                      {user.area}
+                                  {!isCoordinator ? (
+                                    <select
+                                      value={user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
+                                      onChange={(e) => handleUpdateUserArea(user, e.target.value as any)}
+                                      className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border bg-[#14141a] border-[#2c2c38] text-white focus:outline-none focus:border-blue-500 cursor-pointer shadow-sm"
+                                      title="Clique para alterar a área de atuação deste líder (define a tela do chão de fábrica)"
+                                    >
+                                      <option value="Envase" className="bg-[#121217] text-[#3b82f6]">Área: Envase</option>
+                                      <option value="Pesagem" className="bg-[#121217] text-[#c084fc]">Área: Pesagem</option>
+                                      <option value="Manipulação" className="bg-[#121217] text-[#22d3ee]">Área: Manipulação</option>
+                                    </select>
+                                  ) : (
+                                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-blue-950/70 text-blue-400 border-blue-500/40">
+                                      Coordenação Geral
                                     </span>
                                   )}
                                 </div>
@@ -3085,18 +3116,31 @@ WHERE email IN (
               </div>
 
               <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa]">Alocação de Linha Inicial</Label>
+                <Label className="text-xs font-semibold text-[#a1a1aa] flex items-center justify-between">
+                  <span>Área de Atuação *</span>
+                  <span className="text-[10px] text-blue-400 font-normal">Define tela inicial e tipo de documento (OP/OSM)</span>
+                </Label>
                 <select
-                  value={newLeaderLineId}
-                  onChange={(e) => setNewLeaderLineId(e.target.value)}
-                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500"
+                  value={newLeaderArea}
+                  onChange={(e) => {
+                    const area = e.target.value as 'Envase' | 'Pesagem' | 'Manipulação';
+                    setNewLeaderArea(area);
+                    if (area === 'Pesagem') {
+                      setNewLeaderCargo('Líder de Pesagem');
+                      setNewLeaderLineId('');
+                    } else if (area === 'Manipulação') {
+                      setNewLeaderCargo('Líder de Manipulação');
+                      setNewLeaderLineId('');
+                    } else {
+                      setNewLeaderCargo('Líder de Envase');
+                    }
+                  }}
+                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500 font-semibold"
+                  required
                 >
-                  <option value="">Sem linha inicial (alocar depois)</option>
-                  {lines.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.name}
-                    </option>
-                  ))}
+                  <option value="Envase">Envase (Chão de Fábrica · Ordem de Produção - OP)</option>
+                  <option value="Pesagem">Pesagem (Chão de Fábrica · Ordem de Serviço - OSM · 1 Turno)</option>
+                  <option value="Manipulação">Manipulação (Chão de Fábrica · Ordem de Serviço - OSM · 2 Turnos)</option>
                 </select>
               </div>
 
@@ -3110,22 +3154,23 @@ WHERE email IN (
                 />
               </div>
 
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa] flex items-center justify-between">
-                  <span>Área de Atuação *</span>
-                  <span className="text-[10px] text-blue-400 font-normal">Define tipo de documento (OP/OSM)</span>
-                </Label>
-                <select
-                  value={newLeaderArea}
-                  onChange={(e) => setNewLeaderArea(e.target.value as 'Envase' | 'Pesagem' | 'Manipulação')}
-                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500 font-semibold"
-                  required
-                >
-                  <option value="Envase">Envase (Ordem de Produção - OP)</option>
-                  <option value="Pesagem">Pesagem (Ordem de Serviço - OSM · 1 Turno)</option>
-                  <option value="Manipulação">Manipulação (Ordem de Serviço - OSM · 2 Turnos)</option>
-                </select>
-              </div>
+              {newLeaderArea === 'Envase' && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold text-[#a1a1aa]">Alocação de Linha de Envase</Label>
+                  <select
+                    value={newLeaderLineId}
+                    onChange={(e) => setNewLeaderLineId(e.target.value)}
+                    className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="">Sem linha inicial (alocar depois)</option>
+                    {lines.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {/* Actions */}
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">

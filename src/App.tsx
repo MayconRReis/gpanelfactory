@@ -47,13 +47,24 @@ function MainRoute() {
   }
 
   const role = String(profile?.role || '').toLowerCase().trim();
-  const isCoordinator = role === 'coordinator' || role === 'coordenador';
+  const cargo = String(profile?.cargo || '').toLowerCase().trim();
+  const isCoordinator = role === 'coordinator' || role === 'coordenador' || cargo.includes('coordena');
 
   if (isCoordinator) {
     return <CoordinatorDashboard />;
   }
 
-  const area = profile?.area;
+  let area = profile?.area;
+  // Inferência automática de área caso venha em branco
+  if (!area) {
+    if (cargo.includes('pesag')) {
+      area = 'Pesagem';
+    } else if (cargo.includes('manipula')) {
+      area = 'Manipulação';
+    } else if (cargo.includes('envas')) {
+      area = 'Envase';
+    }
+  }
 
   if (area === 'Pesagem') {
     return <PesagemScreen />;
@@ -63,7 +74,7 @@ function MainRoute() {
     return <ManipulacaoScreen />;
   }
 
-  // Se area === 'Envase' ou indefinida/outra, renderiza LeaderScreen por compatibilidade
+  // Se area === 'Envase' ou indefinida/outra, renderiza LeaderScreen
   return <LeaderScreen />;
 }
 

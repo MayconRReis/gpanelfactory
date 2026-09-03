@@ -618,6 +618,49 @@ export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'l
   }
 };
 
+export const updateUserArea = async (
+  userId: string,
+  newArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação',
+  newCargo?: string
+): Promise<boolean> => {
+  try {
+    // 1. Atualizar cache e local storage imediatamente
+    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.area = newArea;
+      if (newCargo) {
+        target.cargo = newCargo;
+      }
+      persistProfiles();
+    }
+
+    // 2. Atualizar no Supabase
+    const payload: any = { area: newArea };
+    if (newCargo) {
+      payload.cargo = newCargo;
+    }
+
+    let { error } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', userId);
+
+    if (error) {
+      const res = await supabase
+        .from('profiles')
+        .update(payload)
+        .eq('email', userId);
+      error = res.error;
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Erro ao atualizar área de usuário:', err);
+    return true;
+  }
+};
+
 export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending' | 'first_access'): Promise<boolean> => {
   try {
     const isFirstAccess = newStatus === 'first_access';
