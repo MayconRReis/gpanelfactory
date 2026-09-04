@@ -1470,6 +1470,9 @@ export const createOP = async (newOpData: {
   plannedHours?: number;
   tipoDocumento?: 'OP' | 'OSM';
   industria?: 'Ybera' | 'Carvalho' | 'Macpaul' | string;
+  producedQuantity?: number;
+  status?: 'pending' | 'in_progress' | 'paused' | 'completed';
+  leaderId?: string;
 }): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
 
@@ -1479,12 +1482,12 @@ export const createOP = async (newOpData: {
     product: newOpData.product.trim(),
     lote: (newOpData.lote || '').trim(),
     plannedQuantity: Number(newOpData.plannedQuantity) || 0,
-    producedQuantity: 0,
+    producedQuantity: Number(newOpData.producedQuantity ?? 0),
     granel: (newOpData.granel || '').trim(),
     priority: newOpData.priority || 'Normal',
-    status: 'pending',
+    status: newOpData.status || 'pending',
     lineId: newOpData.lineId || null,
-    leaderId: null,
+    leaderId: newOpData.leaderId || null,
     packageAvailability: Number(newOpData.packageAvailability || 0),
     sequence: Number(newOpData.sequence || (inMemoryOps.length + 1)),
     scheduledDate: newOpData.scheduledDate,
@@ -1510,10 +1513,11 @@ export const createOP = async (newOpData: {
       product: newOp.product,
       lote: newOp.lote,
       planned_quantity: newOp.plannedQuantity,
-      produced_quantity: 0,
+      produced_quantity: newOp.producedQuantity,
       granel: newOp.granel,
       priority: newOp.priority,
-      status: 'pending',
+      status: newOp.status,
+      leader_id: newOp.leaderId || null,
       line_id: newOp.lineId,
       package_availability: newOp.packageAvailability,
       sequence: newOp.sequence,
@@ -1536,9 +1540,10 @@ export const createOP = async (newOpData: {
         number: newOp.number,
         product: newOp.product,
         planned_quantity: newOp.plannedQuantity,
-        produced_quantity: 0,
+        produced_quantity: newOp.producedQuantity,
         priority: newOp.priority,
-        status: 'pending',
+        status: newOp.status,
+        leader_id: newOp.leaderId || null,
         line_id: newOp.lineId,
         created_at: newOp.createdAt,
       };
