@@ -44,7 +44,10 @@ export interface ProductionOrder {
   rejectedQuantity?: number;
   plannedHours?: number;
   tipoDocumento?: 'OP' | 'OSM';
+  industria?: 'Ybera' | 'Carvalho' | 'Macpaul' | string;
   finishedShift?: 'Manhã' | 'Tarde';
+  completedAt?: string;
+  observation?: string;
   createdAt: string;
 }
 

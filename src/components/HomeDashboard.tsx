@@ -52,7 +52,7 @@ interface HomeDashboardProps {
   events: ProductionEvent[];
   rotations?: Record<string, string>;
   goals?: MonthlyGoal[];
-  onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events') => void;
+  onNavigateTab: (tab: 'lines' | 'ops' | 'rotations' | 'users' | 'events' | 'daily_production') => void;
   onNewOp: () => void;
 }
 
@@ -876,11 +876,19 @@ export function HomeDashboard({
           <div className="lg:col-span-8 bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between min-h-[300px]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-blue-400" />
-                  Produção Diária por Turno
-                </h3>
-                <p className="text-[10px] text-[#71717a]">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-blue-400" />
+                    Produção Diária por Turno
+                  </h3>
+                  <button
+                    onClick={() => onNavigateTab('daily_production')}
+                    className="text-[10px] text-blue-400 hover:text-blue-300 font-bold bg-blue-950/70 border border-blue-800/50 hover:bg-blue-900/60 px-2 py-0.5 rounded-md transition-colors"
+                  >
+                    Ver Histórico do Dia →
+                  </button>
+                </div>
+                <p className="text-[10px] text-[#71717a] mt-0.5">
                   Volume diário distribuído em 1º e 2º Turnos vs Meta Diária ({dailyGoalValue.toLocaleString('pt-BR')} un/dia)
                 </p>
               </div>
@@ -986,11 +994,19 @@ export function HomeDashboard({
           <div className="lg:col-span-8 bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between min-h-[300px]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
               <div>
-                <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-purple-400" />
-                  Produção Mensal ({currentYear})
-                </h3>
-                <p className="text-[10px] text-[#71717a]">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-purple-400" />
+                    Produção Mensal ({currentYear})
+                  </h3>
+                  <button
+                    onClick={() => onNavigateTab('daily_production')}
+                    className="text-[10px] text-purple-400 hover:text-purple-300 font-bold bg-purple-950/70 border border-purple-800/50 hover:bg-purple-900/60 px-2 py-0.5 rounded-md transition-colors"
+                  >
+                    Ver Gráficos Detalhados →
+                  </button>
+                </div>
+                <p className="text-[10px] text-[#71717a] mt-0.5">
                   Comparativo de 12 meses: volume realizado vs média histórica e meta
                 </p>
               </div>

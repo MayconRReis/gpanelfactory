@@ -1366,6 +1366,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           rejectedQuantity: Number(d.rejected_quantity || d.rejectedQuantity || 0),
           plannedHours: d.planned_hours != null ? Number(d.planned_hours) : (d.plannedHours != null ? Number(d.plannedHours) : undefined),
           tipoDocumento: d.tipo_documento || 'OP',
+          industria: d.industria || undefined,
           finishedShift: d.finished_shift || undefined,
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
@@ -1468,6 +1469,7 @@ export const createOP = async (newOpData: {
   rejectedQuantity?: number;
   plannedHours?: number;
   tipoDocumento?: 'OP' | 'OSM';
+  industria?: 'Ybera' | 'Carvalho' | 'Macpaul' | string;
 }): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
 
@@ -1492,6 +1494,7 @@ export const createOP = async (newOpData: {
     rejectedQuantity: Number(newOpData.rejectedQuantity || 0),
     plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
     tipoDocumento: tipoDoc,
+    industria: newOpData.industria || undefined,
     createdAt: new Date().toISOString(),
   };
 
@@ -1521,6 +1524,7 @@ export const createOP = async (newOpData: {
       rejected_quantity: newOp.rejectedQuantity || 0,
       planned_hours: newOp.plannedHours ?? null,
       tipo_documento: newOp.tipoDocumento || 'OP',
+      industria: newOp.industria || null,
       created_at: newOp.createdAt,
     };
 
@@ -1653,6 +1657,9 @@ export const importOPsBatch = async (
 };
 
 export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) => {
+  if (updates.status === 'completed' && updates.completedAt === undefined) {
+    updates.completedAt = new Date().toISOString();
+  }
   // 1. Update in memory and localStorage immediately
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, ...updates } : op);
   persistOps();
@@ -1678,6 +1685,7 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   if (updates.rejectedQuantity !== undefined) dbPayload.rejected_quantity = updates.rejectedQuantity;
   if (updates.plannedHours !== undefined) dbPayload.planned_hours = updates.plannedHours;
   if (updates.tipoDocumento !== undefined) dbPayload.tipo_documento = updates.tipoDocumento;
+  if (updates.industria !== undefined) dbPayload.industria = updates.industria;
   if (updates.finishedShift !== undefined) dbPayload.finished_shift = updates.finishedShift;
 
   try {
@@ -2182,7 +2190,7 @@ export const finishOP = async (
 
   inMemoryOps = inMemoryOps.map(op => 
     op.id === opId 
-      ? { ...op, status: 'completed', finishedShift: finishedShift || undefined } 
+      ? { ...op, status: 'completed', finishedShift: finishedShift || undefined, completedAt: new Date().toISOString() } 
       : op
   );
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);

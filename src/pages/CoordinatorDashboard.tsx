@@ -76,10 +76,11 @@ import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseRea
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
+import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3 } from 'lucide-react';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 export function CoordinatorDashboard() {
@@ -122,6 +123,7 @@ export function CoordinatorDashboard() {
   const [newOpPriority, setNewOpPriority] = useState<'Crítica' | 'Alta' | 'Normal' | 'Baixa'>('Normal');
   const [newOpLineId, setNewOpLineId] = useState('');
   const [newOpPackage, setNewOpPackage] = useState('1000');
+  const [newOpIndustria, setNewOpIndustria] = useState<'Ybera' | 'Carvalho' | 'Macpaul' | ''>('Ybera');
   const [isSubmittingOp, setIsSubmittingOp] = useState(false);
 
   // Modal: Importar CSV de Estoque
@@ -434,6 +436,7 @@ WHERE email IN (
     setNewOpPriority('Normal');
     setNewOpLineId(lineId || '');
     setNewOpPackage('1000');
+    setNewOpIndustria('Ybera');
     setShowNewOpModal(true);
   };
 
@@ -452,6 +455,7 @@ WHERE email IN (
     setNewOpPriority(op.priority || 'Normal');
     setNewOpLineId(op.lineId || '');
     setNewOpPackage(String(op.packageAvailability || 1000));
+    setNewOpIndustria((op.industria as any) || 'Ybera');
     setShowNewOpModal(true);
   };
 
@@ -491,6 +495,7 @@ WHERE email IN (
         setor: newOpSetor,
         tipoDocumento,
         unidade: newOpUnidade,
+        industria: newOpIndustria || undefined,
         plannedHours: newOpPlannedHours ? Number(newOpPlannedHours) : undefined,
         rejectedQuantity: newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0,
       };
@@ -516,6 +521,7 @@ WHERE email IN (
       setNewOpGranel('');
       setNewOpPriority('Normal');
       setNewOpLineId('');
+      setNewOpIndustria('Ybera');
       await loadData();
     } catch {
       showToast(editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.', 'error');
@@ -864,6 +870,11 @@ WHERE email IN (
       subtitle: 'Monitoramento em tempo real do chão de fábrica e status operacional',
       icon: Layers,
     },
+    daily_production: {
+      title: 'Histórico & Produção',
+      subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
+      icon: BarChart3,
+    },
     ops: {
       title: 'Estoque de OPs',
       subtitle: 'Gestão de ordens de produção em estoque, lotes industriais e importação CSV',
@@ -983,6 +994,17 @@ WHERE email IN (
                 goals={goals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
+              />
+            )}
+
+            {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
+            {activeTab === 'daily_production' && (
+              <DailyProductionHistory
+                ops={ops}
+                lines={lines}
+                leaders={leaders}
+                goals={goals}
+                events={events}
               />
             )}
 
@@ -2599,12 +2621,12 @@ WHERE email IN (
             </div>
 
             <form onSubmit={handleSaveOP} className="p-5 space-y-4 max-h-[85vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
                     {newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
-                      ? 'Número da OSM (ex: 310-450) *'
-                      : 'Número da OP (ex: 410-150) *'}
+                      ? 'Número da OSM *'
+                      : 'Número da OP *'}
                   </Label>
                   <Input
                     placeholder={newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação' ? 'Ex: 310-450' : 'Ex: 40236'}
@@ -2613,6 +2635,19 @@ WHERE email IN (
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
                     required
                   />
+                </div>
+
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Indústria</Label>
+                  <select
+                    value={newOpIndustria}
+                    onChange={(e) => setNewOpIndustria(e.target.value as any)}
+                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
+                  >
+                    <option value="Ybera">Ybera</option>
+                    <option value="Carvalho">Carvalho</option>
+                    <option value="Macpaul">Macpaul</option>
+                  </select>
                 </div>
 
                 <div className="space-y-1">

@@ -13,10 +13,11 @@ import {
   ChevronLeft,
   ChevronRight,
   AlertCircle,
+  BarChart3,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 
-export type DashboardTab = 'home' | 'lines' | 'ops' | 'rotations' | 'users' | 'events';
+export type DashboardTab = 'home' | 'lines' | 'daily_production' | 'ops' | 'rotations' | 'users' | 'events';
 
 interface SidebarProps {
   activeTab: DashboardTab;
@@ -70,6 +71,13 @@ export function Sidebar({
       badge: linesCount > 0 ? `${linesCount}` : null,
       subBadge: activeLinesCount > 0 ? `${activeLinesCount} ativas` : null,
       description: 'Chão de Fábrica',
+    },
+    {
+      id: 'daily_production' as DashboardTab,
+      label: 'Histórico & Gráficos',
+      icon: BarChart3,
+      badge: null,
+      description: 'Produção Diária & Mensal',
     },
     {
       id: 'ops' as DashboardTab,
