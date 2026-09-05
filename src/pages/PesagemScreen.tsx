@@ -549,6 +549,7 @@ export function PesagemScreen() {
                   return (
                     <div
                       key={op.id}
+                      id={`osm-card-${op.id}`}
                       className="bg-[#18181b] border border-[#27272a] hover:border-purple-800/60 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-xl hover:shadow-purple-950/10 group"
                     >
                       {/* Topo do Card: Número e Status + Ações */}
@@ -577,6 +578,7 @@ export function PesagemScreen() {
 
                           <button
                             type="button"
+                            id={`btn-edit-osm-${op.id}`}
                             onClick={() => handleOpenEditModal(op)}
                             className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
                             title="Editar OSM"
@@ -587,6 +589,7 @@ export function PesagemScreen() {
 
                           <button
                             type="button"
+                            id={`btn-delete-osm-${op.id}`}
                             onClick={() => handleOpenDeleteModal(op)}
                             className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
                             title="Excluir OSM"

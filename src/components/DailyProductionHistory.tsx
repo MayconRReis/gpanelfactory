@@ -429,8 +429,7 @@ export function DailyProductionHistory({
         return found.reduce((acc, g) => acc + (g.goalQuantity || 0), 0);
       }
     }
-    const saved = localStorage.getItem('gpanel_monthly_goal');
-    return saved ? parseInt(saved, 10) : 100000;
+    return 100000;
   }, [goals, selectedYear, selectedMonthIndex]);
 
   const dailyGoalValue = useMemo(() => {

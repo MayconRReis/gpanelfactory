@@ -307,50 +307,28 @@ export function generateLeaderEmail(name: string, domain = 'fabrica.com'): strin
   return `${clean[0]}.${clean[clean.length - 1]}@${domain}`;
 }
 
-// Storage keys for persistent local storage fallback
-const STORAGE_KEYS = {
-  ops: 'SIG_PROD_OPS_STORAGE_V5',
-  deletedOpIds: 'SIG_PROD_DELETED_OPS_V5',
-  lines: 'SIG_PROD_LINES_STORAGE_V5',
-  events: 'SIG_PROD_EVENTS_STORAGE_V5',
-  rotations: 'SIG_PROD_ROTATIONS_STORAGE_V5',
-  pauseReasons: 'SIG_PROD_PAUSE_REASONS_STORAGE_V5',
-  profiles: 'SIG_PROD_PROFILES_STORAGE_V5',
-  monthlyGoals: 'SIG_PROD_MONTHLY_GOALS_V5',
-};
-
-// Safe storage utilities
-function loadFromStorage<T>(key: string, fallback: T): T {
-  if (typeof window === 'undefined' || !window.localStorage) return fallback;
+// Limpeza definitiva de chaves legadas de cache local para sincronização 100% online
+if (typeof window !== 'undefined' && window.localStorage) {
   try {
-    const item = window.localStorage.getItem(key);
-    if (item) {
-      return JSON.parse(item) as T;
-    }
-  } catch (err) {
-    console.warn(`Erro ao carregar chave ${key} do localStorage:`, err);
-  }
-  return fallback;
-}
-
-function saveToStorage<T>(key: string, data: T): void {
-  if (typeof window === 'undefined' || !window.localStorage) return;
-  try {
-    window.localStorage.setItem(key, JSON.stringify(data));
-  } catch (err) {
-    console.warn(`Erro ao gravar chave ${key} no localStorage:`, err);
-  }
-}
-
-function getDeletedOpIds(): Set<string> {
-  const list = loadFromStorage<string[]>(STORAGE_KEYS.deletedOpIds, []);
-  return new Set(list);
-}
-
-function addDeletedOpId(id: string): void {
-  const ids = getDeletedOpIds();
-  ids.add(id);
-  saveToStorage(STORAGE_KEYS.deletedOpIds, Array.from(ids));
+    const legacyKeys = [
+      'SIG_PROD_OPS_STORAGE_V5',
+      'SIG_PROD_DELETED_OPS_V5',
+      'SIG_PROD_LINES_STORAGE_V5',
+      'SIG_PROD_EVENTS_STORAGE_V5',
+      'SIG_PROD_ROTATIONS_STORAGE_V5',
+      'SIG_PROD_PAUSE_REASONS_STORAGE_V5',
+      'SIG_PROD_PROFILES_STORAGE_V5',
+      'SIG_PROD_MONTHLY_GOALS_V5',
+      'SIG_PROD_OPS_STORAGE_V4',
+      'SIG_PROD_DELETED_OPS_V4',
+      'SIG_PROD_EVENTS_STORAGE_V4',
+      'SIG_PROD_OPS_STORAGE',
+      'SIG_PROD_EVENTS_STORAGE',
+      'SIG_PROD_LAST_SYNC',
+      'gpanel_monthly_goal',
+    ];
+    legacyKeys.forEach(k => window.localStorage.removeItem(k));
+  } catch {}
 }
 
 // Configuração oficial de linhas de produção: 2 linhas de envase e 1 linha para sleeve
@@ -407,52 +385,44 @@ const isMockEvent = (e: ProductionEvent | any) => {
   return mockExactIds.includes(id) || mockExactNumbers.includes(num);
 };
 
-// Initialize in-memory runtime store from localStorage (or defaults)
-let inMemoryLines: ProductionLine[] = loadFromStorage<ProductionLine[]>(STORAGE_KEYS.lines, DEFAULT_LINES);
-let inMemoryOps: ProductionOrder[] = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, DEFAULT_OPS).filter(op => !isMockOp(op));
-let inMemoryEvents: ProductionEvent[] = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, DEFAULT_EVENTS).filter(e => !isMockEvent(e));
-let inMemoryRotations: Record<string, string> = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, {});
-let inMemoryProfiles: UserProfile[] = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, []);
+// Estado volátil em memória para feedback instantâneo de UI
+let inMemoryLines: ProductionLine[] = [...DEFAULT_LINES];
+let inMemoryOps: ProductionOrder[] = [];
+let inMemoryEvents: ProductionEvent[] = [];
+let inMemoryRotations: Record<string, string> = {};
+let inMemoryProfiles: UserProfile[] = [];
 
-function notifyStateChange() {
+export function notifyStateChange() {
   if (typeof window !== 'undefined') {
     try {
-      window.localStorage.setItem('SIG_PROD_LAST_SYNC', String(Date.now()));
       window.dispatchEvent(new CustomEvent('sig_data_updated'));
     } catch {}
   }
 }
 
-// Helper to save current in-memory state
+// Helpers de notificação reativa de estado
 function persistOps() {
-  saveToStorage(STORAGE_KEYS.ops, inMemoryOps);
   notifyStateChange();
 }
 
 function persistLines() {
-  saveToStorage(STORAGE_KEYS.lines, inMemoryLines);
   notifyStateChange();
 }
 
 function persistEvents() {
-  saveToStorage(STORAGE_KEYS.events, inMemoryEvents);
   notifyStateChange();
 }
 
 function persistRotations() {
-  saveToStorage(STORAGE_KEYS.rotations, inMemoryRotations);
   notifyStateChange();
 }
 
 export function persistProfiles() {
-  saveToStorage(STORAGE_KEYS.profiles, inMemoryProfiles);
   notifyStateChange();
 }
 
 // ---------------- PROFILES & LEADERS ----------------
 export const getProfile = async (uid: string): Promise<UserProfile | null> => {
-  // First check in-memory cache
-  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
   const foundLocal = inMemoryProfiles.find(p => p.uid === uid || p.email === uid);
 
   try {
@@ -486,7 +456,6 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         createdAt: data.created_at || new Date().toISOString(),
       };
       
-      // Update local storage
       const existingIdx = inMemoryProfiles.findIndex(p => p.uid === profile.uid || (profile.email && p.email?.toLowerCase() === profile.email.toLowerCase()));
       if (existingIdx !== -1) {
         inMemoryProfiles[existingIdx] = profile;
@@ -505,9 +474,6 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
 };
 
 export const getAllUsers = async (): Promise<UserProfile[]> => {
-  // Load from local storage
-  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-
   try {
     const { data, error } = await supabase
       .from('profiles')
@@ -542,27 +508,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
         };
       });
 
-      // Merge remoteUsers with inMemoryProfiles (remote users take precedence, local-only preserved)
-      const userMap = new Map<string, UserProfile>();
-      
-      // Seed with local profiles
-      inMemoryProfiles.forEach(u => {
-        const key = u.email ? u.email.toLowerCase().trim() : u.uid;
-        if (key) userMap.set(key, u);
-      });
-
-      // Override / augment with remote profiles
-      remoteUsers.forEach(u => {
-        const key = u.email ? u.email.toLowerCase().trim() : u.uid;
-        const local = userMap.get(key);
-        userMap.set(key, {
-          ...u,
-          area: u.area || local?.area || undefined,
-          defaultPassword: u.defaultPassword || local?.defaultPassword || undefined,
-        });
-      });
-
-      inMemoryProfiles = Array.from(userMap.values());
+      inMemoryProfiles = remoteUsers;
       persistProfiles();
       return inMemoryProfiles;
     }
@@ -581,15 +527,13 @@ export const getLeaders = async (): Promise<UserProfile[]> => {
     return leaders;
   } catch (err) {
     console.warn('Busca de líderes:', err);
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
     return inMemoryProfiles.filter(u => u.role !== 'coordinator');
   }
 };
 
 export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'leader', newCargo?: string): Promise<boolean> => {
   try {
-    // 1. Update in-memory / local storage immediately
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Update in-memory immediately
     const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
     if (target) {
       target.role = newRole;
@@ -624,8 +568,7 @@ export const updateUserArea = async (
   newCargo?: string
 ): Promise<boolean> => {
   try {
-    // 1. Atualizar cache e local storage imediatamente
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Atualizar em memória imediatamente
     const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
     if (target) {
       target.area = newArea;
@@ -664,8 +607,7 @@ export const updateUserArea = async (
 export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending' | 'first_access'): Promise<boolean> => {
   try {
     const isFirstAccess = newStatus === 'first_access';
-    // 1. Update in-memory / local storage immediately
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Update in-memory immediately
     const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
     if (target) {
       target.status = newStatus;
@@ -732,51 +674,10 @@ export const preAuthorizeUser = async (data: {
     const isFirstAccess = data.mustChangePassword !== false;
     const defaultPassword = data.defaultPassword || generateTemporaryPassword();
 
-    // Se o Supabase estiver offline (isSupabaseRuntimeEnabled === false), salvar só no localStorage com UUID local
     if (!isSupabaseRuntimeEnabled || !supabaseUrl || !supabaseAnonKey) {
-      const offlineId = (typeof crypto !== 'undefined' && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-
-      const userObj: UserProfile = {
-        uid: offlineId,
-        email,
-        name,
-        role,
-        cargo,
-        area: area || undefined,
-        status: isFirstAccess ? 'first_access' : 'active',
-        mustChangePassword: isFirstAccess,
-        defaultPassword: isFirstAccess ? defaultPassword : undefined,
-        createdAt: new Date().toISOString(),
-      };
-      (userObj as any).pendingSupabaseSync = true;
-
-      inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-      const existingIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email);
-      if (existingIdx !== -1) {
-        inMemoryProfiles[existingIdx] = {
-          ...userObj,
-          createdAt: inMemoryProfiles[existingIdx].createdAt || userObj.createdAt,
-        };
-      } else {
-        inMemoryProfiles.unshift(userObj);
-      }
-      persistProfiles();
-
-      if (data.lineId) {
-        try {
-          await saveLeaderRotation(offlineId, data.lineId, email, name);
-        } catch (rotErr) {
-          console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
-        }
-      }
-
       return {
-        success: true,
-        isOfflineFallback: true,
-        uid: offlineId,
-        message: 'Líder salvo no armazenamento local (modo offline ativo).',
+        success: false,
+        error: 'Supabase não está configurado. Conecte ao banco online para criar colaboradores.',
       };
     }
 
@@ -866,8 +767,7 @@ export const preAuthorizeUser = async (data: {
       (userObj as any).pendingSupabaseSync = true;
     }
 
-    // PASSO 3: Salvar no localStorage e inMemoryProfiles imediatamente
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // PASSO 3: Salvar em inMemoryProfiles imediatamente
     const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === finalUserId);
 
     if (existingLocalIdx !== -1) {
@@ -995,7 +895,6 @@ export const syncPendingLeadersToSupabase = async (): Promise<{
   failed: number;
   errors: string[];
 }> => {
-  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
   const pending = inMemoryProfiles.filter(p => 
     p.role === 'leader' && (
       (p as any).pendingSupabaseSync === true ||
@@ -1042,8 +941,7 @@ export const completeFirstAccessPasswordChange = async (
   newPassword: string
 ): Promise<{ success: boolean; message?: string }> => {
   try {
-    // 1. Atualizar cache e local storage imediatamente
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Atualizar em memória imediatamente
     const target = inMemoryProfiles.find(u => u.uid === uid || (u.email && u.email.toLowerCase() === uid.toLowerCase()));
     if (target) {
       target.mustChangePassword = false;
@@ -1104,37 +1002,6 @@ export const completeFirstAccessPasswordChange = async (
 
 /**
  * Redefine a senha de um líder para uma nova senha temporária gerada automaticamente.
- * Usa supabase.auth.admin.generateLink com tipo 'recovery' não é viável sem service_role.
- * A abordagem correta aqui é:
- *   1. Gerar nova senha temporária com generateTemporaryPassword()
- *   2. Chamar supabase.auth.updateUser({ password: newPassword }) — isso só funciona
- *      para o usuário autenticado. Como o coordenador está autenticado como ele mesmo,
- *      usamos a Admin API via fetch direto ao endpoint /auth/v1/admin/users/{uid}.
- *      PORÉM, sem a service_role key no front-end (correto por segurança), a alternativa
- *      viável é:
- *   3. Atualizar o perfil local e no Supabase com:
- *        - must_change_password: true
- *        - status: 'first_access'
- *        - defaultPassword: newPassword (salvo no perfil para o coordenador copiar)
- *   4. O líder, ao fazer login com a SENHA ATUAL, verá a tela de troca obrigatória.
- *      Mas se ele esqueceu a senha atual, o coordenador pode deletar e recriar o acesso.
- *
- * SOLUÇÃO IMPLEMENTÁVEL SEM SERVICE_ROLE:
- * A função deve:
- *   1. Chamar generateTemporaryPassword() para obter a nova senha
- *   2. Atualizar o perfil no Supabase (tabela profiles):
- *        must_change_password: true
- *        status: 'first_access'
- *        updated_at: now()
- *   3. Atualizar o cache local (inMemoryProfiles) com os mesmos campos +
- *        defaultPassword: newPassword
- *   4. Retornar a nova senha para exibir ao coordenador
- *
- * NOTA: A senha do Supabase Auth em si só pode ser alterada pelo próprio usuário
- * ou pela service_role key (não disponível no front). Por isso o fluxo é:
- * coordenador recebe a senha temporária → repassa ao líder → líder faz login com
- * a senha ANTIGA e o sistema força a troca. Se o líder esqueceu a senha antiga,
- * o coordenador deleta e recria o cadastro (fluxo já existente).
  */
 export const resetLeaderPassword = async (
   leaderId: string,
@@ -1144,8 +1011,7 @@ export const resetLeaderPassword = async (
     const newPassword = generateTemporaryPassword();
     const targetEmail = (leaderEmail || leaderId).trim().toLowerCase();
 
-    // 1. Atualizar inMemoryProfiles e localStorage imediatamente
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Atualizar inMemoryProfiles imediatamente
     const target = inMemoryProfiles.find(u => 
       u.uid === leaderId || 
       (u.email && u.email.toLowerCase() === targetEmail)
@@ -1196,16 +1062,14 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
   try {
     const targetEmail = (userEmail || userId).toLowerCase();
 
-    // 1. Remove from local storage
-    inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
+    // 1. Remove from inMemoryProfiles
     inMemoryProfiles = inMemoryProfiles.filter(u => 
       u.uid !== userId && 
       (!u.email || u.email.toLowerCase() !== targetEmail)
     );
     persistProfiles();
 
-    // Remove from rotations
-    inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
+    // Remove from inMemoryRotations
     delete inMemoryRotations[userId];
     if (userEmail) delete inMemoryRotations[userEmail];
     if (targetEmail) delete inMemoryRotations[targetEmail];
@@ -1238,9 +1102,6 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
 
 // ---------------- PRODUCTION LINES ----------------
 export const getLines = async (): Promise<ProductionLine[]> => {
-  // Always load from storage first to prevent flashes or resets
-  inMemoryLines = loadFromStorage<ProductionLine[]>(STORAGE_KEYS.lines, DEFAULT_LINES);
-
   try {
     let { data, error } = await supabase.from('production_lines').select('*').order('name', { ascending: true });
     if (error || !data || data.length === 0) {
@@ -1257,15 +1118,11 @@ export const getLines = async (): Promise<ProductionLine[]> => {
         currentOpId: d.current_op_id ? String(d.current_op_id) : (d.currentOpId ? String(d.currentOpId) : null),
       }));
 
-      // Supabase é autoridade para status e currentOpId — esses campos mudam
-      // quando o líder inicia/pausa OPs e o coordenador precisa ver em tempo real.
       const existingMap = new Map(inMemoryLines.map(l => [l.id, l]));
       mapped.forEach(remoteLine => {
         const local = existingMap.get(remoteLine.id);
         existingMap.set(remoteLine.id, {
-          // Mantém o nome local se o remoto não trouxer (preserva customizações)
           name: remoteLine.name || local?.name || remoteLine.id,
-          // status e currentOpId sempre vêm do remoto
           id: remoteLine.id,
           status: remoteLine.status,
           currentOpId: remoteLine.currentOpId,
@@ -1327,14 +1184,6 @@ export function getTipoDocumento(
 }
 
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {
-  // 1. Immediately read from localStorage
-  const localOps = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, inMemoryOps);
-  inMemoryOps = localOps.filter(o => !isMockOp(o));
-  const deletedIds = getDeletedOpIds();
-
-  // Filter out any explicitly deleted IDs
-  inMemoryOps = inMemoryOps.filter(o => !deletedIds.has(o.id));
-
   try {
     let { data, error } = await supabase.from('production_orders').select('*').order('sequence', { ascending: true });
     if (error || !data || data.length === 0) {
@@ -1370,36 +1219,14 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           finishedShift: d.finished_shift || undefined,
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
-        .filter((op) => !deletedIds.has(op.id) && !isMockOp(op)); // NEVER bring back deleted or mock items!
+        .filter((op) => !isMockOp(op));
 
-      // Supabase é a fonte de verdade: dados remotos sempre substituem o cache local.
-      // Exceção: se o cache local tiver um campo crítico que o remoto não tem (ex.: producedQuantity
-      // gravado offline), mantemos o valor local apenas para esse campo específico.
-      const localMap = new Map<string, ProductionOrder>();
-      inMemoryOps.forEach(op => localMap.set(op.id, op));
-
-      remoteOps.forEach(remoteOp => {
-        const local = localMap.get(remoteOp.id);
-        if (!local) {
-          // OP nova — usa remoto diretamente
-          localMap.set(remoteOp.id, remoteOp);
-        } else {
-          // OP existente — remoto é autoridade; preserva campos locais só se remoto vier zerado/nulo
-          localMap.set(remoteOp.id, {
-            ...remoteOp,
-            producedQuantity: remoteOp.producedQuantity > 0
-              ? remoteOp.producedQuantity
-              : local.producedQuantity,
-          });
-        }
-      });
-
-      inMemoryOps = Array.from(localMap.values()).filter(op => !isMockOp(op));
+      inMemoryOps = remoteOps;
       persistOps();
       return inMemoryOps;
     }
   } catch (err) {
-    console.warn('Usando OPs em cache local:', err);
+    console.warn('Erro ao consultar OPs no Supabase:', err);
   }
 
   persistOps();
@@ -1407,8 +1234,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
 };
 
 export const getOPById = async (opId: string): Promise<ProductionOrder | null> => {
-  const localOps = loadFromStorage<ProductionOrder[]>(STORAGE_KEYS.ops, inMemoryOps);
-  const foundLocal = localOps.find(o => o.id === opId);
+  const foundLocal = inMemoryOps.find(o => o.id === opId);
 
   try {
     let { data, error } = await supabase.from('production_orders').select('*').eq('id', opId).maybeSingle();
@@ -1498,6 +1324,7 @@ export const createOP = async (newOpData: {
     plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
     tipoDocumento: tipoDoc,
     industria: newOpData.industria || undefined,
+    completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
     createdAt: new Date().toISOString(),
   };
 
@@ -1529,6 +1356,7 @@ export const createOP = async (newOpData: {
       planned_hours: newOp.plannedHours ?? null,
       tipo_documento: newOp.tipoDocumento || 'OP',
       industria: newOp.industria || null,
+      completed_at: newOp.completedAt || null,
       created_at: newOp.createdAt,
     };
 
@@ -1708,7 +1536,6 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
  * Retorna array de MonthlyGoal ou array vazio em caso de erro.
  */
 export const getMonthlyGoals = async (year: number): Promise<MonthlyGoal[]> => {
-  let localGoals = loadFromStorage<MonthlyGoal[]>(STORAGE_KEYS.monthlyGoals, []);
   try {
     const { data, error } = await supabase
       .from('monthly_goals')
@@ -1728,14 +1555,13 @@ export const getMonthlyGoals = async (year: number): Promise<MonthlyGoal[]> => {
         updatedAt: d.updated_at || new Date().toISOString(),
       }));
 
-      saveToStorage(STORAGE_KEYS.monthlyGoals, mapped);
       return mapped;
     }
   } catch (err) {
     console.warn('Erro ao buscar metas mensais no Supabase:', err);
   }
 
-  return localGoals.filter(g => g.year === year);
+  return [];
 };
 
 /**
@@ -1763,30 +1589,6 @@ export const saveMonthlyGoal = async (
       console.warn('Erro ao persistir meta mensal no Supabase:', error);
     }
 
-    // Atualiza cache local
-    const localGoals = loadFromStorage<MonthlyGoal[]>(STORAGE_KEYS.monthlyGoals, []);
-    const idx = localGoals.findIndex(
-      g => g.lineId === goal.lineId && g.year === goal.year && g.month === goal.month && (g.setor || null) === (goal.setor || null)
-    );
-
-    const updatedItem: MonthlyGoal = {
-      id: idx !== -1 ? localGoals[idx].id : `goal-${Date.now()}`,
-      lineId: goal.lineId,
-      year: goal.year,
-      month: goal.month,
-      goalQuantity: goal.goalQuantity,
-      setor: goal.setor,
-      createdAt: idx !== -1 ? localGoals[idx].createdAt : new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    if (idx !== -1) {
-      localGoals[idx] = updatedItem;
-    } else {
-      localGoals.push(updatedItem);
-    }
-
-    saveToStorage(STORAGE_KEYS.monthlyGoals, localGoals);
     notifyStateChange();
     return true;
   } catch (err) {
@@ -1796,8 +1598,7 @@ export const saveMonthlyGoal = async (
 };
 
 export const deleteOP = async (opId: string) => {
-  // 1. Mark as permanently deleted and remove from memory and localStorage
-  addDeletedOpId(opId);
+  // 1. Remove from memory
   inMemoryOps = inMemoryOps.filter(op => op.id !== opId);
   persistOps();
 
@@ -1835,9 +1636,6 @@ export const getLeaderRotation = async (
   leaderEmail?: string,
   leaderName?: string
 ): Promise<string | null> => {
-  inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
-  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
-
   const cleanEmail = (leaderEmail || '').trim().toLowerCase();
   const cleanName = (leaderName || '').trim().toLowerCase();
 
@@ -1876,7 +1674,6 @@ export const getLeaderRotation = async (
 
       if (data?.line_id) {
         const resolvedLine = String(data.line_id);
-        // Atualiza cache local com o valor remoto
         inMemoryRotations[canonicalId] = resolvedLine;
         if (cleanEmail) inMemoryRotations[cleanEmail] = resolvedLine;
         persistRotations();
@@ -1884,10 +1681,10 @@ export const getLeaderRotation = async (
       }
     }
   } catch (err) {
-    console.warn('Consulta de rotação no Supabase — usando cache local:', err);
+    console.warn('Consulta de rotação no Supabase:', err);
   }
 
-  // Fallback offline: cache local e depois perfil
+  // Fallback: memória e depois perfil
   if (leaderId && inMemoryRotations[leaderId]) return inMemoryRotations[leaderId];
   if (cleanEmail && inMemoryRotations[cleanEmail]) return inMemoryRotations[cleanEmail];
   if (matchingProfile?.uid && inMemoryRotations[matchingProfile.uid]) return inMemoryRotations[matchingProfile.uid];
@@ -1903,8 +1700,6 @@ export const getLeaderRotation = async (
 };
 
 export const getAllRotations = async (): Promise<Record<string, string>> => {
-  inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
-
   try {
     let { data, error } = await supabase.from('weekly_rotations').select('leader_id, line_id');
     if (error || !data || data.length === 0) {
@@ -1937,8 +1732,6 @@ export const saveLeaderRotation = async (
   leaderEmail?: string,
   leaderName?: string
 ): Promise<void> => {
-  inMemoryRotations = loadFromStorage<Record<string, string>>(STORAGE_KEYS.rotations, inMemoryRotations);
-  
   inMemoryRotations[leaderId] = lineId;
   if (leaderEmail) {
     inMemoryRotations[leaderEmail] = lineId;
@@ -1946,7 +1739,6 @@ export const saveLeaderRotation = async (
   }
 
   // Update in profiles if found
-  inMemoryProfiles = loadFromStorage<UserProfile[]>(STORAGE_KEYS.profiles, inMemoryProfiles);
   const targetProf = inMemoryProfiles.find(p => 
     p.uid === leaderId || 
     (leaderEmail && p.email?.toLowerCase() === leaderEmail.toLowerCase()) ||
@@ -1974,9 +1766,6 @@ export const saveLeaderRotation = async (
   }
 
   try {
-    // Chave canônica: sempre o uid real do usuário no Supabase Auth.
-    // Gravar com email como leader_id cria registros duplicados que o líder
-    // nunca encontra quando busca pelo uid — bug de dessincronização.
     const canonicalId = targetProf?.uid || leaderId;
 
     const payload = {
@@ -1990,8 +1779,6 @@ export const saveLeaderRotation = async (
       supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
     ]);
 
-    // Se o leaderId original era email (não uid), limpa o registro fantasma
-    // que pode ter sido gravado antes desta correção
     if (canonicalId !== leaderId && leaderId.includes('@')) {
       await Promise.allSettled([
         supabase.from('weekly_rotations').delete().eq('leader_id', leaderId),
@@ -2023,8 +1810,6 @@ export const getPauseReasons = async (): Promise<PauseReason[]> => {
 };
 
 export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
-  inMemoryEvents = loadFromStorage<ProductionEvent[]>(STORAGE_KEYS.events, DEFAULT_EVENTS).filter(e => !isMockEvent(e));
-
   try {
     let { data, error } = await supabase
       .from('production_events')
@@ -2268,7 +2053,6 @@ export const reportQuantity = async (opId: string, lineId: string, leaderId: str
 export const clearAllOPs = async (): Promise<void> => {
   inMemoryOps = [];
   persistOps();
-  saveToStorage(STORAGE_KEYS.deletedOpIds, []);
 
   // Also reset all lines to idle
   inMemoryLines = inMemoryLines.map(l => ({ ...l, status: 'idle', currentOpId: null }));
@@ -2308,7 +2092,6 @@ export const resetProductionDatabase = async (): Promise<void> => {
   persistOps();
   persistEvents();
   persistLines();
-  saveToStorage(STORAGE_KEYS.deletedOpIds, []);
 
   // Clean old storage versions as well
   if (typeof window !== 'undefined' && window.localStorage) {

@@ -30,30 +30,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         let dbDefaultPassword: string | undefined = undefined;
         let dbCreatedAt: string = new Date().toISOString();
 
-        // 0. Verifica se existe cache local persistido
-        try {
-          if (typeof window !== 'undefined' && window.localStorage) {
-            const rawStored = window.localStorage.getItem('SIG_PROD_PROFILES_STORAGE_V5');
-            if (rawStored) {
-              const parsed = JSON.parse(rawStored);
-              const match = parsed.find((p: any) => p.uid === user.id || (user.email && p.email?.toLowerCase() === user.email.toLowerCase()));
-              if (match) {
-                if (match.role) dbRole = match.role;
-                if (match.cargo) dbCargo = match.cargo;
-                if (match.area) dbArea = match.area;
-                if (match.mustChangePassword || match.status === 'first_access') {
-                  dbMustChange = true;
-                }
-                if (match.defaultPassword) {
-                  dbDefaultPassword = match.defaultPassword;
-                }
-              }
-            }
-          }
-        } catch {
-          // ignora
-        }
-
         // 1. Tenta buscar pelo ID na tabela profiles
         try {
           const { data: profileById } = await supabase

@@ -51,42 +51,23 @@ export function isFetchOrNetworkError(err: any): boolean {
   );
 }
 
-// Desativa o Supabase em runtime após falha irrecuperável de rede
-export let isSupabaseRuntimeEnabled = isSupabaseConfigured;
+export const isSupabaseRuntimeEnabled = isSupabaseConfigured;
 export function disableSupabase() {
-  if (isSupabaseRuntimeEnabled) {
-    isSupabaseRuntimeEnabled = false;
-    console.warn('[GPanel] Supabase desativado em runtime — modo offline ativado.');
-  }
+  // Desativado: o sistema agora opera 100% online diretamente com o Supabase
 }
 
 if (!isSupabaseConfigured) {
   console.error('[GPanel] Supabase não configurado. Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no .env');
 }
 
-// Wrapper de fetch com retry automático (400ms) e fallback offline gracioso
+// Wrapper de fetch com retry automático sem desativação de runtime
 const safeFetch: typeof fetch = async (input, init) => {
-  if (!isSupabaseRuntimeEnabled) {
-    return new Response(
-      JSON.stringify({ code: 'PGRST000', message: 'Offline mode active', details: null, hint: null }),
-      { status: 503, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
   try {
     return await fetch(input, init);
   } catch (err: any) {
     if (isFetchOrNetworkError(err)) {
-      try {
-        await new Promise(r => setTimeout(r, 400));
-        return await fetch(input, init);
-      } catch (retryErr: any) {
-        console.warn('[GPanel] Fetch falhou após retry — ativando modo offline:', retryErr?.message || retryErr);
-        disableSupabase();
-        return new Response(
-          JSON.stringify({ code: 'PGRST000', message: 'Offline mode active', details: null, hint: null }),
-          { status: 503, headers: { 'Content-Type': 'application/json' } }
-        );
-      }
+      await new Promise(r => setTimeout(r, 400));
+      return await fetch(input, init);
     }
     throw err;
   }

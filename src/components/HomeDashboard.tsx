@@ -31,7 +31,7 @@ import {
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal } from '../types';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
-import { calculateOEE, groupProductionByDayAndSetor, groupProductionByMonth } from '../services/db';
+import { calculateOEE, groupProductionByDayAndSetor, groupProductionByMonth, saveMonthlyGoal } from '../services/db';
 import {
   ResponsiveContainer,
   BarChart,
@@ -136,19 +136,38 @@ export function HomeDashboard({
   // Sub-aba ativa no Painel PCP: 'farol' | 'curva_a'
   const [activeSubTab, setActiveSubTab] = useState<'farol' | 'curva_a'>('farol');
 
-  // Meta Mensal Global (Persistida no localStorage com padrão industrial de 100.000 un)
-  const [monthlyGoal, setMonthlyGoal] = useState<number>(() => {
-    const saved = localStorage.getItem('gpanel_monthly_goal');
-    return saved ? parseInt(saved, 10) : 100000;
-  });
+  const currentCalendarYear = new Date().getFullYear();
+  const currentCalendarMonth = new Date().getMonth() + 1;
+
+  const currentMonthGoalFromDb = useMemo(() => {
+    if (goals && goals.length > 0) {
+      const found = goals.filter(g => g.year === currentCalendarYear && g.month === currentCalendarMonth);
+      if (found.length > 0) {
+        return found.reduce((acc, g) => acc + (g.goalQuantity || 0), 0);
+      }
+    }
+    return 100000;
+  }, [goals, currentCalendarYear, currentCalendarMonth]);
+
+  const [customGoal, setCustomGoal] = useState<number | null>(null);
+  const monthlyGoal = customGoal !== null ? customGoal : currentMonthGoalFromDb;
   const [isEditingGoal, setIsEditingGoal] = useState(false);
   const [tempGoal, setTempGoal] = useState(monthlyGoal.toString());
 
-  const handleSaveGoal = () => {
+  const handleSaveGoal = async () => {
     const val = parseInt(tempGoal, 10);
     if (!isNaN(val) && val > 0) {
-      setMonthlyGoal(val);
-      localStorage.setItem('gpanel_monthly_goal', val.toString());
+      setCustomGoal(val);
+      try {
+        await saveMonthlyGoal({
+          lineId: 'line-1',
+          year: currentCalendarYear,
+          month: currentCalendarMonth,
+          goalQuantity: val,
+        });
+      } catch (err) {
+        console.warn('Erro ao persistir meta mensal no Supabase:', err);
+      }
     }
     setIsEditingGoal(false);
   };
