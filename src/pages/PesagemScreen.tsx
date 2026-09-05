@@ -25,9 +25,11 @@ import {
   Building2,
   Tag,
   FileText,
-  Hash
+  Hash,
+  Pencil,
+  Trash2
 } from 'lucide-react';
-import { getAllOPs, createOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents } from '../services/db';
+import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents } from '../services/db';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 
@@ -44,8 +46,11 @@ export function PesagemScreen() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
 
-  // Modal Nova Ordem de Serviço (OSM)
+  // Modal Nova Ordem de Serviço (OSM) ou Edição
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingOp, setEditingOp] = useState<ProductionOrder | null>(null);
+  const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [osmDate, setOsmDate] = useState(() => {
     const d = new Date();
     const year = d.getFullYear();
@@ -181,6 +186,7 @@ export function PesagemScreen() {
 
   // Criar nova Ordem de Produção / OSM
   const handleOpenModal = () => {
+    setEditingOp(null);
     const d = new Date();
     const year = d.getFullYear();
     const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -195,7 +201,43 @@ export function PesagemScreen() {
     setIsModalOpen(true);
   };
 
-  const handleCreateOSM = async (e: React.FormEvent) => {
+  // Editar Ordem de Produção / OSM existente
+  const handleOpenEditModal = (op: ProductionOrder) => {
+    setEditingOp(op);
+    const targetDate = op.scheduledDate || (op.createdAt ? op.createdAt.split('T')[0] : todayStr);
+    setOsmDate(targetDate);
+    setIndustria((op.industria as 'Ybera' | 'Carvalho' | 'Macpaul') || 'Ybera');
+    setOsmNumber(op.number || '');
+    setProductName(op.product || '');
+    setBatchLot(op.lote || '');
+    setBatchCount(String(op.producedQuantity || op.plannedQuantity || ''));
+    setObservation(op.granel || op.observation || '');
+    setIsModalOpen(true);
+  };
+
+  // Abrir confirmação de exclusão
+  const handleOpenDeleteModal = (op: ProductionOrder) => {
+    setDeleteModalOp(op);
+  };
+
+  // Confirmar exclusão da OSM
+  const handleConfirmDelete = async () => {
+    if (!deleteModalOp) return;
+    setIsDeleting(true);
+    try {
+      await deleteOP(deleteModalOp.id);
+      showToast(`Ordem de Produção ${deleteModalOp.number} excluída com sucesso!`, 'success');
+      setDeleteModalOp(null);
+      await fetchData(true);
+    } catch (err: any) {
+      console.error('Erro ao excluir ordem:', err);
+      showToast('Erro ao excluir a OSM. Tente novamente.', 'error');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleSaveOSM = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile) return;
 
@@ -228,33 +270,51 @@ export function PesagemScreen() {
 
     setIsSubmitting(true);
     try {
-      // 1. Criar a OP como OSM/OP de Pesagem
-      // Cria OSM já como completed — pesagem conclui no ato do registro
-      await createOP({
-        tipoDocumento: 'OSM',
-        setor: 'Pesagem',
-        unidade: 'Kg',
-        number: trimmedNumber,
-        product: trimmedProduct,
-        lote: trimmedLot,
-        plannedQuantity: qty,
-        producedQuantity: qty,
-        status: 'completed',
-        leaderId: profile.uid,
-        priority: 'Normal',
-        lineId: 'area-pesagem',
-        scheduledShift: 'Manhã',
-        scheduledDate: targetDate,
-        granel: observation.trim() || undefined,
-        industria: industria,
-      });
+      if (editingOp) {
+        // Atualização da OSM existente
+        await updateOP(editingOp.id, {
+          number: trimmedNumber,
+          product: trimmedProduct,
+          lote: trimmedLot,
+          plannedQuantity: qty,
+          producedQuantity: qty,
+          scheduledDate: targetDate,
+          granel: observation.trim() || undefined,
+          observation: observation.trim() || undefined,
+          industria: industria,
+        });
 
-      showToast(`Ordem de Produção ${trimmedNumber} registrada com sucesso!`, 'success');
+        showToast(`Ordem de Produção ${trimmedNumber} atualizada com sucesso!`, 'success');
+      } else {
+        // Criação de nova OSM já como completed — pesagem conclui no ato do registro
+        await createOP({
+          tipoDocumento: 'OSM',
+          setor: 'Pesagem',
+          unidade: 'Kg',
+          number: trimmedNumber,
+          product: trimmedProduct,
+          lote: trimmedLot,
+          plannedQuantity: qty,
+          producedQuantity: qty,
+          status: 'completed',
+          leaderId: profile.uid,
+          priority: 'Normal',
+          lineId: 'area-pesagem',
+          scheduledShift: 'Manhã',
+          scheduledDate: targetDate,
+          granel: observation.trim() || undefined,
+          industria: industria,
+        });
+
+        showToast(`Ordem de Produção ${trimmedNumber} registrada com sucesso!`, 'success');
+      }
+
       setIsModalOpen(false);
+      setEditingOp(null);
       await fetchData(true);
     } catch (err: any) {
-      console.error('Erro ao registrar ordem:', err);
-      showToast('Erro ao registrar ordem. Tente novamente.', 'error');
+      console.error('Erro ao salvar ordem:', err);
+      showToast(editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -491,7 +551,7 @@ export function PesagemScreen() {
                       key={op.id}
                       className="bg-[#18181b] border border-[#27272a] hover:border-purple-800/60 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-xl hover:shadow-purple-950/10 group"
                     >
-                      {/* Topo do Card: Número e Status */}
+                      {/* Topo do Card: Número e Status + Ações */}
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="flex items-center gap-1.5 flex-wrap">
@@ -508,10 +568,33 @@ export function PesagemScreen() {
                             {op.number}
                           </h2>
                         </div>
-                        <span className="text-[11px] font-bold px-2 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 flex items-center gap-1.5 shadow-sm">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Registrado</span>
-                        </span>
+
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] font-bold px-2 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 flex items-center gap-1.5 shadow-sm">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="hidden sm:inline">Registrado</span>
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(op)}
+                            className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
+                            title="Editar OSM"
+                            aria-label="Editar OSM"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenDeleteModal(op)}
+                            className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
+                            title="Excluir OSM"
+                            aria-label="Excluir OSM"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
 
                       {/* Detalhes do Produto / Nome e Lote */}
@@ -595,22 +678,30 @@ export function PesagemScreen() {
         </div>
       </footer>
 
-      {/* MODAL NOVA ORDEM DE PRODUÇÃO / OSM */}
-      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+      {/* MODAL NOVA ORDEM DE PRODUÇÃO / OSM (OU EDITAR) */}
+      <Dialog
+        open={isModalOpen}
+        onOpenChange={(open) => {
+          setIsModalOpen(open);
+          if (!open) setEditingOp(null);
+        }}
+      >
         <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
           <DialogHeader>
             <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-400 mb-2">
-              <Scale className="w-5 h-5" />
+              {editingOp ? <Pencil className="w-5 h-5" /> : <Scale className="w-5 h-5" />}
             </div>
             <DialogTitle className="text-lg font-bold text-white">
-              Nova Ordem de Serviço (OSM)
+              {editingOp ? 'Editar Ordem de Serviço (OSM)' : 'Nova Ordem de Serviço (OSM)'}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
-              Cadastre uma nova pesagem na área de pesagem (Série 300).
+              {editingOp
+                ? 'Atualize as informações da pesagem registrada.'
+                : 'Cadastre uma nova pesagem na área de pesagem (Série 300).'}
             </p>
           </DialogHeader>
 
-          <form onSubmit={handleCreateOSM} className="space-y-3.5 mt-3">
+          <form onSubmit={handleSaveOSM} className="space-y-3.5 mt-3">
             {/* 1. Data */}
             <div>
               <Label className="text-xs font-semibold text-[#d4d4d8] flex items-center gap-1.5 mb-1.5">
@@ -734,7 +825,10 @@ export function PesagemScreen() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setIsModalOpen(false)}
+                onClick={() => {
+                  setIsModalOpen(false);
+                  setEditingOp(null);
+                }}
                 disabled={isSubmitting}
                 className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
               >
@@ -749,17 +843,65 @@ export function PesagemScreen() {
                 {isSubmitting ? (
                   <>
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Registrando...</span>
+                    <span>{editingOp ? 'Salvando...' : 'Registrando...'}</span>
                   </>
                 ) : (
                   <>
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Confirmar Registro</span>
+                    <span>{editingOp ? 'Salvar Alterações' : 'Confirmar Registro'}</span>
                   </>
                 )}
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL CONFIRMAÇÃO DE EXCLUSÃO */}
+      <Dialog open={!!deleteModalOp} onOpenChange={(open) => !open && setDeleteModalOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-sm w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <div className="w-10 h-10 rounded-xl bg-rose-950/80 border border-rose-800/60 flex items-center justify-center text-rose-400 mb-2">
+              <Trash2 className="w-5 h-5" />
+            </div>
+            <DialogTitle className="text-base font-bold text-white">
+              Excluir Ordem de Serviço
+            </DialogTitle>
+            <p className="text-xs text-[#a1a1aa] mt-1">
+              Tem certeza que deseja excluir a OSM <strong className="text-white font-mono">{deleteModalOp?.number}</strong> ({deleteModalOp?.product})? Esta ação removerá o registro permanentemente.
+            </p>
+          </DialogHeader>
+
+          <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteModalOp(null)}
+              disabled={isDeleting}
+              className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto text-xs"
+            >
+              Cancelar
+            </Button>
+
+            <Button
+              type="button"
+              onClick={handleConfirmDelete}
+              disabled={isDeleting}
+              className="h-10 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-950/50 flex items-center justify-center gap-1.5 w-full sm:w-auto"
+            >
+              {isDeleting ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Excluindo...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Confirmar Exclusão</span>
+                </>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
