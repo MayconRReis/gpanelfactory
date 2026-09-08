@@ -1973,14 +1973,22 @@ export const finishOP = async (
   opId: string,
   lineId: string,
   leaderId: string,
-  finishedShift?: 'Manhã' | 'Tarde'
+  finishedShift?: 'Manhã' | 'Tarde',
+  producedQuantity?: number
 ) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
 
   inMemoryOps = inMemoryOps.map(op => 
     op.id === opId 
-      ? { ...op, status: 'completed', finishedShift: finishedShift || undefined, completedAt: new Date().toISOString() } 
+      ? { 
+          ...op, 
+          status: 'completed', 
+          finishedShift: finishedShift || undefined, 
+          completedAt: new Date().toISOString(),
+          producedQuantity: producedQuantity !== undefined ? producedQuantity : op.producedQuantity,
+          leaderId: leaderId || op.leaderId,
+        } 
       : op
   );
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
@@ -2001,17 +2009,47 @@ export const finishOP = async (
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  const opPayload = {
+    status: 'completed',
+    finished_shift: finishedShift || null,
+    produced_quantity: producedQuantity !== undefined ? producedQuantity : undefined,
+    leader_id: leaderId || null,
+  };
+
   try {
+    // Tenta production_orders primeiro — se falhar, tenta ops
+    const { error: err1 } = await supabase
+      .from('production_orders')
+      .update(opPayload)
+      .eq('id', opId);
+
+    if (err1) {
+      console.warn('[finishOP] production_orders falhou, tentando ops:', err1.message);
+    }
+
+    // Sempre tenta ops também (as duas tabelas precisam estar sincronizadas)
+    const { error: err2 } = await supabase
+      .from('ops')
+      .update(opPayload)
+      .eq('id', opId);
+
+    if (err2) {
+      console.warn('[finishOP] ops falhou:', err2.message);
+    }
+
+    if (err1 && err2) {
+      console.error('[finishOP] Falha ao gravar nas duas tabelas. Status salvo apenas localmente.');
+    }
+
+    // Atualizar linha e gravar evento
     await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'completed', finished_shift: finishedShift || null }).eq('id', opId),
-      supabase.from('ops').update({ status: 'completed', finished_shift: finishedShift || null }).eq('id', opId),
       supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
       supabase.from('lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
       supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'FINISHED', created_at: newEvent.createdAt }),
       supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'FINISHED', created_at: newEvent.createdAt }),
     ]);
   } catch (error) {
-    console.error('Erro ao finalizar OP:', error);
+    console.error('[finishOP] Erro inesperado ao finalizar OP:', error);
   }
 };
 

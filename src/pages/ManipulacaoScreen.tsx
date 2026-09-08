@@ -23,7 +23,7 @@ import {
   History,
   Check
 } from 'lucide-react';
-import { getAllOPs, createOP, updateOP, finishOP } from '../services/db';
+import { getAllOPs, createOP, finishOP } from '../services/db';
 import { ProductionOrder } from '../types';
 
 export function ManipulacaoScreen() {
@@ -168,27 +168,22 @@ export function ManipulacaoScreen() {
       const batchCount = Number(pesagemOp.producedQuantity) || Number(pesagemOp.plannedQuantity) || 1;
       const plannedKg = batchCount * 1000; // Cada batelada ~ 1000kg
 
-      const newOp = await createOP({
+      // Cria OSM de Manipulação já com status in_progress e leaderId — sem updateOP
+      await createOP({
         tipoDocumento: 'OSM',
         setor: 'Manipulação',
         unidade: 'Kg',
         number: pesagemOp.number,
         product: pesagemOp.product,
-        lote: pesagemOp.number, // vincula ao número da OSM da Pesagem
+        lote: pesagemOp.number,
         plannedQuantity: plannedKg,
+        producedQuantity: 0,
+        status: 'in_progress',
+        leaderId: profile.uid,
         priority: 'Normal',
         lineId: 'area-manipulacao',
         scheduledShift: detectedShift,
         scheduledDate: new Date().toISOString().split('T')[0],
-      });
-
-      await updateOP(newOp.id, {
-        status: 'in_progress',
-        leaderId: profile.uid,
-        setor: 'Manipulação',
-        unidade: 'Kg',
-        lote: pesagemOp.number,
-        producedQuantity: 0,
       });
 
       showToast(`Manipulação da OSM ${pesagemOp.number} iniciada com sucesso!`, 'success');
@@ -222,13 +217,8 @@ export function ManipulacaoScreen() {
 
     setIsFinishingSubmitting(true);
     try {
-      await finishOP(finishingOp.id, 'area-manipulacao', profile.uid, selectedShift);
-      await updateOP(finishingOp.id, {
-        producedQuantity: kgNum,
-        finishedShift: selectedShift,
-        status: 'completed',
-        leaderId: profile.uid,
-      });
+      // Passa producedQuantity direto para finishOP — grava tudo em uma operação
+      await finishOP(finishingOp.id, 'area-manipulacao', profile.uid, selectedShift, kgNum);
 
       showToast(`OSM ${finishingOp.number} finalizada no turno da ${selectedShift}!`, 'success');
       setFinishingOp(null);
