@@ -453,50 +453,61 @@ export function ManipulacaoScreen() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {availablePesagemOps.map((op) => {
-                const batchCount = Number(op.producedQuantity) || Number(op.plannedQuantity) || 1;
-                const approxKg = batchCount * 1000;
                 const isStarting = startingOpId === op.id;
+                const quantidade = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
 
                 return (
                   <div
                     key={op.id}
                     className="bg-[#18181b] border border-[#27272a] hover:border-amber-700/50 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-lg hover:shadow-amber-950/10"
                   >
+                    {/* Header — badges */}
                     <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 bg-purple-950/70 border border-purple-800/50 px-2 py-0.5 rounded-md">
-                          Pesagem Concluída
-                        </span>
-                        <h3 className="font-mono text-xl font-black text-white mt-1">
-                          {op.number}
-                        </h3>
-                      </div>
-
+                      <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 bg-purple-950/70 border border-purple-800/50 px-2 py-0.5 rounded-md">
+                        Pesagem Concluída
+                      </span>
                       <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1 shrink-0">
                         <Clock className="w-3 h-3 text-amber-400" />
                         <span>Aguardando Manipulação</span>
                       </span>
                     </div>
 
-                    <div>
-                      <div className="text-xs text-[#a1a1aa]">Produto:</div>
-                      <div className="text-sm font-bold text-white mt-0.5 line-clamp-2">
-                        {op.product}
-                      </div>
-                    </div>
+                    {/* Número da OSM */}
+                    <h3 className="font-mono text-xl font-black text-white">
+                      {op.number}
+                    </h3>
 
-                    <div className="bg-[#121215] border border-[#232328] rounded-xl p-3 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-lg bg-purple-950/60 border border-purple-800/40 flex items-center justify-center text-purple-300">
-                          <Boxes className="w-3.5 h-3.5" />
-                        </div>
-                        <div>
-                          <div className="text-[10px] text-[#a1a1aa]">Bateladas Pesadas</div>
-                          <div className="font-mono font-black text-xs text-purple-200">
-                            {batchCount} Qtd (~{approxKg.toLocaleString('pt-BR')} Kg)
-                          </div>
-                        </div>
+                    {/* Dados da OSM */}
+                    <div className="space-y-2">
+                      {/* Nome / Produto */}
+                      <div className="flex justify-between items-start gap-2">
+                        <span className="text-[11px] text-[#a1a1aa] shrink-0">Nome:</span>
+                        <span className="text-[11px] font-semibold text-white text-right line-clamp-2">{op.product}</span>
                       </div>
+
+                      {/* Lote */}
+                      {op.lote && (
+                        <div className="flex justify-between items-center gap-2">
+                          <span className="text-[11px] text-[#a1a1aa] shrink-0">Lote:</span>
+                          <span className="font-mono text-[11px] font-bold text-cyan-300 bg-cyan-950/40 border border-cyan-800/30 px-1.5 py-0.5 rounded">{op.lote}</span>
+                        </div>
+                      )}
+
+                      {/* Quantidade — exatamente o que a Pesagem registrou */}
+                      <div className="flex justify-between items-center gap-2">
+                        <span className="text-[11px] text-[#a1a1aa] shrink-0">Quantidade:</span>
+                        <span className="font-mono text-[11px] font-black text-purple-200">
+                          {quantidade.toLocaleString('pt-BR')} Qtd
+                        </span>
+                      </div>
+
+                      {/* Observação / granel */}
+                      {(op.granel || op.industria) && (
+                        <div className="flex justify-between items-start gap-2">
+                          <span className="text-[11px] text-[#a1a1aa] shrink-0">Obs:</span>
+                          <span className="text-[11px] text-[#e4e4e7] text-right line-clamp-2">{op.granel || op.industria}</span>
+                        </div>
+                      )}
                     </div>
 
                     <Button
