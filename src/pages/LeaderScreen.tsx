@@ -63,7 +63,11 @@ import {
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
 
-export function LeaderScreen() {
+interface LeaderScreenProps {
+  embedded?: boolean;
+}
+
+export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   // State principal
@@ -469,12 +473,12 @@ export function LeaderScreen() {
     : 'APONTAR PRODUÇÃO';
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white">
+    <div className={embedded ? "w-full text-[#f4f4f5] font-sans flex flex-col antialiased space-y-4" : "min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white"}>
       
       {/* ========================================================================= */}
       {/* 1. HEADER SUPERIOR DO LÍDER (RESPONSIVO & COMPLETO) */}
       {/* ========================================================================= */}
-      <header className="border-b border-[#1e1e24] bg-[#0d0d12]/95 backdrop-blur-md sticky top-0 z-30 px-4 sm:px-6 py-3">
+      <header className={embedded ? "bg-[#121216] border border-[#272733] rounded-2xl px-4 py-3 shadow-md" : "border-b border-[#1e1e24] bg-[#0d0d12]/95 backdrop-blur-md sticky top-0 z-30 px-4 sm:px-6 py-3"}>
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
           
           {/* Identificação do Líder e Linha sob Responsabilidade */}
@@ -486,7 +490,7 @@ export function LeaderScreen() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h1 className="text-sm font-black text-white tracking-tight uppercase truncate">
-                    Portal do Líder
+                    Chão de Fábrica (Envase)
                   </h1>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-950 text-blue-400 border border-blue-800/40">
                     {profile?.cargo || 'Líder de Produção'}
@@ -513,16 +517,18 @@ export function LeaderScreen() {
               </div>
             </div>
 
-            {/* Logout Mobile */}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => signOut()}
-              className="md:hidden text-[#71717a] hover:text-rose-400 hover:bg-rose-950/30 rounded-xl"
-              title="Encerrar Sessão"
-            >
-              <LogOut className="w-4 h-4" />
-            </Button>
+            {/* Logout Mobile (Apenas standalone) */}
+            {!embedded && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => signOut()}
+                className="md:hidden text-[#71717a] hover:text-rose-400 hover:bg-rose-950/30 rounded-xl"
+                title="Encerrar Sessão"
+              >
+                <LogOut className="w-4 h-4" />
+              </Button>
+            )}
           </div>
 
           {/* Seletor da Linha de Responsabilidade & Status */}
@@ -565,17 +571,19 @@ export function LeaderScreen() {
               <span className="hidden sm:inline">Atualizar</span>
             </Button>
 
-            {/* Logout Desktop */}
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => signOut()}
-              className="hidden md:flex text-[#71717a] hover:text-rose-400 hover:bg-rose-950/30 rounded-xl text-xs font-bold h-9"
-              title="Encerrar Sessão"
-            >
-              <LogOut className="w-3.5 h-3.5 mr-1.5" />
-              <span>Sair</span>
-            </Button>
+            {/* Logout Desktop (Apenas standalone) */}
+            {!embedded && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => signOut()}
+                className="hidden md:flex text-[#71717a] hover:text-rose-400 hover:bg-rose-950/30 rounded-xl text-xs font-bold h-9"
+                title="Encerrar Sessão"
+              >
+                <LogOut className="w-3.5 h-3.5 mr-1.5" />
+                <span>Sair</span>
+              </Button>
+            )}
 
           </div>
 

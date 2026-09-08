@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, AccessRule, DashboardTab } from '../types';
 
 /**
  * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
@@ -392,6 +392,38 @@ let inMemoryEvents: ProductionEvent[] = [];
 let inMemoryRotations: Record<string, string> = {};
 let inMemoryProfiles: UserProfile[] = [];
 
+// Blacklist persistente de OPs excluídas e timestamp do último reset geral
+const DELETED_OPS_KEY = 'SIG_PROD_DELETED_OPS_V6';
+const RESET_TIMESTAMP_KEY = 'SIG_PROD_OPS_RESET_TIME_V6';
+
+let deletedOpIds = new Set<string>();
+let lastResetTimestamp = 0;
+
+if (typeof window !== 'undefined' && window.localStorage) {
+  try {
+    const stored = window.localStorage.getItem(DELETED_OPS_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        deletedOpIds = new Set(parsed);
+      }
+    }
+    const storedReset = window.localStorage.getItem(RESET_TIMESTAMP_KEY);
+    if (storedReset) {
+      lastResetTimestamp = Number(storedReset) || 0;
+    }
+  } catch {}
+}
+
+function saveDeletedOpIds() {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(DELETED_OPS_KEY, JSON.stringify(Array.from(deletedOpIds)));
+      window.localStorage.setItem(RESET_TIMESTAMP_KEY, String(lastResetTimestamp));
+    } catch {}
+  }
+}
+
 export function notifyStateChange() {
   if (typeof window !== 'undefined') {
     try {
@@ -450,6 +482,8 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         role: isCoord ? 'coordinator' : 'leader',
         cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
         area: data.area || undefined,
+        rule: data.rule || (isCoord ? 'admin' : data.area === 'Pesagem' ? 'pesagem' : data.area === 'Manipulação' ? 'manipulacao' : 'envase'),
+        allowedScreens: data.allowed_screens || undefined,
         status: isFirstAccess ? 'first_access' : (data.status || 'active'),
         mustChangePassword: isFirstAccess,
         defaultPassword: data.default_password || undefined,
@@ -501,6 +535,8 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
           area: d.area || localMatch?.area || undefined,
+          rule: d.rule || localMatch?.rule || (isCoord ? 'admin' : (d.area || localMatch?.area) === 'Pesagem' ? 'pesagem' : (d.area || localMatch?.area) === 'Manipulação' ? 'manipulacao' : 'envase'),
+          allowedScreens: d.allowed_screens || localMatch?.allowedScreens || undefined,
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
           defaultPassword: d.default_password || localMatch?.defaultPassword || undefined,
@@ -600,6 +636,73 @@ export const updateUserArea = async (
     return true;
   } catch (err) {
     console.error('Erro ao atualizar área de usuário:', err);
+    return true;
+  }
+};
+
+export const updateUserRule = async (
+  userId: string,
+  newRule: AccessRule,
+  allowedScreens?: DashboardTab[]
+): Promise<boolean> => {
+  try {
+    const isCoord = newRule === 'admin';
+    const targetArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação' | undefined = 
+      newRule === 'pesagem' ? 'Pesagem' 
+      : newRule === 'manipulacao' ? 'Manipulação' 
+      : newRule === 'envase' ? 'Envase' 
+      : isCoord ? 'Coordenação' : undefined;
+
+    const targetCargo = newRule === 'admin' ? 'Coordenador Geral'
+      : newRule === 'pesagem' ? 'Líder de Pesagem'
+      : newRule === 'manipulacao' ? 'Líder de Manipulação'
+      : newRule === 'envase' ? 'Líder de Envase'
+      : newRule === 'pcp' ? 'Analista PCP'
+      : newRule === 'operador' ? 'Operador de Produção'
+      : undefined;
+
+    // 1. Atualizar em memória imediatamente
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.rule = newRule;
+      target.allowedScreens = allowedScreens;
+      target.role = isCoord ? 'coordinator' : 'leader';
+      if (targetArea) target.area = targetArea;
+      if (targetCargo) target.cargo = targetCargo;
+      persistProfiles();
+    }
+
+    // 2. Atualizar no Supabase
+    const payload: any = {
+      role: isCoord ? 'coordinator' : 'leader',
+      rule: newRule,
+      allowed_screens: allowedScreens || null,
+      updated_at: new Date().toISOString(),
+    };
+    if (targetArea) payload.area = targetArea;
+    if (targetCargo) payload.cargo = targetCargo;
+
+    let { error } = await supabase.from('profiles').update(payload).eq('id', userId);
+    if (error) {
+      const res = await supabase.from('profiles').update(payload).eq('email', userId);
+      error = res.error;
+    }
+
+    // Se falhar por colunas inexistentes, tenta salvar payload base seguro
+    if (error) {
+      const safePayload: any = {
+        role: isCoord ? 'coordinator' : 'leader',
+        updated_at: new Date().toISOString(),
+      };
+      if (targetArea) safePayload.area = targetArea;
+      if (targetCargo) safePayload.cargo = targetCargo;
+
+      await supabase.from('profiles').update(safePayload).eq('id', userId);
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Erro ao atualizar rule do usuário:', err);
     return true;
   }
 };
@@ -1219,7 +1322,17 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           finishedShift: d.finished_shift || undefined,
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
-        .filter((op) => !isMockOp(op));
+        .filter((op) => {
+          if (isMockOp(op)) return false;
+          if (deletedOpIds.has(op.id)) return false;
+          if (lastResetTimestamp > 0 && op.createdAt) {
+            const opCreated = new Date(op.createdAt).getTime();
+            if (!isNaN(opCreated) && opCreated <= lastResetTimestamp) {
+              return false;
+            }
+          }
+          return true;
+        });
 
       inMemoryOps = remoteOps;
       persistOps();
@@ -1327,6 +1440,10 @@ export const createOP = async (newOpData: {
     completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
     createdAt: new Date().toISOString(),
   };
+
+  // Se o ID constava no blacklist de excluídos, remove-o
+  deletedOpIds.delete(newOp.id);
+  saveDeletedOpIds();
 
   // 1. Immediately persist locally
   inMemoryOps = [newOp, ...inMemoryOps];
@@ -1442,6 +1559,10 @@ export const importOPsBatch = async (
     };
     newCreated.push(op);
   }
+
+  // Remove qualquer OP importada do blacklist de excluídos
+  newCreated.forEach(op => deletedOpIds.delete(op.id));
+  saveDeletedOpIds();
 
   // 1. Immediately persist locally in memory and localStorage
   inMemoryOps = [...newCreated, ...inMemoryOps];
@@ -1598,11 +1719,15 @@ export const saveMonthlyGoal = async (
 };
 
 export const deleteOP = async (opId: string) => {
-  // 1. Remove from memory
+  // 1. Marca no blacklist persistente para nunca mais ressurgir em cache ou retorno de API
+  deletedOpIds.add(opId);
+  saveDeletedOpIds();
+
+  // 2. Remove da memória
   inMemoryOps = inMemoryOps.filter(op => op.id !== opId);
   persistOps();
 
-  // 2. Delete from Supabase tables
+  // 3. Exclui das tabelas do Supabase
   try {
     await Promise.allSettled([
       supabase.from('production_orders').delete().eq('id', opId),
@@ -2089,6 +2214,11 @@ export const reportQuantity = async (opId: string, lineId: string, leaderId: str
 
 // ---------------- DATABASE RESET & CLEANUP ----------------
 export const clearAllOPs = async (): Promise<void> => {
+  // Registra todas as OPs atuais como excluídas e salva o timestamp do reset
+  inMemoryOps.forEach(op => deletedOpIds.add(op.id));
+  lastResetTimestamp = Date.now();
+  saveDeletedOpIds();
+
   inMemoryOps = [];
   persistOps();
 
@@ -2123,6 +2253,11 @@ export const clearAllEvents = async (): Promise<void> => {
 };
 
 export const resetProductionDatabase = async (): Promise<void> => {
+  // Registra todas as OPs atuais como excluídas e salva o timestamp do reset
+  inMemoryOps.forEach(op => deletedOpIds.add(op.id));
+  lastResetTimestamp = Date.now();
+  saveDeletedOpIds();
+
   inMemoryOps = [];
   inMemoryEvents = [];
   inMemoryLines = DEFAULT_LINES.map(l => ({ ...l, status: 'idle', currentOpId: null }));

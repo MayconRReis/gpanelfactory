@@ -14,10 +14,13 @@ import {
   ChevronRight,
   AlertCircle,
   BarChart3,
+  Scale,
+  FlaskConical,
 } from 'lucide-react';
-import { UserProfile } from '../types';
+import { UserProfile, DashboardTab } from '../types';
+import { getUserAllowedTabs, getUserRule, ACCESS_RULES } from '../lib/permissions';
 
-export type DashboardTab = 'home' | 'lines' | 'daily_production' | 'ops' | 'rotations' | 'users' | 'events';
+export type { DashboardTab };
 
 interface SidebarProps {
   activeTab: DashboardTab;
@@ -56,21 +59,54 @@ export function Sidebar({
   mobileOpen = false,
   setMobileOpen,
 }: SidebarProps) {
-  const menuItems = [
+  const userRule = getUserRule(profile);
+  const ruleConfig = ACCESS_RULES[userRule] || ACCESS_RULES.operador;
+  const allowedTabs = getUserAllowedTabs(profile);
+
+  const canCreateOp = allowedTabs.includes('ops') || userRule === 'admin' || userRule === 'pcp';
+
+  // Todos os itens do menu unificado do GPanel Factory
+  const allMenuItems = [
     {
       id: 'home' as DashboardTab,
-      label: 'Home',
+      label: 'Dashboard Geral',
       icon: LayoutDashboard,
       badge: null,
-      description: 'Métricas & Desempenho',
+      description: 'Visão Executiva, Farol & OEE',
+      section: 'GERAL',
+    },
+    {
+      id: 'pesagem' as DashboardTab,
+      label: 'Pesagem',
+      icon: Scale,
+      badge: null,
+      description: 'Matérias-Primas & OSMs',
+      section: 'PROCESSOS',
+    },
+    {
+      id: 'manipulacao' as DashboardTab,
+      label: 'Manipulação',
+      icon: FlaskConical,
+      badge: null,
+      description: 'Granéis & Reatores',
+      section: 'PROCESSOS',
+    },
+    {
+      id: 'envase' as DashboardTab,
+      label: 'Chão de Fábrica',
+      icon: Factory,
+      badge: null,
+      description: 'Linhas & Apontamento',
+      section: 'PROCESSOS',
     },
     {
       id: 'lines' as DashboardTab,
-      label: 'Linhas',
+      label: 'Linhas de Envase',
       icon: Layers,
       badge: linesCount > 0 ? `${linesCount}` : null,
       subBadge: activeLinesCount > 0 ? `${activeLinesCount} ativas` : null,
-      description: 'Chão de Fábrica',
+      description: 'Monitoramento ao Vivo',
+      section: 'GESTÃO & PCP',
     },
     {
       id: 'daily_production' as DashboardTab,
@@ -78,20 +114,23 @@ export function Sidebar({
       icon: BarChart3,
       badge: null,
       description: 'Produção Diária & Mensal',
+      section: 'GESTÃO & PCP',
     },
     {
       id: 'ops' as DashboardTab,
       label: 'Estoque de OPs',
       icon: Package,
       badge: opsCount > 0 ? `${opsCount}` : null,
-      description: 'OPs em Estoque & CSV',
+      description: 'Fila de OPs & CSV',
+      section: 'GESTÃO & PCP',
     },
     {
       id: 'rotations' as DashboardTab,
-      label: 'Escala',
+      label: 'Escala Semanal',
       icon: CalendarDays,
       badge: null,
       description: 'Alocação de Líderes',
+      section: 'GESTÃO & PCP',
     },
     {
       id: 'users' as DashboardTab,
@@ -99,16 +138,22 @@ export function Sidebar({
       icon: ShieldCheck,
       badge: usersCount > 0 ? `${usersCount}` : null,
       alertBadge: pendingCount > 0 ? `${pendingCount} pendente${pendingCount > 1 ? 's' : ''}` : null,
-      description: 'Gestão de Usuários',
+      description: 'Regras de Acesso (Rules)',
+      section: 'ADMINISTRAÇÃO',
     },
     {
       id: 'events' as DashboardTab,
       label: 'Auditoria',
       icon: History,
       badge: null,
-      description: 'Log de Eventos',
+      description: 'Log de Eventos & Paradas',
+      section: 'ADMINISTRAÇÃO',
     },
   ];
+
+  // Filtra as telas com base nas Rules do perfil do usuário
+  // (Lembrando que 'home' SEMPRE está incluída)
+  const visibleMenuItems = allMenuItems.filter((item) => allowedTabs.includes(item.id));
 
   const handleSelectTab = (tab: DashboardTab) => {
     setActiveTab(tab);
@@ -130,7 +175,7 @@ export function Sidebar({
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-black tracking-wider text-[#f4f4f5] uppercase truncate">GPANEL</span>
                 <span className="text-[9px] bg-blue-950 text-blue-400 border border-blue-800/40 px-1 py-0.2 rounded font-bold">
-                  PRO
+                  FACTORY
                 </span>
               </div>
               <p className="text-[10px] text-[#71717a] truncate font-medium">Fábrica Guarapari • Ybera</p>
@@ -163,34 +208,41 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Quick Action Button (Nova OP) */}
-      <div className="p-3 border-b border-[#18181f]">
-        <button
-          onClick={() => {
-            onNewOp();
-            if (isMobileView && setMobileOpen) setMobileOpen(false);
-          }}
-          className={`w-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.25)] transition-all ${
-            isCollapsed && !isMobileView ? 'px-0' : 'px-3'
-          }`}
-          title="Criar Nova Ordem de Produção"
-        >
-          <Plus className="w-4 h-4 shrink-0" />
-          {(!isCollapsed || isMobileView) && <span>Nova OP</span>}
-        </button>
-      </div>
+      {/* Quick Action Button (Nova OP) - apenas se usuário tem permissão */}
+      {canCreateOp && (
+        <div className="p-3 border-b border-[#18181f]">
+          <button
+            onClick={() => {
+              onNewOp();
+              if (isMobileView && setMobileOpen) setMobileOpen(false);
+            }}
+            className={`w-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.25)] transition-all ${
+              isCollapsed && !isMobileView ? 'px-0' : 'px-3'
+            }`}
+            title="Criar Nova Ordem de Produção"
+          >
+            <Plus className="w-4 h-4 shrink-0" />
+            {(!isCollapsed || isMobileView) && <span>Nova OP</span>}
+          </button>
+        </div>
+      )}
 
-      {/* Navigation Menu */}
-      <div className="flex-1 overflow-y-auto px-2.5 py-4 space-y-1.5">
-        <div className="px-2 pb-1.5">
+      {/* Navigation Menu com Rules */}
+      <div className="flex-1 overflow-y-auto px-2.5 py-3 space-y-1.5 no-scrollbar">
+        <div className="px-2 pb-1">
           {(!isCollapsed || isMobileView) && (
-            <p className="text-[10px] font-bold uppercase tracking-widest text-[#52525b]">
-              Menu de Navegação
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[#52525b]">
+                Navegação
+              </p>
+              <span className={`text-[9px] font-black uppercase px-1.5 py-0.2 rounded ${ruleConfig.badgeClass}`}>
+                {ruleConfig.shortName}
+              </span>
+            </div>
           )}
         </div>
 
-        {menuItems.map((item) => {
+        {visibleMenuItems.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
 
@@ -254,15 +306,17 @@ export function Sidebar({
           <div className="p-2.5 rounded-xl bg-[#131318] border border-[#22222a] flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded-lg bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center text-xs font-black shrink-0 uppercase">
-                {profile?.name?.substring(0, 2) || 'CG'}
+                {profile?.name?.substring(0, 2) || 'GP'}
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-bold text-[#f4f4f5] truncate leading-tight">
-                  {profile?.name || 'Coordenador'}
+                  {profile?.name || 'Colaborador'}
                 </p>
-                <p className="text-[10px] text-blue-400 font-semibold truncate mt-0.5">
-                  Coordenador Geral
-                </p>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="text-[10px] text-[#a1a1aa] font-medium truncate">
+                    {profile?.cargo || ruleConfig.name}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -289,9 +343,9 @@ export function Sidebar({
           <div className="flex flex-col items-center gap-2">
             <div
               className="w-9 h-9 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center text-xs font-black uppercase"
-              title={`${profile?.name || 'Coordenador'} (Coordenador Geral)`}
+              title={`${profile?.name || 'Colaborador'} (${profile?.cargo || ruleConfig.name})`}
             >
-              {profile?.name?.substring(0, 2) || 'CG'}
+              {profile?.name?.substring(0, 2) || 'GP'}
             </div>
             <div className="flex items-center gap-1">
               <button
@@ -319,7 +373,7 @@ export function Sidebar({
 
   return (
     <>
-      {/* Desktop Sidebar (hidden on small screens) */}
+      {/* Desktop Sidebar */}
       <aside
         className={`hidden md:flex bg-[#0c0c10] border-r border-[#1e1e24] flex-col justify-between transition-all duration-300 select-none z-30 shrink-0 ${
           isCollapsed ? 'w-20' : 'w-64'
@@ -328,7 +382,7 @@ export function Sidebar({
         {content(false)}
       </aside>
 
-      {/* Mobile Drawer Navigation (visible when mobileOpen is true) */}
+      {/* Mobile Drawer Navigation */}
       {mobileOpen && (
         <div className="fixed inset-0 z-50 md:hidden flex">
           {/* Dark Backdrop */}

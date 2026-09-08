@@ -26,7 +26,11 @@ import {
 import { getAllOPs, createOP, finishOP } from '../services/db';
 import { ProductionOrder } from '../types';
 
-export function ManipulacaoScreen() {
+interface ManipulacaoScreenProps {
+  embedded?: boolean;
+}
+
+export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [ops, setOps] = useState<ProductionOrder[]>([]);
@@ -232,7 +236,7 @@ export function ManipulacaoScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-cyan-500/30">
+    <div className={embedded ? "w-full text-[#f4f4f5] flex flex-col font-sans space-y-4" : "min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-cyan-500/30"}>
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -251,88 +255,90 @@ export function ManipulacaoScreen() {
         </div>
       )}
 
-      {/* CABEÇALHO */}
-      <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
-        {/* Identificação da Aplicação e Área */}
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400 shadow-inner">
-            <FlaskConical className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
-              <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 shadow-sm flex items-center gap-1">
-                <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
-                Área de Manipulação
-              </span>
+      {/* CABEÇALHO (Apenas se standalone) */}
+      {!embedded && (
+        <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
+          {/* Identificação da Aplicação e Área */}
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400 shadow-inner">
+              <FlaskConical className="w-5 h-5" />
             </div>
-            <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
-              <span>Execução de Granéis</span>
-              <span>•</span>
-              <span className="font-mono text-cyan-300">Unidade: Kg</span>
-            </p>
-          </div>
-        </div>
-
-        {/* Informações do Líder, Turno Ativo e Ações */}
-        <div className="flex items-center gap-3">
-          {/* Badge de Turno Ativo Automático */}
-          <div
-            className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold ${
-              detectedShift === 'Manhã'
-                ? 'bg-blue-950/70 text-blue-300 border-blue-800/50'
-                : 'bg-amber-950/70 text-amber-300 border-amber-800/50'
-            }`}
-          >
-            {detectedShift === 'Manhã' ? (
-              <Sun className="w-3.5 h-3.5 text-blue-400" />
-            ) : (
-              <Moon className="w-3.5 h-3.5 text-amber-400" />
-            )}
-            <span>Turno: {detectedShift}</span>
-          </div>
-
-          {/* Relógio em tempo real */}
-          <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#18181b] border border-[#27272a] text-xs text-[#d4d4d8] font-mono">
-            <Clock className="w-3.5 h-3.5 text-cyan-400" />
-            <span>{currentTime.toLocaleTimeString('pt-BR')}</span>
-          </div>
-
-          {/* Dados do Usuário */}
-          <div className="text-right hidden lg:block">
-            <div className="text-xs font-bold text-white flex items-center justify-end gap-1.5">
-              <span>{profile?.name || 'Líder de Manipulação'}</span>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
+                <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 shadow-sm flex items-center gap-1">
+                  <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
+                  Área de Manipulação
+                </span>
+              </div>
+              <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
+                <span>Execução de Granéis</span>
+                <span>•</span>
+                <span className="font-mono text-cyan-300">Unidade: Kg</span>
+              </p>
             </div>
-            <div className="text-[11px] text-[#a1a1aa]">{profile?.cargo || 'Líder de Manipulação'}</div>
           </div>
 
-          {/* Botão Atualizar Manual */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => fetchData(true)}
-            disabled={isRefreshing}
-            className="h-9 w-9 p-0 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a]"
-            title="Atualizar dados"
-          >
-            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
-          </Button>
+          {/* Informações do Líder, Turno Ativo e Ações */}
+          <div className="flex items-center gap-3">
+            {/* Badge de Turno Ativo Automático */}
+            <div
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-bold ${
+                detectedShift === 'Manhã'
+                  ? 'bg-blue-950/70 text-blue-300 border-blue-800/50'
+                  : 'bg-amber-950/70 text-amber-300 border-amber-800/50'
+              }`}
+            >
+              {detectedShift === 'Manhã' ? (
+                <Sun className="w-3.5 h-3.5 text-blue-400" />
+              ) : (
+                <Moon className="w-3.5 h-3.5 text-amber-400" />
+              )}
+              <span>Turno: {detectedShift}</span>
+            </div>
 
-          {/* Botão Logout */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={signOut}
-            className="h-9 px-3 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-rose-400 hover:border-rose-900/60 hover:bg-rose-950/20 text-xs font-semibold flex items-center gap-1.5"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Sair</span>
-          </Button>
-        </div>
-      </header>
+            {/* Relógio em tempo real */}
+            <div className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#18181b] border border-[#27272a] text-xs text-[#d4d4d8] font-mono">
+              <Clock className="w-3.5 h-3.5 text-cyan-400" />
+              <span>{currentTime.toLocaleTimeString('pt-BR')}</span>
+            </div>
+
+            {/* Dados do Usuário */}
+            <div className="text-right hidden lg:block">
+              <div className="text-xs font-bold text-white flex items-center justify-end gap-1.5">
+                <span>{profile?.name || 'Líder de Manipulação'}</span>
+              </div>
+              <div className="text-[11px] text-[#a1a1aa]">{profile?.cargo || 'Líder de Manipulação'}</div>
+            </div>
+
+            {/* Botão Atualizar Manual */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => fetchData(true)}
+              disabled={isRefreshing}
+              className="h-9 w-9 p-0 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a]"
+              title="Atualizar dados"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
+            </Button>
+
+            {/* Botão Logout */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={signOut}
+              className="h-9 px-3 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-rose-400 hover:border-rose-900/60 hover:bg-rose-950/20 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sair</span>
+            </Button>
+          </div>
+        </header>
+      )}
 
       {/* CORPO PRINCIPAL */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col gap-8">
+      <main className={`flex-1 w-full mx-auto flex flex-col gap-8 ${embedded ? 'p-0 max-w-full' : 'max-w-6xl p-4 sm:p-6 lg:p-8'}`}>
         {/* SEÇÃO 1: OSMS EM ANDAMENTO (DA MANIPULAÇÃO) */}
         {inProgressManipulacaoOps.length > 0 && (
           <section className="space-y-4">

@@ -4,9 +4,6 @@ import { AuthProvider } from './AuthProvider';
 import { useAuthStore } from './store/authStore';
 import { Login } from './pages/Login';
 import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
-import { LeaderScreen } from './pages/LeaderScreen';
-import { PesagemScreen } from './pages/PesagemScreen';
-import { ManipulacaoScreen } from './pages/ManipulacaoScreen';
 import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -46,36 +43,9 @@ function MainRoute() {
     return <FirstAccessPasswordChange />;
   }
 
-  const role = String(profile?.role || '').toLowerCase().trim();
-  const cargo = String(profile?.cargo || '').toLowerCase().trim();
-  const isCoordinator = role === 'coordinator' || role === 'coordenador' || cargo.includes('coordena');
-
-  if (isCoordinator) {
-    return <CoordinatorDashboard />;
-  }
-
-  let area = profile?.area;
-  // Inferência automática de área caso venha em branco
-  if (!area) {
-    if (cargo.includes('pesag')) {
-      area = 'Pesagem';
-    } else if (cargo.includes('manipula')) {
-      area = 'Manipulação';
-    } else if (cargo.includes('envas')) {
-      area = 'Envase';
-    }
-  }
-
-  if (area === 'Pesagem') {
-    return <PesagemScreen />;
-  }
-
-  if (area === 'Manipulação') {
-    return <ManipulacaoScreen />;
-  }
-
-  // Se area === 'Envase' ou indefinida/outra, renderiza LeaderScreen
-  return <LeaderScreen />;
+  // Todas as telas integradas em um único lugar acessadas pela barra lateral
+  // As Rules gerenciam os acessos de cada perfil, e o Dashboard Geral é a Home para todos
+  return <CoordinatorDashboard />;
 }
 
 function PublicLoginRoute() {

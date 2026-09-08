@@ -33,7 +33,11 @@ import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonth
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 
-export function PesagemScreen() {
+interface PesagemScreenProps {
+  embedded?: boolean;
+}
+
+export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [activeViewTab, setActiveViewTab] = useState<'registro' | 'historico'>('registro');
@@ -321,7 +325,7 @@ export function PesagemScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-purple-500/30">
+    <div className={embedded ? "w-full text-[#f4f4f5] flex flex-col font-sans space-y-4" : "min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-purple-500/30"}>
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -340,72 +344,74 @@ export function PesagemScreen() {
         </div>
       )}
 
-      {/* CABEÇALHO */}
-      <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
-        {/* Identificação da Aplicação e Área */}
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-400 shadow-inner">
-            <Scale className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
-              <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-purple-950/90 text-purple-300 border border-purple-700/60 shadow-sm flex items-center gap-1">
-                <Sparkles className="w-2.5 h-2.5 text-purple-400" />
-                Área de Pesagem
-              </span>
+      {/* CABEÇALHO (Apenas se standalone) */}
+      {!embedded && (
+        <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
+          {/* Identificação da Aplicação e Área */}
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-400 shadow-inner">
+              <Scale className="w-5 h-5" />
             </div>
-            <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
-              <span>Turno Único (Manhã)</span>
-              <span>•</span>
-              <span className="font-mono text-purple-300">Série 300</span>
-            </p>
-          </div>
-        </div>
-
-        {/* Informações do Líder e Ações */}
-        <div className="flex items-center gap-3">
-          {/* Relógio em tempo real */}
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#18181b] border border-[#27272a] text-xs text-[#d4d4d8] font-mono">
-            <Clock className="w-3.5 h-3.5 text-purple-400" />
-            <span>{currentTime.toLocaleTimeString('pt-BR')}</span>
-          </div>
-
-          {/* Dados do Usuário */}
-          <div className="text-right hidden md:block">
-            <div className="text-xs font-bold text-white flex items-center justify-end gap-1.5">
-              <span>{profile?.name || 'Líder de Pesagem'}</span>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
+                <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-purple-950/90 text-purple-300 border border-purple-700/60 shadow-sm flex items-center gap-1">
+                  <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                  Área de Pesagem
+                </span>
+              </div>
+              <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
+                <span>Turno Único (Manhã)</span>
+                <span>•</span>
+                <span className="font-mono text-purple-300">Série 300</span>
+              </p>
             </div>
-            <div className="text-[11px] text-[#a1a1aa]">{profile?.cargo || 'Líder de Pesagem'}</div>
           </div>
 
-          {/* Botão Atualizar Manual */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => fetchData(true)}
-            disabled={isRefreshing}
-            className="h-9 w-9 p-0 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a]"
-            title="Atualizar dados"
-          >
-            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-purple-400' : ''}`} />
-          </Button>
+          {/* Informações do Líder e Ações */}
+          <div className="flex items-center gap-3">
+            {/* Relógio em tempo real */}
+            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#18181b] border border-[#27272a] text-xs text-[#d4d4d8] font-mono">
+              <Clock className="w-3.5 h-3.5 text-purple-400" />
+              <span>{currentTime.toLocaleTimeString('pt-BR')}</span>
+            </div>
 
-          {/* Botão Logout */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={signOut}
-            className="h-9 px-3 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-rose-400 hover:border-rose-900/60 hover:bg-rose-950/20 text-xs font-semibold flex items-center gap-1.5"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Sair</span>
-          </Button>
-        </div>
-      </header>
+            {/* Dados do Usuário */}
+            <div className="text-right hidden md:block">
+              <div className="text-xs font-bold text-white flex items-center justify-end gap-1.5">
+                <span>{profile?.name || 'Líder de Pesagem'}</span>
+              </div>
+              <div className="text-[11px] text-[#a1a1aa]">{profile?.cargo || 'Líder de Pesagem'}</div>
+            </div>
+
+            {/* Botão Atualizar Manual */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => fetchData(true)}
+              disabled={isRefreshing}
+              className="h-9 w-9 p-0 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a]"
+              title="Atualizar dados"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-purple-400' : ''}`} />
+            </Button>
+
+            {/* Botão Logout */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={signOut}
+              className="h-9 px-3 rounded-xl bg-[#18181b] border-[#27272a] text-[#a1a1aa] hover:text-rose-400 hover:border-rose-900/60 hover:bg-rose-950/20 text-xs font-semibold flex items-center gap-1.5"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sair</span>
+            </Button>
+          </div>
+        </header>
+      )}
 
       {/* BARRA DE NAVEGAÇÃO DE ABAS */}
-      <div className="bg-[#121216]/95 border-b border-[#27272a] px-4 lg:px-8 py-2.5 sticky top-[65px] z-20 backdrop-blur-md">
+      <div className={`bg-[#121216]/95 border border-[#27272a] px-4 lg:px-6 py-2.5 z-20 backdrop-blur-md ${embedded ? 'rounded-2xl shadow-md' : 'sticky top-[65px] border-b'}`}>
         <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button

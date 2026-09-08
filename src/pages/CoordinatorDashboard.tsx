@@ -70,17 +70,22 @@ import {
   generateLeaderEmail,
   getMonthlyGoals,
   getTipoDocumento,
-  resetLeaderPassword
+  resetLeaderPassword,
+  updateUserRule
 } from '../services/db';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, AccessRule } from '../types';
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
+import { PesagemScreen } from './PesagemScreen';
+import { ManipulacaoScreen } from './ManipulacaoScreen';
+import { LeaderScreen } from './LeaderScreen';
+import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3 } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 export function CoordinatorDashboard() {
@@ -90,6 +95,15 @@ export function CoordinatorDashboard() {
   const [activeTab, setActiveTab] = useState<DashboardTab>('home');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+
+  // Permissões de telas via Rules (com home sempre permitido e fallback seguro)
+  const allowedTabs = React.useMemo(() => getUserAllowedTabs(profile), [profile]);
+
+  useEffect(() => {
+    if (!allowedTabs.includes(activeTab)) {
+      setActiveTab('home');
+    }
+  }, [allowedTabs, activeTab]);
 
   // Main data state
   const [lines, setLines] = useState<ProductionLine[]>([]);
@@ -293,6 +307,17 @@ export function CoordinatorDashboard() {
       await loadData();
     } else {
       showToast('Falha ao atualizar área do colaborador.', 'error');
+    }
+  };
+
+  const handleUpdateUserRule = async (user: UserProfile, newRule: AccessRule) => {
+    const ok = await updateUserRule(user.uid || user.email, newRule);
+    if (ok) {
+      const ruleConfig = ACCESS_RULES[newRule];
+      showToast(`Regra de acesso de ${user.name} alterada para ${ruleConfig?.name || newRule}!`);
+      await loadData();
+    } else {
+      showToast('Falha ao atualizar regra de acesso no Supabase.', 'error');
     }
   };
 
@@ -536,14 +561,19 @@ WHERE email IN (
 
   const handleConfirmDelete = async () => {
     if (!deleteModalOp) return;
+    const targetOp = deleteModalOp;
     setIsDeletingOp(true);
+    // Atualização otimista imediata na UI
+    setOps(prev => prev.filter(o => o.id !== targetOp.id));
+    setDeleteModalOp(null);
     try {
-      await deleteOP(deleteModalOp.id);
-      showToast(`OP ${deleteModalOp.number} removida com sucesso do estoque.`);
-      setDeleteModalOp(null);
+      await deleteOP(targetOp.id);
+      showToast(`OP ${targetOp.number} removida com sucesso do estoque.`);
       await loadData();
-    } catch {
+    } catch (err) {
+      console.error('Erro ao excluir OP:', err);
       showToast('Falha ao remover a OP do estoque.', 'error');
+      await loadData();
     } finally {
       setIsDeletingOp(false);
     }
@@ -551,13 +581,17 @@ WHERE email IN (
 
   const handleResetDatabase = async () => {
     setIsResetting(true);
+    // Limpeza otimista imediata na UI
+    setOps([]);
+    setShowResetModal(false);
     try {
       await resetProductionDatabase();
-      showToast('Base de dados limpa com sucesso! Todas as OPs e eventos mock foram removidos.');
-      setShowResetModal(false);
+      showToast('Base de dados limpa com sucesso! Todas as OPs foram removidas.');
       await loadData();
-    } catch {
+    } catch (err) {
+      console.error('Erro ao resetar base:', err);
       showToast('Falha ao resetar banco de dados.', 'error');
+      await loadData();
     } finally {
       setIsResetting(false);
     }
@@ -861,17 +895,32 @@ WHERE email IN (
     { title: string; subtitle: string; icon: React.ComponentType<{ className?: string }> }
   > = {
     home: {
-      title: 'DASHBOARD',
-      subtitle: 'Painel de Indicadores de Produção',
+      title: 'Dashboard Geral',
+      subtitle: 'Painel Geral de Indicadores de Produção, OEE & Metas',
       icon: LayoutDashboard,
     },
+    pesagem: {
+      title: 'Área de Pesagem',
+      subtitle: 'Matérias-primas, fracionamento de insumos e emissão de OSM',
+      icon: Scale,
+    },
+    manipulacao: {
+      title: 'Área de Manipulação',
+      subtitle: 'Produção de granéis industriais, controle de misturas e liberação',
+      icon: FlaskConical,
+    },
+    envase: {
+      title: 'Chão de Fábrica (Envase)',
+      subtitle: 'Controle de linhas de envase, paradas e apontamentos do líder',
+      icon: Factory,
+    },
     lines: {
-      title: 'Linhas de Produção',
+      title: 'Linhas de Envase',
       subtitle: 'Monitoramento em tempo real do chão de fábrica e status operacional',
       icon: Layers,
     },
     daily_production: {
-      title: 'Histórico & Produção',
+      title: 'Histórico & Gráficos',
       subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
       icon: BarChart3,
     },
@@ -881,13 +930,13 @@ WHERE email IN (
       icon: Package,
     },
     rotations: {
-      title: 'Escala de Líderes',
+      title: 'Escala Semanal',
       subtitle: 'Distribuição e alocação por turno e linha de produção',
       icon: CalendarDays,
     },
     users: {
-      title: 'Equipe & Gestão de Acessos',
-      subtitle: 'Aprovação de cadastros, perfis e permissões industriais',
+      title: 'Equipe & Regras de Acesso (Rules)',
+      subtitle: 'Controle de perfis, permissões por telas e aprovação de usuários',
       icon: ShieldCheck,
     },
     events: {
@@ -995,6 +1044,21 @@ WHERE email IN (
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
               />
+            )}
+
+            {/* ---------------- TELA: PESAGEM (BALANÇA & MATÉRIAS-PRIMAS) ---------------- */}
+            {activeTab === 'pesagem' && (
+              <PesagemScreen embedded={true} />
+            )}
+
+            {/* ---------------- TELA: MANIPULAÇÃO (GRANÉIS & REATORES) ---------------- */}
+            {activeTab === 'manipulacao' && (
+              <ManipulacaoScreen embedded={true} />
+            )}
+
+            {/* ---------------- TELA: ENVASE (CHÃO DE FÁBRICA / PORTAL DO LÍDER) ---------------- */}
+            {activeTab === 'envase' && (
+              <LeaderScreen embedded={true} />
             )}
 
             {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
@@ -1353,15 +1417,19 @@ WHERE email IN (
                 {/* Botões no canto superior direito */}
                 <div className="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
                   {ops.length > 0 && (
-                    <Button
-                      variant="outline"
-                      onClick={() => setShowResetModal(true)}
-                      className="h-9 px-3 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all"
+                    <button
+                      type="button"
+                      id="btn-limpar-base"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowResetModal(true);
+                      }}
+                      className="h-9 px-3.5 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 hover:border-red-700/60 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
                       title="Limpar todas as OPs e resetar a base de dados"
                     >
-                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      <Trash2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
                       <span>Limpar Base</span>
-                    </Button>
+                    </button>
                   )}
 
                   <Button
@@ -1686,15 +1754,18 @@ WHERE email IN (
                                     <span>Atribuir Linha</span>
                                   </Button>
 
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleOpenDeleteModal(op)}
-                                    className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/40 rounded-lg p-0 transition-colors"
+                                  <button
+                                    type="button"
+                                    id={`btn-excluir-op-${op.id}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleOpenDeleteModal(op);
+                                    }}
+                                    className="h-7 w-7 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95"
                                     title={`Excluir OP ${op.number} do Estoque`}
                                   >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </Button>
+                                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                                  </button>
                                 </div>
                               </td>
                             </tr>
@@ -2047,7 +2118,8 @@ WHERE email IN (
                       <tr>
                         <th className="py-3.5 px-4">Colaborador</th>
                         <th className="py-3.5 px-4">E-mail Corporativo</th>
-                        <th className="py-3.5 px-4">Cargo / Nível</th>
+                        <th className="py-3.5 px-4">Cargo / Área</th>
+                        <th className="py-3.5 px-4">Regra de Acesso (Rule)</th>
                         <th className="py-3.5 px-4">Status de Acesso</th>
                         <th className="py-3.5 px-4 text-right">Ações da Coordenação</th>
                       </tr>
@@ -2055,7 +2127,7 @@ WHERE email IN (
                     <tbody className="divide-y divide-[#1e1e23]">
                       {filteredUsers.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="py-8 text-center text-[#71717a]">
+                          <td colSpan={6} className="py-8 text-center text-[#71717a]">
                             Nenhum colaborador encontrado com os filtros aplicados.
                           </td>
                         </tr>
@@ -2065,6 +2137,8 @@ WHERE email IN (
                           const isCoordinator = user.role === 'coordinator';
                           const isActive = user.status !== 'inactive';
                           const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
+                          const activeRule = (user.rule || getUserRule(user)) as AccessRule;
+                          const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.operador;
 
                           return (
                             <tr key={user.uid || user.email} className="hover:bg-[#16161b] transition-colors">
@@ -2126,6 +2200,29 @@ WHERE email IN (
                                       Coordenação Geral
                                     </span>
                                   )}
+                                </div>
+                              </td>
+
+                              <td className="py-3.5 px-4">
+                                <div className="space-y-1">
+                                  <select
+                                    value={activeRule}
+                                    onChange={(e) => handleUpdateUserRule(user, e.target.value as AccessRule)}
+                                    disabled={isSelf}
+                                    className={`text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-sm ${
+                                      ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
+                                    }`}
+                                    title="Selecione a regra de acesso (define quais telas aparecem no menu lateral deste colaborador)"
+                                  >
+                                    {Object.entries(ACCESS_RULES).map(([key, cfg]) => (
+                                      <option key={key} value={key} className="bg-[#121217] text-white">
+                                        {cfg.name} ({cfg.tabs.length} telas)
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <p className="text-[9px] text-[#71717a] truncate max-w-[220px]">
+                                    {ruleConfig.description}
+                                  </p>
                                 </div>
                               </td>
 
@@ -2954,7 +3051,12 @@ WHERE email IN (
 
       {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE OP ---------------- */}
       {deleteModalOp && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isDeletingOp) setDeleteModalOp(null);
+          }}
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+        >
           <div className="bg-[#121216] border border-red-900/40 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
             
             {/* Header */}
@@ -3034,20 +3136,22 @@ WHERE email IN (
 
               {/* Ações */}
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <Button
+                <button
                   type="button"
-                  variant="ghost"
+                  id="btn-cancelar-exclusao-op"
                   disabled={isDeletingOp}
                   onClick={() => setDeleteModalOp(null)}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                  className="h-9 px-3.5 text-xs text-[#a1a1aa] hover:text-white rounded-xl hover:bg-[#1a1a24] transition-colors cursor-pointer disabled:opacity-50"
                 >
                   Cancelar
-                </Button>
+                </button>
                 
-                <Button
+                <button
+                  type="button"
+                  id="btn-confirmar-exclusao-op"
                   disabled={isDeletingOp}
                   onClick={handleConfirmDelete}
-                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)] transition-all cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isDeletingOp ? (
                     <>
@@ -3060,7 +3164,7 @@ WHERE email IN (
                       <span>Confirmar Exclusão</span>
                     </>
                   )}
-                </Button>
+                </button>
               </div>
 
             </div>
@@ -3422,7 +3526,12 @@ WHERE email IN (
 
       {/* MODAL DE CONFIRMAÇÃO DE RESET / LIMPEZA DO BANCO */}
       {showResetModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+        <div 
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isResetting) setShowResetModal(false);
+          }}
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+        >
           <div className="bg-[#121217] border border-red-900/50 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
             
             {/* Header */}
@@ -3437,8 +3546,9 @@ WHERE email IN (
                 </div>
               </div>
               <button
+                type="button"
                 onClick={() => !isResetting && setShowResetModal(false)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors cursor-pointer"
                 disabled={isResetting}
               >
                 <X className="w-5 h-5" />
@@ -3459,20 +3569,22 @@ WHERE email IN (
 
               {/* Ações */}
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <Button
+                <button
                   type="button"
-                  variant="ghost"
+                  id="btn-cancelar-reset-base"
                   disabled={isResetting}
                   onClick={() => setShowResetModal(false)}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                  className="h-9 px-3.5 text-xs text-[#a1a1aa] hover:text-white rounded-xl hover:bg-[#1a1a24] transition-colors cursor-pointer disabled:opacity-50"
                 >
                   Cancelar
-                </Button>
+                </button>
                 
-                <Button
+                <button
+                  type="button"
+                  id="btn-confirmar-reset-base"
                   disabled={isResetting}
                   onClick={handleResetDatabase}
-                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)] transition-all cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isResetting ? (
                     <>
@@ -3485,7 +3597,7 @@ WHERE email IN (
                       <span>Confirmar e Limpar Tudo</span>
                     </>
                   )}
-                </Button>
+                </button>
               </div>
 
             </div>
