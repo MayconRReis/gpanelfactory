@@ -480,7 +480,7 @@ export function HomeDashboard({
           {/* CARD 1: AZUL (Total de OPs Ativas) */}
           <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
             <div className="text-[10px] font-black uppercase tracking-wider text-blue-100">
-              TOTAL DE OPS ATIVAS
+              OPS ATIVAS
             </div>
             <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
               {ops.length}
@@ -499,7 +499,7 @@ export function HomeDashboard({
               {totalDelayedOpsCount}
             </div>
             <div className="text-[10px] text-red-100/90 font-medium truncate">
-              exigem ação imediata do PPCP
+              item de alta prioridade
             </div>
           </div>
 
@@ -507,7 +507,7 @@ export function HomeDashboard({
           <div className="bg-[#f97316] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-orange-100 truncate">
-                TEMPO OCIOSO (DIA / TOT)
+                TEMPO OCIOSO 
               </span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
@@ -522,7 +522,6 @@ export function HomeDashboard({
               {idleHoursToday}h {idleMinutesToday}m
             </div>
             <div className="text-[10px] text-orange-100/90 font-medium truncate">
-              total: {formattedIdleTotal} ociosos
             </div>
           </div>
 
@@ -530,7 +529,7 @@ export function HomeDashboard({
           <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
-                TEMPO TRABALHO (DIA)
+                TEMPO TRABALHO
               </span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
@@ -545,7 +544,6 @@ export function HomeDashboard({
               <span>{workHoursToday}h {workMinutesToday}m</span>
             </div>
             <div className="text-[10px] text-emerald-100/90 font-medium truncate flex items-center justify-between gap-1">
-              <span>total: {workHoursTotal}h {workMinutesTotal}m ativos</span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
                   className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1 py-0.2 rounded text-[8px] font-bold"
