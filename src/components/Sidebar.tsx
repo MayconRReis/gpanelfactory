@@ -3,7 +3,6 @@ import {
   LayoutDashboard,
   Layers,
   Package,
-  CalendarDays,
   ShieldCheck,
   History,
   Plus,
@@ -60,10 +59,10 @@ export function Sidebar({
   setMobileOpen,
 }: SidebarProps) {
   const userRule = getUserRule(profile);
-  const ruleConfig = ACCESS_RULES[userRule] || ACCESS_RULES.operador;
+  const ruleConfig = ACCESS_RULES[userRule] || ACCESS_RULES.envase;
   const allowedTabs = getUserAllowedTabs(profile);
 
-  const canCreateOp = allowedTabs.includes('ops') || userRule === 'admin' || userRule === 'pcp';
+  const canCreateOp = allowedTabs.includes('ops') || userRule === 'admin';
 
   // Todos os itens do menu unificado do GPanel Factory
   const allMenuItems = [
@@ -105,7 +104,7 @@ export function Sidebar({
       icon: Layers,
       badge: linesCount > 0 ? `${linesCount}` : null,
       subBadge: activeLinesCount > 0 ? `${activeLinesCount} ativas` : null,
-      description: 'Monitoramento ao Vivo',
+      description: 'Monitoramento & Escala',
       section: 'GESTÃO & PCP',
     },
     {
@@ -122,14 +121,6 @@ export function Sidebar({
       icon: Package,
       badge: opsCount > 0 ? `${opsCount}` : null,
       description: 'Fila de OPs & CSV',
-      section: 'GESTÃO & PCP',
-    },
-    {
-      id: 'rotations' as DashboardTab,
-      label: 'Escala Semanal',
-      icon: CalendarDays,
-      badge: null,
-      description: 'Alocação de Líderes',
       section: 'GESTÃO & PCP',
     },
     {

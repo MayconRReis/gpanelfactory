@@ -657,8 +657,6 @@ export const updateUserRule = async (
       : newRule === 'pesagem' ? 'Líder de Pesagem'
       : newRule === 'manipulacao' ? 'Líder de Manipulação'
       : newRule === 'envase' ? 'Líder de Envase'
-      : newRule === 'pcp' ? 'Analista PCP'
-      : newRule === 'operador' ? 'Operador de Produção'
       : undefined;
 
     // 1. Atualizar em memória imediatamente
@@ -1312,6 +1310,8 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           packageAvailability: Number(d.package_availability || d.packageAvailability || 0),
           sequence: Number(d.sequence || 1),
           scheduledDate: d.scheduled_date || d.scheduledDate || undefined,
+          scheduledEndDate: d.scheduled_end_date || d.scheduledEndDate || undefined,
+          scheduledDays: d.scheduled_days != null ? Number(d.scheduled_days) : (d.scheduledDays != null ? Number(d.scheduledDays) : undefined),
           scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
           setor: d.setor || undefined,
           unidade: d.unidade || undefined,
@@ -1449,58 +1449,83 @@ export const createOP = async (newOpData: {
   inMemoryOps = [newOp, ...inMemoryOps];
   persistOps();
 
-  // 2. Synchronize with Supabase in background
-  try {
-    const fullPayload: any = {
-      id: newOp.id,
-      number: newOp.number,
-      product: newOp.product,
-      lote: newOp.lote,
-      planned_quantity: newOp.plannedQuantity,
-      produced_quantity: newOp.producedQuantity,
-      granel: newOp.granel,
-      priority: newOp.priority,
-      status: newOp.status,
-      leader_id: newOp.leaderId || null,
-      line_id: newOp.lineId,
-      package_availability: newOp.packageAvailability,
-      sequence: newOp.sequence,
-      scheduled_date: newOp.scheduledDate,
-      scheduled_shift: newOp.scheduledShift,
-      setor: newOp.setor || null,
-      unidade: newOp.unidade || null,
-      rejected_quantity: newOp.rejectedQuantity || 0,
-      planned_hours: newOp.plannedHours ?? null,
-      tipo_documento: newOp.tipoDocumento || 'OP',
-      industria: newOp.industria || null,
-      completed_at: newOp.completedAt || null,
-      created_at: newOp.createdAt,
-    };
+  // 2. Synchronize with Supabase — grava nas duas tabelas (production_orders e ops)
+  // sequencialmente, com log de erro por tabela. NÃO usar Promise.allSettled aqui:
+  // uma falha silenciosa em uma das duas é exatamente a causa da dessincronização
+  // entre elas (ver investigação em ops vs production_orders).
+  const fullPayload: any = {
+    id: newOp.id,
+    number: newOp.number,
+    product: newOp.product,
+    lote: newOp.lote,
+    planned_quantity: newOp.plannedQuantity,
+    produced_quantity: newOp.producedQuantity,
+    granel: newOp.granel,
+    priority: newOp.priority,
+    status: newOp.status,
+    leader_id: newOp.leaderId || null,
+    line_id: newOp.lineId,
+    package_availability: newOp.packageAvailability,
+    sequence: newOp.sequence,
+    scheduled_date: newOp.scheduledDate,
+    scheduled_end_date: newOp.scheduledEndDate,
+    scheduled_days: newOp.scheduledDays,
+    scheduled_shift: newOp.scheduledShift,
+    setor: newOp.setor || null,
+    unidade: newOp.unidade || null,
+    rejected_quantity: newOp.rejectedQuantity || 0,
+    planned_hours: newOp.plannedHours ?? null,
+    tipo_documento: newOp.tipoDocumento || 'OP',
+    industria: newOp.industria || null,
+    completed_at: newOp.completedAt || null,
+    created_at: newOp.createdAt,
+  };
 
-    const res1 = await supabase.from('production_orders').insert(fullPayload);
-    if (res1.error) {
-      // Try ops table or simpler payload without extra columns
-      const simplePayload = {
-        id: newOp.id,
-        number: newOp.number,
-        product: newOp.product,
-        planned_quantity: newOp.plannedQuantity,
-        produced_quantity: newOp.producedQuantity,
-        priority: newOp.priority,
-        status: newOp.status,
-        leader_id: newOp.leaderId || null,
-        line_id: newOp.lineId,
-        created_at: newOp.createdAt,
-      };
-      try {
-        await supabase.from('ops').insert(fullPayload);
-      } catch {}
-      try {
-        await supabase.from('production_orders').insert(simplePayload);
-      } catch {}
+  // Payload restrito às colunas que existem confirmadamente em `ops` (schema.sql +
+  // migrações conhecidas). NÃO inclui scheduled_end_date/scheduled_days/completed_at,
+  // que só foram adicionadas manualmente em `production_orders` — inserir esses campos
+  // aqui provavelmente falharia. Se `ops` já tiver essas colunas em produção, ajuste esta lista.
+  const opsPayload: any = {
+    id: newOp.id,
+    number: newOp.number,
+    product: newOp.product,
+    lote: newOp.lote,
+    planned_quantity: newOp.plannedQuantity,
+    produced_quantity: newOp.producedQuantity,
+    granel: newOp.granel,
+    priority: newOp.priority,
+    status: newOp.status,
+    leader_id: newOp.leaderId || null,
+    line_id: newOp.lineId,
+    package_availability: newOp.packageAvailability,
+    sequence: newOp.sequence,
+    scheduled_date: newOp.scheduledDate,
+    scheduled_shift: newOp.scheduledShift,
+    setor: newOp.setor || null,
+    unidade: newOp.unidade || null,
+    rejected_quantity: newOp.rejectedQuantity || 0,
+    planned_hours: newOp.plannedHours ?? null,
+    tipo_documento: newOp.tipoDocumento || 'OP',
+    industria: newOp.industria || null,
+    created_at: newOp.createdAt,
+  };
+
+  try {
+    const resProductionOrders = await supabase.from('production_orders').insert(fullPayload);
+    if (resProductionOrders.error) {
+      console.error(`[createOP] Falha ao gravar em production_orders (OP ${newOp.id}):`, resProductionOrders.error.message);
     }
   } catch (err) {
-    console.warn('Persistência de nova OP no Supabase:', err);
+    console.error(`[createOP] Erro inesperado ao gravar em production_orders (OP ${newOp.id}):`, err);
+  }
+
+  try {
+    const resOps = await supabase.from('ops').insert(opsPayload);
+    if (resOps.error) {
+      console.error(`[createOP] Falha ao gravar em ops (OP ${newOp.id}):`, resOps.error.message);
+    }
+  } catch (err) {
+    console.error(`[createOP] Erro inesperado ao gravar em ops (OP ${newOp.id}):`, err);
   }
 
   return newOp;
@@ -1568,40 +1593,49 @@ export const importOPsBatch = async (
   inMemoryOps = [...newCreated, ...inMemoryOps];
   persistOps();
 
-  // 2. Synchronize with Supabase in background
-  try {
-    const payloads = newCreated.map((op) => ({
-      id: op.id,
-      number: op.number,
-      product: op.product,
-      lote: op.lote,
-      planned_quantity: op.plannedQuantity,
-      produced_quantity: 0,
-      granel: op.granel,
-      priority: op.priority,
-      status: op.status,
-      line_id: op.lineId,
-      package_availability: op.packageAvailability,
-      sequence: op.sequence,
-      scheduled_date: op.scheduledDate,
-      scheduled_shift: op.scheduledShift,
-      setor: op.setor || null,
-      unidade: op.unidade || null,
-      rejected_quantity: op.rejectedQuantity || 0,
-      planned_hours: op.plannedHours ?? null,
-      tipo_documento: op.tipoDocumento || 'OP',
-      finished_shift: op.finishedShift || null,
-      created_at: op.createdAt,
-    }));
+  // 2. Synchronize with Supabase — grava nas duas tabelas sequencialmente,
+  // com log de erro por tabela (mesmo motivo do createOP: não usar
+  // Promise.allSettled/fallback silencioso aqui, senão `ops` fica para trás).
+  const payloads = newCreated.map((op) => ({
+    id: op.id,
+    number: op.number,
+    product: op.product,
+    lote: op.lote,
+    planned_quantity: op.plannedQuantity,
+    produced_quantity: 0,
+    granel: op.granel,
+    priority: op.priority,
+    status: op.status,
+    line_id: op.lineId,
+    package_availability: op.packageAvailability,
+    sequence: op.sequence,
+    scheduled_date: op.scheduledDate,
+    scheduled_shift: op.scheduledShift,
+    setor: op.setor || null,
+    unidade: op.unidade || null,
+    rejected_quantity: op.rejectedQuantity || 0,
+    planned_hours: op.plannedHours ?? null,
+    tipo_documento: op.tipoDocumento || 'OP',
+    finished_shift: op.finishedShift || null,
+    created_at: op.createdAt,
+  }));
 
-    const res = await supabase.from('production_orders').insert(payloads);
-    if (res.error) {
-      try {
-        await supabase.from('ops').insert(payloads);
-      } catch {}
+  try {
+    const resProductionOrders = await supabase.from('production_orders').insert(payloads);
+    if (resProductionOrders.error) {
+      console.error('[importOPsBatch] Falha ao gravar em production_orders:', resProductionOrders.error.message);
     }
   } catch (err) {
-    console.warn('Persistência em lote de OPs no Supabase:', err);
+    console.error('[importOPsBatch] Erro inesperado ao gravar em production_orders:', err);
+  }
+
+  try {
+    const resOps = await supabase.from('ops').insert(payloads);
+    if (resOps.error) {
+      console.error('[importOPsBatch] Falha ao gravar em ops:', resOps.error.message);
+    }
+  } catch (err) {
+    console.error('[importOPsBatch] Erro inesperado ao gravar em ops:', err);
   }
 
   return {
@@ -1633,6 +1667,8 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   if (updates.packageAvailability !== undefined) dbPayload.package_availability = updates.packageAvailability;
   if (updates.sequence !== undefined) dbPayload.sequence = updates.sequence;
   if (updates.scheduledDate !== undefined) dbPayload.scheduled_date = updates.scheduledDate;
+  if (updates.scheduledEndDate !== undefined) dbPayload.scheduled_end_date = updates.scheduledEndDate;
+  if (updates.scheduledDays !== undefined) dbPayload.scheduled_days = updates.scheduledDays;
   if (updates.scheduledShift !== undefined) dbPayload.scheduled_shift = updates.scheduledShift;
   if (updates.setor !== undefined) dbPayload.setor = updates.setor;
   if (updates.unidade !== undefined) dbPayload.unidade = updates.unidade;
@@ -1640,6 +1676,7 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   if (updates.plannedHours !== undefined) dbPayload.planned_hours = updates.plannedHours;
   if (updates.tipoDocumento !== undefined) dbPayload.tipo_documento = updates.tipoDocumento;
   if (updates.industria !== undefined) dbPayload.industria = updates.industria;
+  if (updates.completedAt !== undefined) dbPayload.completed_at = updates.completedAt;
   if (updates.finishedShift !== undefined) dbPayload.finished_shift = updates.finishedShift;
 
   try {
@@ -2103,17 +2140,18 @@ export const finishOP = async (
 ) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const completedAtIso = new Date().toISOString();
 
-  inMemoryOps = inMemoryOps.map(op => 
-    op.id === opId 
-      ? { 
-          ...op, 
-          status: 'completed', 
-          finishedShift: finishedShift || undefined, 
-          completedAt: new Date().toISOString(),
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId
+      ? {
+          ...op,
+          status: 'completed',
+          finishedShift: finishedShift || undefined,
+          completedAt: completedAtIso,
           producedQuantity: producedQuantity !== undefined ? producedQuantity : op.producedQuantity,
           leaderId: leaderId || op.leaderId,
-        } 
+        }
       : op
   );
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
@@ -2139,6 +2177,7 @@ export const finishOP = async (
     finished_shift: finishedShift || null,
     produced_quantity: producedQuantity !== undefined ? producedQuantity : undefined,
     leader_id: leaderId || null,
+    completed_at: completedAtIso,
   };
 
   try {

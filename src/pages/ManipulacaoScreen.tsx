@@ -21,10 +21,14 @@ import {
   Sparkles,
   Scale,
   History,
-  Check
+  Check,
+  BarChart3,
+  TrendingUp,
+  FileSpreadsheet
 } from 'lucide-react';
 import { getAllOPs, createOP, finishOP } from '../services/db';
 import { ProductionOrder } from '../types';
+import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 
 interface ManipulacaoScreenProps {
   embedded?: boolean;
@@ -40,6 +44,9 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // Estado para inputs de Kg manipulados em andamento: map de opId -> string
   const [kgInputs, setKgInputs] = useState<Record<string, string>>({});
+
+  // Sub-abas de visualização: Dashboard de Produção (Diária & Semanal) vs Operação em Tempo Real
+  const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('dashboard');
 
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
@@ -160,6 +167,18 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       .filter(op => op.status === 'completed')
       .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [manipulacaoOps]);
+
+  // Data de hoje e total de Kg produzidos hoje na Manipulação
+  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const totalKgHoje = useMemo(() => {
+    return manipulacaoOps
+      .filter(op => {
+        if (op.status !== 'completed') return false;
+        const opDate = op.completedAt ? op.completedAt.split('T')[0] : (op.scheduledDate || (op.createdAt ? op.createdAt.split('T')[0] : ''));
+        return opDate === todayStr;
+      })
+      .reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
+  }, [manipulacaoOps, todayStr]);
 
   // 1. Iniciar Manipulação a partir de uma OSM da Pesagem
   const [startingOpId, setStartingOpId] = useState<string | null>(null);
@@ -337,8 +356,91 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         </header>
       )}
 
+      {/* BARRA DE NAVEGAÇÃO DE ABAS (OPERACIONAL VS DASHBOARD DE PRODUÇÃO) */}
+      <div className={`bg-[#121216]/95 border border-[#27272a] px-4 lg:px-6 py-2.5 z-20 backdrop-blur-md ${embedded ? 'rounded-2xl shadow-md' : 'sticky top-[65px] border-b'}`}>
+        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveViewTab('dashboard')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                activeViewTab === 'dashboard'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Dashboard de Produção</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans font-bold ${
+                activeViewTab === 'dashboard'
+                  ? 'bg-cyan-800 text-cyan-200'
+                  : 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/40'
+              }`}>
+                diária & semanal
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveViewTab('operacao')}
+              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                activeViewTab === 'operacao'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+              }`}
+            >
+              <FlaskConical className="w-4 h-4" />
+              <span>Operação em Tempo Real</span>
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
+                activeViewTab === 'operacao'
+                  ? 'bg-cyan-800 text-white'
+                  : 'bg-[#27272a] text-[#a1a1aa]'
+              }`}>
+                {inProgressManipulacaoOps.length + availablePesagemOps.length}
+              </span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs">
+            <span className="hidden sm:inline text-[#71717a]">Hoje na Manipulação:</span>
+            <span className="font-mono font-bold text-cyan-300 bg-cyan-950/60 px-2.5 py-1 rounded-lg border border-cyan-800/40">
+              {totalKgHoje.toLocaleString('pt-BR')} Kg
+            </span>
+          </div>
+        </div>
+      </div>
+
       {/* CORPO PRINCIPAL */}
       <main className={`flex-1 w-full mx-auto flex flex-col gap-8 ${embedded ? 'p-0 max-w-full' : 'max-w-6xl p-4 sm:p-6 lg:p-8'}`}>
+        {activeViewTab === 'dashboard' ? (
+          <ManipulacaoDashboard
+            ops={ops}
+            onRefresh={() => fetchData(true)}
+            isRefreshing={isRefreshing}
+          />
+        ) : (
+          <>
+            {/* Barra de ação rápida na visão operacional */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 rounded-2xl">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <FlaskConical className="w-4 h-4 text-cyan-400" />
+                  <span>Painel Operacional de Manipulação</span>
+                </h2>
+                <p className="text-xs text-[#a1a1aa] mt-0.5">
+                  Acompanhe os reatores, inicie misturas a partir da Pesagem e encerre com o turno.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setActiveViewTab('dashboard')}
+                className="h-9 px-3 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-cyan-300 hover:text-white text-xs font-bold flex items-center gap-1.5"
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Ver Gráficos & Produção Semanal</span>
+              </Button>
+            </div>
         {/* SEÇÃO 1: OSMS EM ANDAMENTO (DA MANIPULAÇÃO) */}
         {inProgressManipulacaoOps.length > 0 && (
           <section className="space-y-4">
@@ -595,6 +697,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               })}
             </div>
           </section>
+        )}
+          </>
         )}
       </main>
 

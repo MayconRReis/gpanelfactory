@@ -15,6 +15,8 @@ import {
   RotateCcw
 } from 'lucide-react';
 import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { ProductionLine, ProductionOrder } from '../types';
 
 interface AssignLineModalProps {
@@ -23,7 +25,16 @@ interface AssignLineModalProps {
   op: ProductionOrder | null;
   lines: ProductionLine[];
   allOps: ProductionOrder[];
-  onSave: (opId: string, updates: { lineId: string | null; scheduledDate?: string; scheduledShift?: string }) => Promise<void>;
+  onSave: (
+    opId: string, 
+    updates: { 
+      lineId: string | null; 
+      scheduledDate?: string; 
+      scheduledEndDate?: string;
+      scheduledDays?: number;
+      scheduledShift?: string;
+    }
+  ) => Promise<void>;
 }
 
 // Helpers para calcular semana e datas
@@ -64,7 +75,17 @@ export function AssignLineModal({
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedLineId, setSelectedLineId] = useState<string | null>(op.lineId || (lines[0]?.id || 'line-1'));
   const [selectedDate, setSelectedDate] = useState<string>(op.scheduledDate || todayStr);
+  const [selectedDays, setSelectedDays] = useState<number>(op.scheduledDays || 1);
+  const [selectedShift, setSelectedShift] = useState<string>(op.scheduledShift || 'Integral');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Calcula a data final a partir dos dias
+  const calculatedEndDate = useMemo(() => {
+    if (!selectedDate) return '';
+    const d = new Date(selectedDate + 'T12:00:00');
+    d.setDate(d.getDate() + (Math.max(1, selectedDays) - 1));
+    return d.toISOString().split('T')[0];
+  }, [selectedDate, selectedDays]);
 
   // Quick date pickers
   const getRelativeDate = (offsetDays: number) => {
@@ -121,6 +142,9 @@ export function AssignLineModal({
       await onSave(op.id, {
         lineId: selectedLineId,
         scheduledDate: selectedDate,
+        scheduledEndDate: calculatedEndDate,
+        scheduledDays: selectedDays,
+        scheduledShift: selectedShift,
       });
       onClose();
     } catch (err) {
@@ -136,6 +160,8 @@ export function AssignLineModal({
       await onSave(op.id, {
         lineId: null,
         scheduledDate: undefined,
+        scheduledEndDate: undefined,
+        scheduledDays: undefined,
         scheduledShift: undefined,
       });
       onClose();
@@ -318,6 +344,66 @@ export function AssignLineModal({
                 >
                   Próxima Segunda
                 </button>
+              </div>
+            </div>
+
+            {/* DURAÇÃO / DIAS DE ENVASE E TURNO */}
+            <div className="pt-2 border-t border-[#202028] grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wider flex items-center justify-between">
+                  <span>Dias de Envase (Duração) *</span>
+                  <span className="text-[10px] text-blue-400 font-semibold">{selectedDays} {selectedDays === 1 ? 'dia' : 'dias'}</span>
+                </Label>
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={selectedDays}
+                    onChange={(e) => setSelectedDays(Math.max(1, Number(e.target.value)))}
+                    className="bg-[#121218] border-[#2c2c3a] text-xs font-bold text-[#f4f4f5] text-center h-9 w-20"
+                    required
+                  />
+                  <div className="flex items-center gap-1 flex-1">
+                    {[1, 2, 3, 5].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => setSelectedDays(d)}
+                        className={`flex-1 h-9 text-xs font-bold rounded-lg border transition-all ${
+                          selectedDays === d
+                            ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                            : 'bg-[#181820] text-[#a1a1aa] border-[#2c2c38] hover:border-[#3f3f4e]'
+                        }`}
+                      >
+                        {d}d
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {calculatedEndDate && (
+                  <p className="text-[10px] text-[#71717a]">
+                    Até: <strong className="text-emerald-400">{calculatedEndDate}</strong>
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wider">
+                  Turno Previsto
+                </Label>
+                <select
+                  value={selectedShift}
+                  onChange={(e) => setSelectedShift(e.target.value)}
+                  className="w-full h-9 bg-[#121218] border border-[#2c2c3a] rounded-lg px-3 text-xs text-[#f4f4f5] font-semibold focus:outline-none focus:border-blue-500"
+                >
+                  <option value="Integral">Integral (Geral)</option>
+                  <option value="Manhã">Manhã</option>
+                  <option value="Tarde">Tarde</option>
+                </select>
+                <p className="text-[10px] text-[#71717a]">
+                  Alocação na linha de envase
+                </p>
               </div>
             </div>
           </div>

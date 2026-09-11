@@ -24,7 +24,6 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'lines',
       'daily_production',
       'ops',
-      'rotations',
       'users',
       'events',
     ],
@@ -52,22 +51,6 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     description: 'Acesso ao Dashboard Geral e Chão de Fábrica das Linhas de Envase',
     badgeClass: 'bg-emerald-950/90 text-emerald-300 border border-emerald-800/50',
     tabs: ['home', 'envase'],
-  },
-  pcp: {
-    id: 'pcp',
-    name: 'PCP & Planejamento',
-    shortName: 'PCP',
-    description: 'Planejamento e controle de produção: OPs, Linhas, Histórico e Setores',
-    badgeClass: 'bg-indigo-950/90 text-indigo-300 border border-indigo-800/50',
-    tabs: ['home', 'ops', 'lines', 'daily_production', 'pesagem', 'manipulacao', 'envase'],
-  },
-  operador: {
-    id: 'operador',
-    name: 'Operador / Visualizador',
-    shortName: 'Operador',
-    description: 'Acesso visual ao Painel Geral de Produção e Farol de Fábrica',
-    badgeClass: 'bg-zinc-800 text-zinc-300 border border-zinc-700',
-    tabs: ['home'],
   },
   custom: {
     id: 'custom',
@@ -101,9 +84,9 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     description: 'Painel operacional do líder da linha de envase',
   },
   lines: {
-    label: 'Linhas de Produção',
+    label: 'Linhas de Envase & Escala',
     group: 'Gestão & PCP',
-    description: 'Monitoramento ao vivo das 8 linhas de fábrica',
+    description: 'Monitoramento ao vivo das 8 linhas de envase e alocação de líderes',
   },
   daily_production: {
     label: 'Histórico & Gráficos',
@@ -114,11 +97,6 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     label: 'Estoque de OPs',
     group: 'Gestão & PCP',
     description: 'Fila de OPs em carteira e importador CSV',
-  },
-  rotations: {
-    label: 'Escala Semanal',
-    group: 'Gestão & PCP',
-    description: 'Distribuição e rodízio semanal de líderes',
   },
   users: {
     label: 'Equipe & Acessos',
@@ -136,7 +114,7 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
  * Detecta ou recupera a Regra (Rule) do usuário a partir do seu perfil.
  */
 export function getUserRule(profile: UserProfile | null): AccessRule {
-  if (!profile) return 'operador';
+  if (!profile) return 'envase';
   if (profile.rule && ACCESS_RULES[profile.rule]) {
     return profile.rule;
   }
@@ -150,11 +128,6 @@ export function getUserRule(profile: UserProfile | null): AccessRule {
     return 'admin';
   }
 
-  // PCP
-  if (cargo.includes('pcp') || cargo.includes('planeja')) {
-    return 'pcp';
-  }
-
   // Pesagem
   if (area === 'pesagem' || cargo.includes('pesag')) {
     return 'pesagem';
@@ -165,12 +138,12 @@ export function getUserRule(profile: UserProfile | null): AccessRule {
     return 'manipulacao';
   }
 
-  // Envase
+  // Envase / Líder de produção padrão
   if (area === 'envase' || cargo.includes('envas') || role === 'leader') {
     return 'envase';
   }
 
-  return 'operador';
+  return 'envase';
 }
 
 /**
@@ -183,12 +156,12 @@ export function getUserAllowedTabs(profile: UserProfile | null): DashboardTab[] 
 
   // Se houver lista de telas personalizada (custom rule)
   if (profile.allowedScreens && Array.isArray(profile.allowedScreens) && profile.allowedScreens.length > 0) {
-    const screens = new Set<DashboardTab>(['home', ...profile.allowedScreens]);
+    const screens = new Set<DashboardTab>(['home', ...profile.allowedScreens.filter((s: any) => s !== 'rotations')]);
     return Array.from(screens);
   }
 
   const rule = getUserRule(profile);
-  const ruleConfig = ACCESS_RULES[rule] || ACCESS_RULES.operador;
+  const ruleConfig = ACCESS_RULES[rule] || ACCESS_RULES.envase;
   const screens = new Set<DashboardTab>(['home', ...ruleConfig.tabs]);
   return Array.from(screens);
 }

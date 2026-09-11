@@ -77,6 +77,7 @@ import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseRea
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
+import { ShareDashboardModal } from '../components/ShareDashboardModal';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
@@ -85,6 +86,7 @@ import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_ME
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
+import { EnvaseCronograma } from '../components/EnvaseCronograma';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
@@ -100,6 +102,10 @@ export function CoordinatorDashboard() {
   const allowedTabs = React.useMemo(() => getUserAllowedTabs(profile), [profile]);
 
   useEffect(() => {
+    if ((activeTab as string) === 'rotations') {
+      setActiveTab('lines');
+      return;
+    }
     if (!allowedTabs.includes(activeTab)) {
       setActiveTab('home');
     }
@@ -116,12 +122,16 @@ export function CoordinatorDashboard() {
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
 
   // UI state
+  const [linesViewMode, setLinesViewMode] = useState<'monitoring' | 'cronograma' | 'escala'>('monitoring');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState<'all' | 'pending' | 'coordinator' | 'leader'>('all');
   
+  // Modal: Link de visualização pública do Dashboard Geral
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
   // Modal: Nova OP / Editar OP
   const [showNewOpModal, setShowNewOpModal] = useState(false);
   const [editingOp, setEditingOp] = useState<ProductionOrder | null>(null);
@@ -138,6 +148,10 @@ export function CoordinatorDashboard() {
   const [newOpLineId, setNewOpLineId] = useState('');
   const [newOpPackage, setNewOpPackage] = useState('1000');
   const [newOpIndustria, setNewOpIndustria] = useState<'Ybera' | 'Carvalho' | 'Macpaul' | ''>('Ybera');
+  const [newOpScheduledDate, setNewOpScheduledDate] = useState('');
+  const [newOpScheduledEndDate, setNewOpScheduledEndDate] = useState('');
+  const [newOpScheduledDays, setNewOpScheduledDays] = useState('1');
+  const [newOpScheduledShift, setNewOpScheduledShift] = useState<'Manhã' | 'Tarde' | 'Integral' | ''>('Integral');
   const [isSubmittingOp, setIsSubmittingOp] = useState(false);
 
   // Modal: Importar CSV de Estoque
@@ -421,11 +435,19 @@ WHERE email IN (
 
   const handleSaveAssignment = async (
     opId: string, 
-    updates: { lineId: string | null; scheduledDate?: string; scheduledShift?: string }
+    updates: { 
+      lineId: string | null; 
+      scheduledDate?: string; 
+      scheduledEndDate?: string;
+      scheduledDays?: number;
+      scheduledShift?: string;
+    }
   ) => {
     await updateOP(opId, {
       lineId: updates.lineId,
       scheduledDate: updates.scheduledDate,
+      scheduledEndDate: updates.scheduledEndDate,
+      scheduledDays: updates.scheduledDays,
       scheduledShift: updates.scheduledShift,
     });
     showToast('Cronograma e linha da OP atualizados com sucesso!');
@@ -434,7 +456,12 @@ WHERE email IN (
 
   const handleAssignAndStart = async (opId: string, lineId: string) => {
     const today = new Date().toISOString().split('T')[0];
-    await updateOP(opId, { lineId, scheduledDate: today });
+    await updateOP(opId, { 
+      lineId, 
+      scheduledDate: today,
+      scheduledEndDate: today,
+      scheduledDays: 1,
+    });
     await startOP(opId, lineId, profile?.uid || 'coord');
     showToast(`OP vinculada e iniciada com sucesso na linha!`);
     await loadData();
@@ -442,12 +469,17 @@ WHERE email IN (
 
   const handleAssignToQueue = async (opId: string, lineId: string) => {
     const today = new Date().toISOString().split('T')[0];
-    await updateOP(opId, { lineId, scheduledDate: today });
+    await updateOP(opId, { 
+      lineId, 
+      scheduledDate: today,
+      scheduledEndDate: today,
+      scheduledDays: 1,
+    });
     showToast(`OP colocada na fila de produção da linha com sucesso.`);
     await loadData();
   };
 
-  const handleOpenCreateOPModal = (lineId?: string) => {
+  const handleOpenCreateOPModal = (lineId?: string, prefillDate?: string) => {
     setEditingOp(null);
     setNewOpNumber('');
     setNewOpProduct('');
@@ -462,6 +494,11 @@ WHERE email IN (
     setNewOpLineId(lineId || '');
     setNewOpPackage('1000');
     setNewOpIndustria('Ybera');
+    const today = prefillDate || new Date().toISOString().split('T')[0];
+    setNewOpScheduledDate(today);
+    setNewOpScheduledEndDate(today);
+    setNewOpScheduledDays('1');
+    setNewOpScheduledShift('Integral');
     setShowNewOpModal(true);
   };
 
@@ -481,6 +518,10 @@ WHERE email IN (
     setNewOpLineId(op.lineId || '');
     setNewOpPackage(String(op.packageAvailability || 1000));
     setNewOpIndustria((op.industria as any) || 'Ybera');
+    setNewOpScheduledDate(op.scheduledDate || '');
+    setNewOpScheduledDays(op.scheduledDays ? String(op.scheduledDays) : '1');
+    setNewOpScheduledEndDate(op.scheduledEndDate || op.scheduledDate || '');
+    setNewOpScheduledShift((op.scheduledShift as any) || 'Integral');
     setShowNewOpModal(true);
   };
 
@@ -523,6 +564,10 @@ WHERE email IN (
         industria: newOpIndustria || undefined,
         plannedHours: newOpPlannedHours ? Number(newOpPlannedHours) : undefined,
         rejectedQuantity: newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0,
+        scheduledDate: newOpScheduledDate || undefined,
+        scheduledEndDate: newOpScheduledEndDate || undefined,
+        scheduledDays: newOpScheduledDays ? Number(newOpScheduledDays) : undefined,
+        scheduledShift: newOpScheduledShift || undefined,
       };
 
       if (editingOp) {
@@ -547,6 +592,10 @@ WHERE email IN (
       setNewOpPriority('Normal');
       setNewOpLineId('');
       setNewOpIndustria('Ybera');
+      setNewOpScheduledDate('');
+      setNewOpScheduledEndDate('');
+      setNewOpScheduledDays('1');
+      setNewOpScheduledShift('Integral');
       await loadData();
     } catch {
       showToast(editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.', 'error');
@@ -906,7 +955,7 @@ WHERE email IN (
     },
     manipulacao: {
       title: 'Área de Manipulação',
-      subtitle: 'Produção de granéis industriais, controle de misturas e liberação',
+      subtitle: 'Dashboard de produção diária e semanal de granéis industriais, controle de misturas e liberação',
       icon: FlaskConical,
     },
     envase: {
@@ -915,8 +964,8 @@ WHERE email IN (
       icon: Factory,
     },
     lines: {
-      title: 'Linhas de Envase',
-      subtitle: 'Monitoramento em tempo real do chão de fábrica e status operacional',
+      title: 'Linhas de Envase & Escala Operacional',
+      subtitle: 'Monitoramento em tempo real do chão de fábrica, status operacional e alocação de líderes',
       icon: Layers,
     },
     daily_production: {
@@ -928,11 +977,6 @@ WHERE email IN (
       title: 'Estoque de OPs',
       subtitle: 'Gestão de ordens de produção em estoque, lotes industriais e importação CSV',
       icon: Package,
-    },
-    rotations: {
-      title: 'Escala Semanal',
-      subtitle: 'Distribuição e alocação por turno e linha de produção',
-      icon: CalendarDays,
     },
     users: {
       title: 'Equipe & Regras de Acesso (Rules)',
@@ -1043,6 +1087,7 @@ WHERE email IN (
                 goals={goals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
+                onOpenShareModal={() => setIsShareModalOpen(true)}
               />
             )}
 
@@ -1075,37 +1120,104 @@ WHERE email IN (
             {/* ---------------- TELA 2: MONITORAMENTO DE LINHAS ---------------- */}
             {activeTab === 'lines' && (
             <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
+              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                      Chão de Fábrica • Monitoramento em Tempo Real
+                      Linhas de Envase & Escala Operacional
                     </h2>
                     <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       Live Supabase
                     </span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                      lines.filter(l => {
+                        const assigned = Object.keys(rotations).find(k => rotations[k] === l.id) || (rotations as any)[l.id];
+                        return !!assigned;
+                      }).length === lines.length && lines.length > 0
+                        ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/50'
+                        : 'bg-amber-950/60 text-amber-300 border-amber-800/50'
+                    }`}>
+                      {lines.filter(l => {
+                        const assigned = Object.keys(rotations).find(k => rotations[k] === l.id) || (rotations as any)[l.id];
+                        return !!assigned;
+                      }).length}/{lines.length} com Líder
+                    </span>
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
-                    Acompanhe a alocação de líderes, status operacional, OPs em produção e fila de espera por linha.
+                    Monitoramento em tempo real, status das 8 linhas de envase e alocação de líderes de chão de fábrica.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
+
+                <div className="flex items-center gap-2 flex-wrap w-full md:w-auto justify-start md:justify-end">
+                  {/* Alternador de visualização: Linhas de Produção vs Escala de Líderes */}
+                  <div className="flex items-center bg-[#171720] border border-[#2c2c3a] rounded-xl p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setLinesViewMode('monitoring')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                        linesViewMode === 'monitoring'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-[#a1a1aa] hover:text-white'
+                      }`}
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>Linhas ({lines.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLinesViewMode('cronograma')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                        linesViewMode === 'cronograma'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-[#a1a1aa] hover:text-white'
+                      }`}
+                    >
+                      <CalendarDays className="w-3.5 h-3.5" />
+                      <span>Cronograma de Envase</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLinesViewMode('escala')}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                        linesViewMode === 'escala'
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'text-[#a1a1aa] hover:text-white'
+                      }`}
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      <span>Escala de Líderes</span>
+                    </button>
+                  </div>
+
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowNewLeaderModal(true)}
+                    className="h-8.5 px-3 bg-[#171720] hover:bg-[#22222e] border-[#2c2c3a] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
+                    title="Cadastrar novo líder"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-blue-400" />
+                    <span>+ Líder</span>
+                  </Button>
+
                   <Button
                     size="sm"
                     variant="outline"
                     onClick={() => {
                       setAssignStockModalTargetLine(lines[0] || null);
                     }}
-                    className="h-9 px-3 bg-[#171720] hover:bg-[#22222e] border-[#2c2c3a] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
+                    className="h-8.5 px-3 bg-[#171720] hover:bg-[#22222e] border-[#2c2c3a] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
                   >
-                    <Plus className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Vincular OP do Estoque</span>
+                    <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Vincular OP</span>
                   </Button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+              {/* MODO 1: MONITORAMENTO DAS LINHAS */}
+              {linesViewMode === 'monitoring' && (
+                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                 {lines.map(line => {
                   const lineOps = ops.filter(o => o.lineId === line.id);
                   
@@ -1391,6 +1503,229 @@ WHERE email IN (
                   );
                 })}
               </div>
+              )}
+
+              {/* MODO 2: CRONOGRAMA DE ENVASE */}
+              {linesViewMode === 'cronograma' && (
+                <EnvaseCronograma
+                  lines={lines}
+                  ops={ops}
+                  leaders={leaders}
+                  rotations={rotations}
+                  onUpdateOpSchedule={handleSaveAssignment}
+                  onOpenCreateOpModal={(lineId, date) => handleOpenCreateOPModal(lineId, date)}
+                  onOpenEditOpModal={(op) => handleOpenEditOPModal(op)}
+                  onStartOp={async (opId, lineId) => {
+                    await handleAssignAndStart(opId, lineId);
+                  }}
+                />
+              )}
+
+              {/* MODO 3: ESCALA & ALOCAÇÃO DE LÍDERES NAS LINHAS DE ENVASE */}
+              {linesViewMode === 'escala' && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Painel 1: Líderes da Fábrica */}
+                    <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
+                          <Users className="w-3.5 h-3.5" />
+                          Líderes de Produção ({leaders.length})
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setShowNewLeaderModal(true)}
+                          className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
+                        >
+                          <Plus className="w-3 h-3" />
+                          Adicionar
+                        </button>
+                      </div>
+
+                      {leaders.length === 0 ? (
+                        <div className="py-10 px-4 text-center border border-dashed border-[#27272a] rounded-xl space-y-3">
+                          <Users className="w-8 h-8 text-[#52525b] mx-auto opacity-50" />
+                          <div>
+                            <p className="text-xs font-bold text-[#f4f4f5]">Nenhum líder cadastrado</p>
+                            <p className="text-[11px] text-[#71717a] mt-0.5">Cadastre os líderes da fábrica para distribuí-los nas linhas operacionais.</p>
+                          </div>
+                          <Button
+                            size="sm"
+                            onClick={() => setShowNewLeaderModal(true)}
+                            className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl"
+                          >
+                            <Plus className="w-3.5 h-3.5 mr-1" />
+                            Cadastrar Primeiro Líder
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1 custom-scrollbar">
+                          {leaders.map(ldr => {
+                            const currentLineId = rotations[ldr.uid] || rotations[ldr.email] || '';
+                            const isFirstAccess = ldr.status === 'first_access' || ldr.mustChangePassword;
+                            return (
+                              <div key={ldr.uid || ldr.email} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-blue-950/80 border border-blue-800/50 flex items-center justify-center text-xs font-bold text-blue-400 shrink-0">
+                                    {ldr.name?.charAt(0)?.toUpperCase() || 'L'}
+                                  </div>
+                                  <div>
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-sm font-bold text-[#f4f4f5]">{ldr.name}</p>
+                                      {isFirstAccess ? (
+                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1">
+                                          <KeyRound className="w-2.5 h-2.5" />
+                                          1º Acesso Pendente
+                                        </span>
+                                      ) : (
+                                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                          ldr.status === 'active'
+                                            ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
+                                            : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                                        }`}>
+                                          {ldr.status === 'active' ? 'Ativo' : 'Pendente'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-[11px] text-[#71717a] flex items-center gap-2 mt-0.5 flex-wrap">
+                                      <span>{ldr.email}</span>
+                                      {isFirstAccess && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCopyLeaderCredentials(ldr)}
+                                          className="text-[10px] text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                                          title="Copiar e-mail e senha padrão"
+                                        >
+                                          <Copy className="w-2.5 h-2.5" />
+                                          Copiar Acesso
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleResetLeaderPassword(ldr)}
+                                        className="text-[10px] text-orange-400 hover:text-orange-300 underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                                        title="Redefinir senha temporária"
+                                      >
+                                        <KeyRound className="w-2.5 h-2.5" />
+                                        Redefinir Senha
+                                      </button>
+                                      {isFirstAccess && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMarkAsActive(ldr)}
+                                          className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-semibold flex items-center gap-0.5 cursor-pointer"
+                                          title="Marcar colaborador como Ativo diretamente"
+                                        >
+                                          <CheckCircle2 className="w-2.5 h-2.5" />
+                                          Marcar Ativo
+                                        </button>
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                                  <Label className="text-[10px] uppercase font-bold text-[#71717a] shrink-0">Linha:</Label>
+                                  <select
+                                    value={currentLineId}
+                                    onChange={(e) => handleUpdateLeaderRotation(ldr.uid || ldr.email, e.target.value)}
+                                    className="h-8 bg-[#0d0d10] border border-[#282830] text-xs text-[#f4f4f5] rounded-lg px-2.5 font-semibold focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                                  >
+                                    <option value="">Não Alocado</option>
+                                    {lines.map(line => (
+                                      <option key={line.id} value={line.id}>
+                                        {line.name}
+                                      </option>
+                                    ))}
+                                  </select>
+
+                                  {/* Botão Excluir Líder da Escala */}
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => handleOpenDeleteUserModal(ldr)}
+                                    className="h-8 w-8 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors shrink-0"
+                                    title="Excluir Líder"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Painel 2: Mapa de Cobertura das 8 Linhas */}
+                    <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          Mapa de Cobertura das Linhas ({lines.length})
+                        </h3>
+                        <span className="text-[11px] text-[#a1a1aa]">
+                          {lines.filter(l => {
+                            const assigned = Object.keys(rotations).find(k => rotations[k] === l.id) || (rotations as any)[l.id];
+                            return !!assigned;
+                          }).length} de {lines.length} cobertas
+                        </span>
+                      </div>
+
+                      <div className="space-y-3">
+                        {lines.map(line => {
+                          const assignedLeaderId = Object.keys(rotations).find(k => rotations[k] === line.id) || (rotations as any)[line.id];
+                          const leader = assignedLeaderId 
+                            ? leaders.find(l => l.uid === assignedLeaderId || (l.email && l.email.toLowerCase() === assignedLeaderId.toLowerCase()) || l.name?.toLowerCase() === assignedLeaderId.toLowerCase()) 
+                            : null;
+
+                          return (
+                            <div key={line.id} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex items-center justify-between flex-wrap gap-2">
+                              <div>
+                                <p className="text-sm font-bold text-[#f4f4f5]">{line.name}</p>
+                                <span className="text-[10px] text-[#71717a] uppercase font-bold">
+                                  Status: {line.status === 'active' ? 'Em Produção' : line.status === 'paused' ? 'Pausada' : 'Ociosa / Livre'}
+                                </span>
+                              </div>
+
+                              <div className="text-right flex items-center gap-2">
+                                {leader ? (
+                                  <span className="text-xs font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2.5 py-1 rounded-lg flex items-center gap-1">
+                                    <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                                    {leader.name}
+                                  </span>
+                                ) : (
+                                  <span className="text-xs font-semibold text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg">
+                                    Sem Líder Alocado
+                                  </span>
+                                )}
+
+                                {/* Seletor rápido de líder na linha */}
+                                <select
+                                  value={leader?.uid || leader?.email || ''}
+                                  onChange={(e) => {
+                                    if (e.target.value) {
+                                      handleUpdateLeaderRotation(e.target.value, line.id);
+                                    }
+                                  }}
+                                  className="h-7 bg-[#0d0d10] border border-[#282830] text-[11px] text-[#f4f4f5] rounded-md px-2 font-semibold focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                                >
+                                  <option value="">Trocar Líder...</option>
+                                  {leaders.map(ldr => (
+                                    <option key={ldr.uid || ldr.email} value={ldr.uid || ldr.email}>
+                                      {ldr.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1779,200 +2114,6 @@ WHERE email IN (
             </div>
           )}
 
-          {/* ---------------- ABA 3: ESCALA DE LÍDERES ---------------- */}
-          {activeTab === 'rotations' && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                    Escala & Alocação de Líderes de Produção
-                  </h2>
-                  <p className="text-xs text-[#71717a]">
-                    Defina qual Líder de Chão de Fábrica opera cada Linha de Produção (sincronizado em tempo real).
-                  </p>
-                </div>
-                <Button
-                  onClick={() => setShowNewLeaderModal(true)}
-                  className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-blue-900/30"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>+ Cadastrar Líder</span>
-                </Button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
-                      <Users className="w-3.5 h-3.5" />
-                      Líderes Disponíveis ({leaders.length})
-                    </h3>
-                    <button
-                      onClick={() => setShowNewLeaderModal(true)}
-                      className="text-[11px] text-blue-400 hover:text-blue-300 font-semibold hover:underline flex items-center gap-1"
-                    >
-                      <Plus className="w-3 h-3" />
-                      Adicionar
-                    </button>
-                  </div>
-
-                  {leaders.length === 0 ? (
-                    <div className="py-10 px-4 text-center border border-dashed border-[#27272a] rounded-xl space-y-3">
-                      <Users className="w-8 h-8 text-[#52525b] mx-auto opacity-50" />
-                      <div>
-                        <p className="text-xs font-bold text-[#f4f4f5]">Nenhum líder encontrado</p>
-                        <p className="text-[11px] text-[#71717a] mt-0.5">Cadastre os líderes da fábrica para distribuí-los nas linhas operacionais.</p>
-                      </div>
-                      <Button
-                        size="sm"
-                        onClick={() => setShowNewLeaderModal(true)}
-                        className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl"
-                      >
-                        <Plus className="w-3.5 h-3.5 mr-1" />
-                        Cadastrar Primeiro Líder
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1 custom-scrollbar">
-                      {leaders.map(ldr => {
-                        const currentLineId = rotations[ldr.uid] || rotations[ldr.email] || 'line-1';
-                        const isFirstAccess = ldr.status === 'first_access' || ldr.mustChangePassword;
-                        return (
-                          <div key={ldr.uid || ldr.email} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-full bg-blue-950/80 border border-blue-800/50 flex items-center justify-center text-xs font-bold text-blue-400 shrink-0">
-                                {ldr.name?.charAt(0)?.toUpperCase() || 'L'}
-                              </div>
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <p className="text-sm font-bold text-[#f4f4f5]">{ldr.name}</p>
-                                  {isFirstAccess ? (
-                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1">
-                                      <KeyRound className="w-2.5 h-2.5" />
-                                      1º Acesso Pendente
-                                    </span>
-                                  ) : (
-                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                      ldr.status === 'active'
-                                        ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
-                                        : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                                    }`}>
-                                      {ldr.status === 'active' ? 'Ativo' : 'Pendente'}
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-[#71717a] flex items-center gap-2 mt-0.5 flex-wrap">
-                                  <span>{ldr.email}</span>
-                                  {isFirstAccess && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleCopyLeaderCredentials(ldr)}
-                                      className="text-[10px] text-blue-400 hover:text-blue-300 underline font-semibold flex items-center gap-0.5"
-                                      title="Copiar e-mail e senha padrão"
-                                    >
-                                      <Copy className="w-2.5 h-2.5" />
-                                      Copiar Acesso
-                                    </button>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleResetLeaderPassword(ldr)}
-                                    className="text-[10px] text-orange-400 hover:text-orange-300 underline font-semibold flex items-center gap-0.5"
-                                    title="Redefinir senha temporária"
-                                  >
-                                    <KeyRound className="w-2.5 h-2.5" />
-                                    Redefinir Senha
-                                  </button>
-                                  {isFirstAccess && (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleMarkAsActive(ldr)}
-                                      className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-semibold flex items-center gap-0.5"
-                                      title="Marcar colaborador como Ativo diretamente"
-                                    >
-                                      <CheckCircle2 className="w-2.5 h-2.5" />
-                                      Marcar Ativo
-                                    </button>
-                                  )}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                              <Label className="text-[10px] uppercase font-bold text-[#71717a] shrink-0">Linha:</Label>
-                              <select
-                                value={currentLineId}
-                                onChange={(e) => handleUpdateLeaderRotation(ldr.uid || ldr.email, e.target.value)}
-                                className="h-8 bg-[#0d0d10] border border-[#282830] text-xs text-[#f4f4f5] rounded-lg px-2.5 font-semibold focus:ring-1 focus:ring-blue-500 cursor-pointer"
-                              >
-                                {lines.map(line => (
-                                  <option key={line.id} value={line.id}>
-                                    {line.name}
-                                  </option>
-                                ))}
-                              </select>
-
-                              {/* Botão Excluir Líder da Escala */}
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => handleOpenDeleteUserModal(ldr)}
-                                className="h-8 w-8 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors shrink-0"
-                                title="Excluir Líder"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <div className="bg-[#121216] border border-[#222226] rounded-2xl p-5 shadow-xl">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400 mb-4 flex items-center gap-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    Mapa de Cobertura por Linha
-                  </h3>
-
-                  <div className="space-y-3">
-                    {lines.map(line => {
-                      const assignedLeaderId = Object.keys(rotations).find(k => rotations[k] === line.id);
-                      const leader = assignedLeaderId 
-                        ? leaders.find(l => l.uid === assignedLeaderId || (l.email && l.email.toLowerCase() === assignedLeaderId.toLowerCase())) 
-                        : null;
-
-                      return (
-                        <div key={line.id} className="bg-[#17171d] border border-[#26262e] p-3.5 rounded-xl flex items-center justify-between">
-                          <div>
-                            <p className="text-sm font-bold text-[#f4f4f5]">{line.name}</p>
-                            <span className="text-[10px] text-[#71717a] uppercase font-bold">Status: {line.status}</span>
-                          </div>
-
-                          <div className="text-right">
-                            {leader ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2.5 py-1 rounded-lg flex items-center gap-1">
-                                  <UserCheck className="w-3 h-3 text-emerald-400" />
-                                  {leader.name}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-xs font-semibold text-amber-400 bg-amber-950/40 border border-amber-800/40 px-2.5 py-1 rounded-lg">
-                                Sem Líder Alocado
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* ---------------- ABA 4: GESTÃO DE EQUIPE & ACESSOS ---------------- */}
           {activeTab === 'users' && (
             <div className="space-y-4">
@@ -2138,7 +2279,7 @@ WHERE email IN (
                           const isActive = user.status !== 'inactive';
                           const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
                           const activeRule = (user.rule || getUserRule(user)) as AccessRule;
-                          const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.operador;
+                          const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
 
                           return (
                             <tr key={user.uid || user.email} className="hover:bg-[#16161b] transition-colors">
@@ -2950,6 +3091,112 @@ WHERE email IN (
                 </div>
               )}
 
+              {/* CRONOGRAMA DE ENVASE: DATAS E DIAS PREVISTOS */}
+              <div className="p-3 bg-[#0c0c10] border border-[#202028] rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                    <CalendarDays className="w-3.5 h-3.5" />
+                    Cronograma de Envase (Data & Duração em Dias)
+                  </span>
+                  <span className="text-[9px] text-[#71717a]">
+                    Planejamento de produção
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Data Prevista de Início</Label>
+                    <Input
+                      type="date"
+                      value={newOpScheduledDate}
+                      onChange={(e) => {
+                        const newDate = e.target.value;
+                        setNewOpScheduledDate(newDate);
+                        if (newDate && newOpScheduledDays) {
+                          const d = new Date(newDate + 'T12:00:00');
+                          d.setDate(d.getDate() + (Math.max(1, Number(newOpScheduledDays)) - 1));
+                          setNewOpScheduledEndDate(d.toISOString().split('T')[0]);
+                        }
+                      }}
+                      className="bg-[#121218] border-[#25252c] text-xs font-semibold text-[#f4f4f5]"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa] flex items-center justify-between">
+                      <span>Dias Previstos de Envase</span>
+                      <span className="text-blue-400 font-bold">{newOpScheduledDays}d</span>
+                    </Label>
+                    <div className="flex items-center gap-1.5">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={newOpScheduledDays}
+                        onChange={(e) => {
+                          const days = Math.max(1, Number(e.target.value));
+                          setNewOpScheduledDays(String(days));
+                          if (newOpScheduledDate) {
+                            const d = new Date(newOpScheduledDate + 'T12:00:00');
+                            d.setDate(d.getDate() + (days - 1));
+                            setNewOpScheduledEndDate(d.toISOString().split('T')[0]);
+                          }
+                        }}
+                        className="bg-[#121218] border-[#25252c] text-xs font-bold text-[#f4f4f5] text-center"
+                      />
+                      <div className="flex items-center gap-1">
+                        {[1, 2, 3, 5].map((d) => (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() => {
+                              setNewOpScheduledDays(String(d));
+                              if (newOpScheduledDate) {
+                                const dt = new Date(newOpScheduledDate + 'T12:00:00');
+                                dt.setDate(dt.getDate() + (d - 1));
+                                setNewOpScheduledEndDate(dt.toISOString().split('T')[0]);
+                              }
+                            }}
+                            className={`h-9 px-2 text-[10px] font-bold rounded-lg border transition-all ${
+                              newOpScheduledDays === String(d)
+                                ? 'bg-blue-600 text-white border-blue-500'
+                                : 'bg-[#181820] text-[#a1a1aa] border-[#2c2c38] hover:border-[#3f3f4e]'
+                            }`}
+                          >
+                            {d}d
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Data Prevista de Término</Label>
+                    <Input
+                      type="date"
+                      value={newOpScheduledEndDate}
+                      onChange={(e) => setNewOpScheduledEndDate(e.target.value)}
+                      className="bg-[#121218] border-[#25252c] text-xs font-semibold text-emerald-400"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Turno do Envase</Label>
+                    <select
+                      value={newOpScheduledShift}
+                      onChange={(e) => setNewOpScheduledShift(e.target.value as any)}
+                      className="w-full h-9 bg-[#121218] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
+                    >
+                      <option value="Integral">Integral (Geral)</option>
+                      <option value="Manhã">Manhã</option>
+                      <option value="Tarde">Tarde</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
                 <Button
                   type="button"
@@ -3720,6 +3967,12 @@ WHERE email IN (
           </div>
         </div>
       )}
+
+      {/* Modal: Link de visualização pública do Dashboard Geral */}
+      <ShareDashboardModal
+        isOpen={isShareModalOpen}
+        onClose={() => setIsShareModalOpen(false)}
+      />
 
     </div>
   );

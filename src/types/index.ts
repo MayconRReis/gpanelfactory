@@ -5,8 +5,6 @@ export type AccessRule =
   | 'pesagem'         // Líder de Pesagem (Home + Pesagem)
   | 'manipulacao'     // Líder de Manipulação (Home + Manipulação)
   | 'envase'          // Líder de Envase (Home + Chão de Fábrica)
-  | 'pcp'             // PCP & Planejamento (Home + OPs + Linhas + Histórico + Áreas)
-  | 'operador'        // Operador / Consulta (Home)
   | 'custom';         // Personalizado (Seleção manual de telas)
 
 export type DashboardTab = 
@@ -17,7 +15,6 @@ export type DashboardTab =
   | 'lines'
   | 'daily_production'
   | 'ops'
-  | 'rotations'
   | 'users'
   | 'events';
 
@@ -61,6 +58,8 @@ export interface ProductionOrder {
   packageAvailability: number;
   sequence: number;
   scheduledDate?: string;
+  scheduledEndDate?: string;
+  scheduledDays?: number;
   scheduledShift?: string;
   setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
   unidade?: 'Un' | 'Kg' | 'Qtd';

@@ -5,6 +5,7 @@ import { useAuthStore } from './store/authStore';
 import { Login } from './pages/Login';
 import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
 import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
+import { PublicDashboardView } from './pages/PublicDashboardView';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, profile, isLoading } = useAuthStore();
@@ -62,6 +63,8 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<PublicLoginRoute />} />
+          {/* Dashboard Geral somente-leitura, sem login — link gerado pelo ShareDashboardModal */}
+          <Route path="/view" element={<PublicDashboardView />} />
           <Route path="/" element={
             <RequireAuth>
               <MainRoute />
