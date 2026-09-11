@@ -1652,40 +1652,62 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, ...updates } : op);
   persistOps();
 
-  // 2. Update Supabase
-  const dbPayload: any = {};
-  if (updates.number !== undefined) dbPayload.number = updates.number;
-  if (updates.product !== undefined) dbPayload.product = updates.product;
-  if (updates.lote !== undefined) dbPayload.lote = updates.lote;
-  if (updates.plannedQuantity !== undefined) dbPayload.planned_quantity = updates.plannedQuantity;
-  if (updates.producedQuantity !== undefined) dbPayload.produced_quantity = updates.producedQuantity;
-  if (updates.granel !== undefined) dbPayload.granel = updates.granel;
-  if (updates.priority !== undefined) dbPayload.priority = updates.priority;
-  if (updates.status !== undefined) dbPayload.status = updates.status;
-  if (updates.lineId !== undefined) dbPayload.line_id = updates.lineId;
-  if (updates.leaderId !== undefined) dbPayload.leader_id = updates.leaderId;
-  if (updates.packageAvailability !== undefined) dbPayload.package_availability = updates.packageAvailability;
-  if (updates.sequence !== undefined) dbPayload.sequence = updates.sequence;
-  if (updates.scheduledDate !== undefined) dbPayload.scheduled_date = updates.scheduledDate;
-  if (updates.scheduledEndDate !== undefined) dbPayload.scheduled_end_date = updates.scheduledEndDate;
-  if (updates.scheduledDays !== undefined) dbPayload.scheduled_days = updates.scheduledDays;
-  if (updates.scheduledShift !== undefined) dbPayload.scheduled_shift = updates.scheduledShift;
-  if (updates.setor !== undefined) dbPayload.setor = updates.setor;
-  if (updates.unidade !== undefined) dbPayload.unidade = updates.unidade;
-  if (updates.rejectedQuantity !== undefined) dbPayload.rejected_quantity = updates.rejectedQuantity;
-  if (updates.plannedHours !== undefined) dbPayload.planned_hours = updates.plannedHours;
-  if (updates.tipoDocumento !== undefined) dbPayload.tipo_documento = updates.tipoDocumento;
-  if (updates.industria !== undefined) dbPayload.industria = updates.industria;
-  if (updates.completedAt !== undefined) dbPayload.completed_at = updates.completedAt;
-  if (updates.finishedShift !== undefined) dbPayload.finished_shift = updates.finishedShift;
+  // 2. Update Supabase — payload "completo" para production_orders e um
+  // payload restrito para ops (mesma distinção já feita em createOP:
+  // scheduled_end_date/scheduled_days/completed_at não existem em `ops`,
+  // só foram adicionadas manualmente em `production_orders`). Antes este
+  // payload era único e idêntico para as duas tabelas — qualquer updateOP
+  // que incluísse scheduledEndDate/scheduledDays (como ao vincular uma OP a
+  // uma linha) derrubava o PATCH em `ops` com 400 (coluna inexistente).
+  const fullPayload: any = {};
+  if (updates.number !== undefined) fullPayload.number = updates.number;
+  if (updates.product !== undefined) fullPayload.product = updates.product;
+  if (updates.lote !== undefined) fullPayload.lote = updates.lote;
+  if (updates.plannedQuantity !== undefined) fullPayload.planned_quantity = updates.plannedQuantity;
+  if (updates.producedQuantity !== undefined) fullPayload.produced_quantity = updates.producedQuantity;
+  if (updates.granel !== undefined) fullPayload.granel = updates.granel;
+  if (updates.priority !== undefined) fullPayload.priority = updates.priority;
+  if (updates.status !== undefined) fullPayload.status = updates.status;
+  if (updates.lineId !== undefined) fullPayload.line_id = updates.lineId;
+  if (updates.leaderId !== undefined) fullPayload.leader_id = updates.leaderId;
+  if (updates.packageAvailability !== undefined) fullPayload.package_availability = updates.packageAvailability;
+  if (updates.sequence !== undefined) fullPayload.sequence = updates.sequence;
+  if (updates.scheduledDate !== undefined) fullPayload.scheduled_date = updates.scheduledDate;
+  if (updates.scheduledEndDate !== undefined) fullPayload.scheduled_end_date = updates.scheduledEndDate;
+  if (updates.scheduledDays !== undefined) fullPayload.scheduled_days = updates.scheduledDays;
+  if (updates.scheduledShift !== undefined) fullPayload.scheduled_shift = updates.scheduledShift;
+  if (updates.setor !== undefined) fullPayload.setor = updates.setor;
+  if (updates.unidade !== undefined) fullPayload.unidade = updates.unidade;
+  if (updates.rejectedQuantity !== undefined) fullPayload.rejected_quantity = updates.rejectedQuantity;
+  if (updates.plannedHours !== undefined) fullPayload.planned_hours = updates.plannedHours;
+  if (updates.tipoDocumento !== undefined) fullPayload.tipo_documento = updates.tipoDocumento;
+  if (updates.industria !== undefined) fullPayload.industria = updates.industria;
+  if (updates.completedAt !== undefined) fullPayload.completed_at = updates.completedAt;
+  if (updates.finishedShift !== undefined) fullPayload.finished_shift = updates.finishedShift;
+
+  // Payload restrito às colunas confirmadas em `ops` — sem
+  // scheduled_end_date, scheduled_days e completed_at.
+  const opsPayload: any = { ...fullPayload };
+  delete opsPayload.scheduled_end_date;
+  delete opsPayload.scheduled_days;
+  delete opsPayload.completed_at;
 
   try {
-    await Promise.allSettled([
-      supabase.from('production_orders').update(dbPayload).eq('id', opId),
-      supabase.from('ops').update(dbPayload).eq('id', opId),
-    ]);
+    const resProductionOrders = await supabase.from('production_orders').update(fullPayload).eq('id', opId);
+    if (resProductionOrders.error) {
+      console.error(`[updateOP] Falha ao atualizar production_orders (OP ${opId}):`, resProductionOrders.error.message);
+    }
   } catch (err) {
-    console.warn('Atualização de OP no Supabase:', err);
+    console.error(`[updateOP] Erro inesperado ao atualizar production_orders (OP ${opId}):`, err);
+  }
+
+  try {
+    const resOps = await supabase.from('ops').update(opsPayload).eq('id', opId);
+    if (resOps.error) {
+      console.error(`[updateOP] Falha ao atualizar ops (OP ${opId}):`, resOps.error.message);
+    }
+  } catch (err) {
+    console.error(`[updateOP] Erro inesperado ao atualizar ops (OP ${opId}):`, err);
   }
 };
 
