@@ -1957,13 +1957,20 @@ export const saveLeaderRotation = async (
 // ---------------- PAUSE REASONS & EVENTS ----------------
 export const getPauseReasons = async (): Promise<PauseReason[]> => {
   try {
-    const { data, error } = await supabase.from('pause_reasons').select('*').order('name', { ascending: true });
+    // pause_reasons não está no schema.sql (tabela criada manualmente no
+    // Supabase). Colunas reais confirmadas: id (uuid), reason (text),
+    // description (text), created_at — não existe "name" nem "category".
+    // Ordenamos em JS (em vez de .order('reason', ...) no Supabase) para não
+    // depender de mais nenhuma suposição sobre o schema real dessa tabela.
+    const { data, error } = await supabase.from('pause_reasons').select('*');
     if (data && data.length > 0 && !error) {
-      return data.map((d: any) => ({
-        id: String(d.id),
-        name: d.name || d.reason || 'Pausa Operacional',
-        category: d.category || 'Geral',
-      }));
+      return data
+        .map((d: any) => ({
+          id: String(d.id),
+          name: d.reason || d.description || 'Pausa Operacional',
+          category: d.category || 'Geral',
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
     }
   } catch (err) {
     console.warn('Busca de motivos de pausa no Supabase:', err);
