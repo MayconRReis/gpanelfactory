@@ -21,7 +21,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'pesagem',
       'manipulacao',
       'envase',
-      'lines',
+      'cronograma',
       'daily_production',
       'ops',
       'users',
@@ -83,10 +83,10 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     group: 'Processos Produtivos',
     description: 'Painel operacional do líder da linha de envase',
   },
-  lines: {
-    label: 'Linhas de Envase & Escala',
+  cronograma: {
+    label: 'Cronograma de Envase',
     group: 'Gestão & PCP',
-    description: 'Monitoramento ao vivo das 8 linhas de envase e alocação de líderes',
+    description: 'Quadro estilo Kanban para atribuir e mover OPs entre as linhas de envase',
   },
   daily_production: {
     label: 'Histórico & Gráficos',

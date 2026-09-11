@@ -27,7 +27,7 @@ interface HomeDashboardProps {
   events: ProductionEvent[];
   rotations?: Record<string, string>;
   goals?: MonthlyGoal[];
-  onNavigateTab?: (tab: 'lines' | 'ops' | 'users' | 'events' | 'daily_production') => void;
+  onNavigateTab?: (tab: 'cronograma' | 'ops' | 'users' | 'events' | 'daily_production') => void;
   onNewOp?: () => void;
   onOpenShareModal?: () => void;
   isReadOnly?: boolean;
@@ -667,7 +667,7 @@ export function HomeDashboard({
             return (
               <div
                 key={line.id}
-                onClick={() => !isReadOnly && onNavigateTab && onNavigateTab('lines')}
+                onClick={() => !isReadOnly && onNavigateTab && onNavigateTab('cronograma')}
                 className={`bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col justify-between transition-all duration-150 ${
                   !isReadOnly && onNavigateTab
                     ? 'cursor-pointer hover:border-blue-500/50 hover:bg-[#15151c]'

@@ -12,7 +12,7 @@ export type DashboardTab =
   | 'pesagem'
   | 'manipulacao'
   | 'envase'
-  | 'lines'
+  | 'cronograma'
   | 'daily_production'
   | 'ops'
   | 'users'

@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   LayoutDashboard,
-  Layers,
   Package,
   ShieldCheck,
   History,
@@ -15,6 +14,7 @@ import {
   BarChart3,
   Scale,
   FlaskConical,
+  Kanban,
 } from 'lucide-react';
 import { UserProfile, DashboardTab } from '../types';
 import { getUserAllowedTabs, getUserRule, ACCESS_RULES } from '../lib/permissions';
@@ -101,12 +101,12 @@ export function Sidebar({
       section: 'PROCESSOS',
     },
     {
-      id: 'lines' as DashboardTab,
-      label: 'Linhas de Envase',
-      icon: Layers,
+      id: 'cronograma' as DashboardTab,
+      label: 'Cronograma de Envase',
+      icon: Kanban,
       badge: linesCount > 0 ? `${linesCount}` : null,
       subBadge: activeLinesCount > 0 ? `${activeLinesCount} ativas` : null,
-      description: 'Monitoramento & Escala',
+      description: 'Quadro Kanban por Linha',
       section: 'GESTÃO & PCP',
     },
     {

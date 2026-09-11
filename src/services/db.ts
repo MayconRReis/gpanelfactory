@@ -1453,38 +1453,12 @@ export const createOP = async (newOpData: {
   // sequencialmente, com log de erro por tabela. NÃO usar Promise.allSettled aqui:
   // uma falha silenciosa em uma das duas é exatamente a causa da dessincronização
   // entre elas (ver investigação em ops vs production_orders).
-  const fullPayload: any = {
-    id: newOp.id,
-    number: newOp.number,
-    product: newOp.product,
-    lote: newOp.lote,
-    planned_quantity: newOp.plannedQuantity,
-    produced_quantity: newOp.producedQuantity,
-    granel: newOp.granel,
-    priority: newOp.priority,
-    status: newOp.status,
-    leader_id: newOp.leaderId || null,
-    line_id: newOp.lineId,
-    package_availability: newOp.packageAvailability,
-    sequence: newOp.sequence,
-    scheduled_date: newOp.scheduledDate,
-    scheduled_end_date: newOp.scheduledEndDate,
-    scheduled_days: newOp.scheduledDays,
-    scheduled_shift: newOp.scheduledShift,
-    setor: newOp.setor || null,
-    unidade: newOp.unidade || null,
-    rejected_quantity: newOp.rejectedQuantity || 0,
-    planned_hours: newOp.plannedHours ?? null,
-    tipo_documento: newOp.tipoDocumento || 'OP',
-    industria: newOp.industria || null,
-    completed_at: newOp.completedAt || null,
-    created_at: newOp.createdAt,
-  };
-
-  // Payload restrito às colunas que existem confirmadamente em `ops` (schema.sql +
-  // migrações conhecidas). NÃO inclui scheduled_end_date/scheduled_days/completed_at,
-  // que só foram adicionadas manualmente em `production_orders` — inserir esses campos
-  // aqui provavelmente falharia. Se `ops` já tiver essas colunas em produção, ajuste esta lista.
+  //
+  // Payload restrito às colunas que existem confirmadamente em `ops` E em
+  // `production_orders` (confirmado em produção: `production_orders` espelha
+  // exatamente as mesmas colunas de `ops`, sem scheduled_end_date/scheduled_days/
+  // completed_at — ver o erro "Could not find the 'scheduled_days' column of
+  // 'production_orders'"). As DUAS tabelas recebem este mesmo payload restrito.
   const opsPayload: any = {
     id: newOp.id,
     number: newOp.number,
@@ -1511,7 +1485,7 @@ export const createOP = async (newOpData: {
   };
 
   try {
-    const resProductionOrders = await supabase.from('production_orders').insert(fullPayload);
+    const resProductionOrders = await supabase.from('production_orders').insert(opsPayload);
     if (resProductionOrders.error) {
       console.error(`[createOP] Falha ao gravar em production_orders (OP ${newOp.id}):`, resProductionOrders.error.message);
     }
@@ -1687,13 +1661,17 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
 
   // Payload restrito às colunas confirmadas em `ops` — sem
   // scheduled_end_date, scheduled_days e completed_at.
+  // `production_orders` foi confirmado em produção como espelhando exatamente
+  // as mesmas colunas de `ops` (o erro "Could not find the 'scheduled_days'
+  // column of 'production_orders'" provou isso) — por isso as DUAS tabelas
+  // recebem o mesmo payload restrito, e não mais o fullPayload.
   const opsPayload: any = { ...fullPayload };
   delete opsPayload.scheduled_end_date;
   delete opsPayload.scheduled_days;
   delete opsPayload.completed_at;
 
   try {
-    const resProductionOrders = await supabase.from('production_orders').update(fullPayload).eq('id', opId);
+    const resProductionOrders = await supabase.from('production_orders').update(opsPayload).eq('id', opId);
     if (resProductionOrders.error) {
       console.error(`[updateOP] Falha ao atualizar production_orders (OP ${opId}):`, resProductionOrders.error.message);
     }

@@ -196,6 +196,22 @@ export function DailyProductionHistory({
     return map;
   }, [lines]);
 
+  // ---------------- KPIs RÁPIDOS DE ENVASE (fila / em produção / concluídas) ----------------
+  // "Fila" e "Em Produção" refletem o status atual (ao vivo) das OPs de Envase;
+  // "Concluídas" é escopado ao dia selecionado, coerente com a navegação de data da tela.
+  const envaseOpsAll = useMemo(() => {
+    return ops.filter(o => !o.setor || o.setor === 'Envase');
+  }, [ops]);
+
+  const envaseQuickStats = useMemo(() => {
+    const queued = envaseOpsAll.filter(o => o.status === 'pending').length;
+    const inProgress = envaseOpsAll.filter(o => o.status === 'in_progress').length;
+    const completedToday = envaseOpsAll.filter(
+      o => o.status === 'completed' && getOpDateString(o) === selectedDate
+    ).length;
+    return { queued, inProgress, completedToday };
+  }, [envaseOpsAll, selectedDate]);
+
   // ---------------- 1. DADOS DE TODAS AS OPS NO DIA SELECIONADO ----------------
   const opsOfDay = useMemo(() => {
     return ops.filter((op) => {
@@ -612,7 +628,43 @@ export function DailyProductionHistory({
 
   return (
     <div className="space-y-6">
-      
+
+      {/* ── 3 CARDS RÁPIDOS DE STATUS DO ENVASE ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="bg-[#121216] border border-blue-900/40 rounded-2xl p-4 flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-bold text-[#a1a1aa] uppercase tracking-wider">OPs na Fila</p>
+            <p className="text-2xl font-black text-blue-400 mt-1">{envaseQuickStats.queued}</p>
+            <p className="text-[10px] text-[#71717a] mt-0.5">Aguardando início no envase</p>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-blue-600/15 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
+            <Package className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="bg-[#121216] border border-emerald-900/40 rounded-2xl p-4 flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-bold text-[#a1a1aa] uppercase tracking-wider">Em Produção</p>
+            <p className="text-2xl font-black text-emerald-400 mt-1">{envaseQuickStats.inProgress}</p>
+            <p className="text-[10px] text-[#71717a] mt-0.5">Linhas de envase produzindo agora</p>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-emerald-600/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+            <Layers className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="bg-[#121216] border border-purple-900/40 rounded-2xl p-4 flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-bold text-[#a1a1aa] uppercase tracking-wider">Concluídas</p>
+            <p className="text-2xl font-black text-purple-400 mt-1">{envaseQuickStats.completedToday}</p>
+            <p className="text-[10px] text-[#71717a] mt-0.5 capitalize">{isToday ? 'Finalizadas hoje' : `Finalizadas em ${formattedDateTitle}`}</p>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-purple-600/15 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0">
+            <CheckCircle2 className="w-5 h-5" />
+          </div>
+        </div>
+      </div>
+
       {/* ── SEÇÃO SUPERIOR: BARRA DE CONTROLE DE DATA E MODOS ── */}
       <div className="bg-[#111116] border border-[#202028] rounded-2xl p-4 sm:p-5 shadow-lg">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
