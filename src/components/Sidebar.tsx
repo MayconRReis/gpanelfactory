@@ -5,7 +5,7 @@ import {
   Package,
   ShieldCheck,
   History,
-  Plus,
+  Target,
   RefreshCw,
   LogOut,
   Factory,
@@ -30,7 +30,7 @@ interface SidebarProps {
   usersCount: number;
   pendingCount: number;
   profile: UserProfile | null;
-  onNewOp: () => void;
+  onOpenGoals: () => void;
   onRefresh: () => void;
   onSignOut: () => void;
   isRefreshing: boolean;
@@ -49,7 +49,7 @@ export function Sidebar({
   usersCount,
   pendingCount,
   profile,
-  onNewOp,
+  onOpenGoals,
   onRefresh,
   onSignOut,
   isRefreshing,
@@ -62,7 +62,9 @@ export function Sidebar({
   const ruleConfig = ACCESS_RULES[userRule] || ACCESS_RULES.envase;
   const allowedTabs = getUserAllowedTabs(profile);
 
-  const canCreateOp = allowedTabs.includes('ops') || userRule === 'admin';
+  // Edição de metas (mensal única + diária por linha) é restrita ao
+  // Coordenador Geral — só ele tem permissão de escrita nessas tabelas via RLS.
+  const canManageGoals = userRule === 'admin';
 
   // Todos os itens do menu unificado do GPanel Factory
   const allMenuItems = [
@@ -199,21 +201,23 @@ export function Sidebar({
         )}
       </div>
 
-      {/* Quick Action Button (Nova OP) - apenas se usuário tem permissão */}
-      {canCreateOp && (
+      {/* Quick Action Button (Metas de Produção) - apenas Coordenador Geral */}
+      {/* OPs agora são cadastradas pela tela "Estoque de OPs" — este botão de
+          atalho passou a abrir a edição de metas fixas (mensal + diária). */}
+      {canManageGoals && (
         <div className="p-3 border-b border-[#18181f]">
           <button
             onClick={() => {
-              onNewOp();
+              onOpenGoals();
               if (isMobileView && setMobileOpen) setMobileOpen(false);
             }}
             className={`w-full bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(37,99,235,0.25)] transition-all ${
               isCollapsed && !isMobileView ? 'px-0' : 'px-3'
             }`}
-            title="Criar Nova Ordem de Produção"
+            title="Editar Metas de Produção (Mensal e Diária)"
           >
-            <Plus className="w-4 h-4 shrink-0" />
-            {(!isCollapsed || isMobileView) && <span>Nova OP</span>}
+            <Target className="w-4 h-4 shrink-0" />
+            {(!isCollapsed || isMobileView) && <span>Metas de Produção</span>}
           </button>
         </div>
       )}

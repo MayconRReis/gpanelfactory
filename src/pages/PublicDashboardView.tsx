@@ -16,9 +16,11 @@ import {
   getLines,
   getAllOPs,
   getRecentEvents,
-  getMonthlyGoals
+  getMonthlyGoals,
+  getLineDailyGoals,
+  getFactoryMonthlyGoal
 } from '../services/db';
-import { ProductionLine, ProductionOrder, ProductionEvent, MonthlyGoal } from '../types';
+import { ProductionLine, ProductionOrder, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
 import { supabase } from '../lib/supabase';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { useNavigate } from 'react-router-dom';
@@ -30,6 +32,8 @@ export function PublicDashboardView() {
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [events, setEvents] = useState<ProductionEvent[]>([]);
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
+  const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
+  const [factoryMonthlyGoal, setFactoryMonthlyGoal] = useState<number | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -40,20 +44,25 @@ export function PublicDashboardView() {
     if (!isSilent) setIsRefreshing(true);
     try {
       const currentYear = new Date().getFullYear();
+      const currentMonth = new Date().getMonth() + 1;
       // Importante: NÃO buscar getLeaders/getAllUsers/getAllRotations aqui — essa
       // tela é pública, sem login, e esses dados vêm de `profiles` (nome, e-mail,
       // cargo, e até a senha temporária de quem ainda não trocou a senha). O
       // Dashboard Geral só precisa de OPs/linhas/eventos/metas para exibir os KPIs.
-      const [ls, os, evts, gls] = await Promise.all([
+      const [ls, os, evts, gls, ldgs, fmg] = await Promise.all([
         getLines(),
         getAllOPs(),
         getRecentEvents(),
         getMonthlyGoals(currentYear),
+        getLineDailyGoals(),
+        getFactoryMonthlyGoal(currentYear, currentMonth),
       ]);
       setLines(ls || []);
       setOps(os || []);
       setEvents(evts || []);
       setGoals(gls || []);
+      setLineDailyGoals(ldgs || []);
+      setFactoryMonthlyGoal(fmg);
       setLastUpdated(new Date());
     } catch (err) {
       console.warn('Erro ao carregar dados do dashboard público:', err);
@@ -84,6 +93,12 @@ export function PublicDashboardView() {
         loadData(true);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => {
+        loadData(true);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'line_daily_goals' }, () => {
+        loadData(true);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'factory_monthly_goal' }, () => {
         loadData(true);
       })
       .subscribe();
@@ -221,6 +236,8 @@ export function PublicDashboardView() {
               events={events}
               rotations={{}}
               goals={goals}
+              factoryMonthlyGoal={factoryMonthlyGoal}
+              lineDailyGoals={lineDailyGoals}
               isReadOnly={true}
             />
           )}

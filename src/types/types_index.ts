@@ -84,6 +84,28 @@ export interface MonthlyGoal {
   updatedAt: string;
 }
 
+/**
+ * Meta diária fixa de uma linha de produção (quantidade/dia). Fica fixa até
+ * que seja atualizada manualmente — sem vínculo com mês/ano, diferente de
+ * MonthlyGoal/FactoryMonthlyGoal.
+ */
+export interface LineDailyGoal {
+  lineId: string;
+  goalQuantity: number;
+  updatedAt: string;
+}
+
+/**
+ * Meta mensal ÚNICA da fábrica inteira (não por linha) — ex: 450.000 un no
+ * mês. Fica fixa até ser atualizada manualmente pelo Coordenador Geral.
+ */
+export interface FactoryMonthlyGoal {
+  year: number;
+  month: number;
+  goalQuantity: number;
+  updatedAt: string;
+}
+
 export type EventType = 'STARTED' | 'PAUSED' | 'RESUMED' | 'FINISHED' | 'QUANTITY_REPORTED';
 
 export interface ProductionEvent {

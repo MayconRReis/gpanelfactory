@@ -69,15 +69,18 @@ import {
   generateTemporaryPassword,
   generateLeaderEmail,
   getMonthlyGoals,
+  getLineDailyGoals,
+  getFactoryMonthlyGoal,
   getTipoDocumento,
   resetLeaderPassword,
   updateUserRule
 } from '../services/db';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, AccessRule } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, AccessRule } from '../types';
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { ShareDashboardModal } from '../components/ShareDashboardModal';
+import { GoalsModal } from '../components/GoalsModal';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
@@ -120,6 +123,8 @@ export function CoordinatorDashboard() {
   const [events, setEvents] = useState<ProductionEvent[]>([]);
   const [pauseReasons, setPauseReasons] = useState<PauseReason[]>([]);
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
+  const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
+  const [factoryMonthlyGoal, setFactoryMonthlyGoal] = useState<number | null>(null);
 
   // UI state
   const [linesViewMode, setLinesViewMode] = useState<'monitoring' | 'cronograma' | 'escala'>('monitoring');
@@ -131,6 +136,9 @@ export function CoordinatorDashboard() {
   
   // Modal: Link de visualização pública do Dashboard Geral
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+
+  // Modal: Metas de Produção (mensal única da fábrica + diária por linha)
+  const [showGoalsModal, setShowGoalsModal] = useState(false);
 
   // Modal: Nova OP / Editar OP
   const [showNewOpModal, setShowNewOpModal] = useState(false);
@@ -224,7 +232,8 @@ export function CoordinatorDashboard() {
   const loadData = async () => {
     try {
       const currentYear = new Date().getFullYear();
-      const [ls, os, lds, usrs, rots, evts, prs, gls] = await Promise.all([
+      const currentMonth = new Date().getMonth() + 1;
+      const [ls, os, lds, usrs, rots, evts, prs, gls, ldgs, fmg] = await Promise.all([
         getLines(),
         getAllOPs(),
         getLeaders(),
@@ -233,6 +242,8 @@ export function CoordinatorDashboard() {
         getRecentEvents(),
         getPauseReasons(),
         getMonthlyGoals(currentYear),
+        getLineDailyGoals(),
+        getFactoryMonthlyGoal(currentYear, currentMonth),
       ]);
       setLines(ls);
       setOps(os);
@@ -242,6 +253,8 @@ export function CoordinatorDashboard() {
       setEvents(evts);
       setPauseReasons(prs);
       setGoals(gls || []);
+      setLineDailyGoals(ldgs || []);
+      setFactoryMonthlyGoal(fmg);
     } catch (e) {
       console.warn('Erro ao carregar dados do coordenador:', e);
     }
@@ -262,6 +275,8 @@ export function CoordinatorDashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'line_daily_goals' }, () => loadData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'factory_monthly_goal' }, () => loadData())
       .subscribe();
 
     // Fallback sync every 4 seconds
@@ -1020,7 +1035,7 @@ WHERE email IN (
         usersCount={allUsers.length}
         pendingCount={pendingUsersCount}
         profile={profile}
-        onNewOp={() => handleOpenCreateOPModal()}
+        onOpenGoals={() => setShowGoalsModal(true)}
         onRefresh={handleManualRefresh}
         onSignOut={() => signOut()}
         isRefreshing={isRefreshing}
@@ -1085,6 +1100,8 @@ WHERE email IN (
                 events={events}
                 rotations={rotations}
                 goals={goals}
+                factoryMonthlyGoal={factoryMonthlyGoal}
+                lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onNewOp={() => setShowNewOpModal(true)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
@@ -3972,6 +3989,15 @@ WHERE email IN (
       <ShareDashboardModal
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
+      />
+
+      {/* Modal: Metas de Produção (mensal única da fábrica + diária por linha) */}
+      <GoalsModal
+        isOpen={showGoalsModal}
+        onClose={() => setShowGoalsModal(false)}
+        lines={lines}
+        factoryMonthlyGoal={factoryMonthlyGoal}
+        lineDailyGoals={lineDailyGoals}
       />
 
     </div>

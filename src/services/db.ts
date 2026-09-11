@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, AccessRule, DashboardTab } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab } from '../types';
 
 /**
  * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
@@ -1751,6 +1751,112 @@ export const saveMonthlyGoal = async (
     return true;
   } catch (err) {
     console.error('Erro ao salvar meta mensal:', err);
+    return false;
+  }
+};
+
+/**
+ * Busca as metas diárias fixas por linha (independe de mês/ano — fica fixa
+ * até ser atualizada manualmente).
+ */
+export const getLineDailyGoals = async (): Promise<LineDailyGoal[]> => {
+  try {
+    const { data, error } = await supabase.from('line_daily_goals').select('*');
+    if (data && !error) {
+      return data.map((d: any) => ({
+        lineId: String(d.line_id),
+        goalQuantity: Number(d.goal_quantity || 0),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas diárias por linha no Supabase:', err);
+  }
+  return [];
+};
+
+/**
+ * Salva (upsert) a meta diária fixa de uma linha. Fica fixa até que essa
+ * função seja chamada novamente para a mesma linha.
+ */
+export const saveLineDailyGoal = async (lineId: string, goalQuantity: number): Promise<boolean> => {
+  try {
+    const payload = {
+      line_id: lineId,
+      goal_quantity: goalQuantity,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('line_daily_goals')
+      .upsert(payload, { onConflict: 'line_id' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta diária da linha no Supabase:', error);
+      return false;
+    }
+
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta diária da linha:', err);
+    return false;
+  }
+};
+
+/**
+ * Busca a meta mensal ÚNICA da fábrica (não por linha) para um mês/ano.
+ * Retorna null se ainda não houver meta cadastrada (o app deve decidir o
+ * valor padrão de exibição nesse caso).
+ */
+export const getFactoryMonthlyGoal = async (year: number, month: number): Promise<number | null> => {
+  try {
+    const { data, error } = await supabase
+      .from('factory_monthly_goal')
+      .select('*')
+      .eq('year', year)
+      .eq('month', month)
+      .maybeSingle();
+
+    if (data && !error) {
+      return Number(data.goal_quantity || 0);
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar meta mensal da fábrica no Supabase:', err);
+  }
+  return null;
+};
+
+/**
+ * Salva (upsert) a meta mensal única da fábrica para um mês/ano. Fica fixa
+ * até ser atualizada novamente.
+ */
+export const saveFactoryMonthlyGoal = async (
+  year: number,
+  month: number,
+  goalQuantity: number
+): Promise<boolean> => {
+  try {
+    const payload = {
+      year,
+      month,
+      goal_quantity: goalQuantity,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('factory_monthly_goal')
+      .upsert(payload, { onConflict: 'year, month' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta mensal da fábrica no Supabase:', error);
+      return false;
+    }
+
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta mensal da fábrica:', err);
     return false;
   }
 };

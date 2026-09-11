@@ -477,37 +477,31 @@ export function HomeDashboard({
         {/* ── 2. OS 6 VIBRANT CARDS DE MÉTRICAS OPERACIONAIS ── */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           
-          {/* CARD 1: AZUL (Total de OPs Ativas) */}
-          <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          {/* CARD 1: AZUL (OPs Ativas) */}
+          <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="text-[10px] font-black uppercase tracking-wider text-blue-100">
               OPS ATIVAS
             </div>
             <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
               {ops.length}
             </div>
-            <div className="text-[10px] text-blue-100/90 font-medium truncate">
-              considerando filtros aplicados
-            </div>
           </div>
 
-          {/* CARD 2: VERMELHO (Estado Crítico / Atrasadas) */}
-          <div className="bg-[#dc2626] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          {/* CARD 2: VERMELHO (Alta Prioridade) */}
+          <div className="bg-[#dc2626] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="text-[10px] font-black uppercase tracking-wider text-red-100">
-              ESTADO CRÍTICO
+              ALTA PRIORIDADE
             </div>
             <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
               {totalDelayedOpsCount}
             </div>
-            <div className="text-[10px] text-red-100/90 font-medium truncate">
-              item de alta prioridade
-            </div>
           </div>
 
-          {/* CARD 3: LARANJA (Tempo Ocioso Dia / Total / Em Atenção) */}
-          <div className="bg-[#f97316] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          {/* CARD 3: ÂMBAR (Tempo Ocioso) */}
+          <div className="bg-[#d97706] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
-              <span className="text-[10px] font-black uppercase tracking-wider text-orange-100 truncate">
-                TEMPO OCIOSO 
+              <span className="text-[10px] font-black uppercase tracking-wider text-amber-100 truncate">
+                TEMP OCIOSO
               </span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
@@ -521,15 +515,13 @@ export function HomeDashboard({
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
               {idleHoursToday}h {idleMinutesToday}m
             </div>
-            <div className="text-[10px] text-orange-100/90 font-medium truncate">
-            </div>
           </div>
 
-          {/* CARD 4: VERDE ESMERALDA (Tempo de Trabalho Dia / Total) */}
-          <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          {/* CARD 4: VERDE ESMERALDA (Tempo Trabalhado) */}
+          <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
-                TEMPO TRABALHO
+                TEMP TRABALHADO
               </span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
@@ -540,44 +532,28 @@ export function HomeDashboard({
                 </span>
               )}
             </div>
-            <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono flex items-center justify-between">
-              <span>{workHoursToday}h {workMinutesToday}m</span>
-            </div>
-            <div className="text-[10px] text-emerald-100/90 font-medium truncate flex items-center justify-between gap-1">
-              {WORK_HOURS_ARE_ESTIMATED && (
-                <span
-                  className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1 py-0.2 rounded text-[8px] font-bold"
-                  title="Total estimado pelo volume produzido"
-                >
-                  Estimado
-                </span>
-              )}
+            <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
+              {workHoursToday}h {workMinutesToday}m
             </div>
           </div>
 
-          {/* CARD 5: AZUL CIANO (Volume Total Produzido em Unidades) */}
-          <div className="bg-[#0284c7] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
-            <div className="text-[10px] font-black uppercase tracking-wider text-sky-100 truncate">
-              VOLUME TOTAL (UNIDADES)
+          {/* CARD 5: ÍNDIGO (Total Produzido) */}
+          <div className="bg-[#4f46e5] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
+            <div className="text-[10px] font-black uppercase tracking-wider text-indigo-100 truncate">
+              TOTAL PRODUZIDO
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
               {totalProduced.toLocaleString()}
             </div>
-            <div className="text-[10px] text-sky-100/90 font-medium truncate">
-              soma de QUANTIDADE produzida
-            </div>
           </div>
 
-          {/* CARD 6: VERDE LIME (Volume Entregue / Concluídas no Mês) */}
-          <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[118px] transition-transform hover:scale-[1.01]">
+          {/* CARD 6: VERDE ESMERALDA CLARO (OP Finalizadas) */}
+          <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
-              VOLUME ENTREGUE (MÊS)
+              OPS FINALIZADAS
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
-              {monthProducedQuantity.toLocaleString()}
-            </div>
-            <div className="text-[10px] text-emerald-100/90 font-medium truncate">
-              {completedOpsMonth} OPs concluídas no mês
+              {completedOpsMonth.toLocaleString()}
             </div>
           </div>
 
