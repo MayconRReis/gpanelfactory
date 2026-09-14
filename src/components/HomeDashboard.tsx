@@ -629,7 +629,7 @@ export function HomeDashboard({
 
           <div className="text-[11px] text-[#a1a1aa] font-medium">
             <strong className="text-white">{ops.length} OPs no total</strong> •{' '}
-            <strong className="text-emerald-400">{monthProducedQuantity.toLocaleString()} un entregues</strong> (Finalizado + Produzindo) •{' '}
+            <strong className="text-emerald-400">{monthProducedQuantity.toLocaleString()} un entregues</strong> (todo o volume já apontado no mês) •{' '}
             meta combinada <strong className="text-white">{monthlyGoal.toLocaleString()} un</strong>
           </div>
         </div>

@@ -591,10 +591,13 @@ export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'l
       error = res.error;
     }
 
-    return true;
+    if (error) {
+      console.error('Erro ao atualizar cargo de usuário no Supabase:', error.message);
+    }
+    return !error;
   } catch (err) {
     console.error('Erro ao atualizar cargo de usuário:', err);
-    return true;
+    return false;
   }
 };
 
@@ -633,10 +636,13 @@ export const updateUserArea = async (
       error = res.error;
     }
 
-    return true;
+    if (error) {
+      console.error('Erro ao atualizar área de usuário no Supabase:', error.message);
+    }
+    return !error;
   } catch (err) {
     console.error('Erro ao atualizar área de usuário:', err);
-    return true;
+    return false;
   }
 };
 
@@ -695,13 +701,17 @@ export const updateUserRule = async (
       if (targetArea) safePayload.area = targetArea;
       if (targetCargo) safePayload.cargo = targetCargo;
 
-      await supabase.from('profiles').update(safePayload).eq('id', userId);
+      const safeRes = await supabase.from('profiles').update(safePayload).eq('id', userId);
+      error = safeRes.error;
     }
 
-    return true;
+    if (error) {
+      console.error('Erro ao atualizar rule do usuário no Supabase:', error.message);
+    }
+    return !error;
   } catch (err) {
     console.error('Erro ao atualizar rule do usuário:', err);
-    return true;
+    return false;
   }
 };
 
@@ -741,10 +751,13 @@ export const updateUserStatus = async (userId: string, newStatus: 'active' | 'in
       error = res.error;
     }
 
-    return true;
+    if (error) {
+      console.error('Erro ao alterar status de usuário no Supabase:', error.message);
+    }
+    return !error;
   } catch (err) {
     console.error('Erro ao alterar status de usuário:', err);
-    return true;
+    return false;
   }
 };
 
@@ -1181,6 +1194,7 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
       await supabase.from('rotations').delete().eq('leader_id', userId);
     } catch {}
 
+    let deleteFailed = false;
     try {
       const { error } = await supabase
         .from('profiles')
@@ -1188,16 +1202,23 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
         .eq('id', userId);
 
       if (error || targetEmail) {
-        await supabase.from('profiles').delete().eq('email', targetEmail);
+        const resByEmail = await supabase.from('profiles').delete().eq('email', targetEmail);
+        // Só consideramos falha se AMBAS as tentativas (por id e por email) erraram —
+        // a segunda é feita sempre como reforço, mesmo quando a primeira já deu certo.
+        deleteFailed = Boolean(error) && Boolean(resByEmail.error);
       }
     } catch (e) {
       console.warn('Erro ao excluir no Supabase:', e);
+      deleteFailed = true;
     }
 
-    return true;
+    if (deleteFailed) {
+      console.error(`Falha ao excluir perfil ${userId} no Supabase.`);
+    }
+    return !deleteFailed;
   } catch (err) {
     console.error('Erro ao remover perfil:', err);
-    return true;
+    return false;
   }
 };
 

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -93,6 +93,17 @@ import { CronogramaBoard } from '../components/CronogramaBoard';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
+// "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
+// isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
+// Brasília) a data já vira o dia seguinte, fazendo os filtros/agendamentos de
+// "hoje" errarem o dia durante essa janela.
+function getLocalDateStr(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export function CoordinatorDashboard() {
   const { profile, signOut } = useAuthStore();
 
@@ -113,6 +124,20 @@ export function CoordinatorDashboard() {
       setActiveTab('home');
     }
   }, [allowedTabs, activeTab]);
+
+  // Líderes de Pesagem/Manipulação/Envase devem abrir direto na tela de
+  // uso (operacional), não no Dashboard Geral — o dashboard fica a um
+  // clique de distância pelo botão no cabeçalho. Roda só uma vez, assim
+  // que o perfil carrega, para não atrapalhar a navegação manual depois.
+  const initialTabSetRef = useRef(false);
+  useEffect(() => {
+    if (initialTabSetRef.current || !profile) return;
+    initialTabSetRef.current = true;
+    const rule = getUserRule(profile);
+    if (rule === 'pesagem' || rule === 'manipulacao' || rule === 'envase') {
+      setActiveTab(rule);
+    }
+  }, [profile]);
 
   // Main data state
   const [lines, setLines] = useState<ProductionLine[]>([]);
@@ -437,8 +462,12 @@ WHERE email IN (
     const okStatus = await updateUserStatus(user.uid || user.email, 'active');
     const okRole = await updateUserRole(user.uid || user.email, roleToSet);
 
-    if (okStatus || okRole) {
+    if (okStatus && okRole) {
       showToast(`${user.name} aprovado e ativado como ${roleToSet === 'coordinator' ? 'Coordenador' : 'Líder'}!`);
+      await loadData();
+    } else if (okStatus || okRole) {
+      // Uma das duas escritas falhou — o usuário ficou parcialmente atualizado.
+      showToast(`${user.name} foi parcialmente atualizado (status ou cargo pode não ter salvo). Verifique e tente novamente.`, 'error');
       await loadData();
     } else {
       showToast('Erro ao aprovar colaborador.', 'error');
@@ -472,7 +501,7 @@ WHERE email IN (
   };
 
   const handleAssignAndStart = async (opId: string, lineId: string) => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDateStr();
     await updateOP(opId, { 
       lineId, 
       scheduledDate: today,
@@ -485,7 +514,7 @@ WHERE email IN (
   };
 
   const handleAssignToQueue = async (opId: string, lineId: string) => {
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDateStr();
     await updateOP(opId, { 
       lineId, 
       scheduledDate: today,
@@ -511,7 +540,7 @@ WHERE email IN (
     setNewOpLineId(lineId || '');
     setNewOpPackage('1000');
     setNewOpIndustria('Ybera');
-    const today = prefillDate || new Date().toISOString().split('T')[0];
+    const today = prefillDate || getLocalDateStr();
     setNewOpScheduledDate(today);
     setNewOpScheduledEndDate(today);
     setNewOpScheduledDays('1');
@@ -792,6 +821,15 @@ WHERE email IN (
     }
   };
 
+  const resetNewLeaderForm = () => {
+    setNewLeaderName('');
+    setNewLeaderEmail('');
+    setNewLeaderLineId('');
+    setNewLeaderCargo('Líder de Produção');
+    setNewLeaderArea('Envase');
+    setIsAutoEmail(true);
+  };
+
   const handleCreateLeader = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const name = newLeaderName.trim();
@@ -879,7 +917,7 @@ WHERE email IN (
   };
 
   // ---------------- KPI COMPUTATIONS ----------------
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateStr();
   const currentWeekRange = React.useMemo(() => getWeekRange(todayStr), [todayStr]);
 
   const todayOps = ops.filter(o => o.scheduledDate === todayStr);
@@ -1076,6 +1114,19 @@ WHERE email IN (
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {/* Atalho para voltar ao Dashboard Geral — essencial para líderes,
+                que abrem direto na tela de uso e precisam de 1 toque para
+                ver as métricas gerais, sem precisar abrir o menu lateral. */}
+            {activeTab !== 'home' && allowedTabs.includes('home') && (
+              <button
+                onClick={() => setActiveTab('home')}
+                className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-blue-950/60 hover:bg-blue-900/60 border border-blue-800/50 text-xs font-semibold text-blue-300 hover:text-white flex items-center gap-1.5 transition-all shrink-0"
+                title="Ir para o Dashboard Geral"
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Dashboard</span>
+              </button>
+            )}
             <button
               onClick={handleManualRefresh}
               disabled={isRefreshing}
@@ -1566,7 +1617,10 @@ WHERE email IN (
 
                 <div className="flex items-center gap-2">
                   <Button
-                    onClick={() => setShowNewLeaderModal(true)}
+                    onClick={() => {
+                      resetNewLeaderForm();
+                      setShowNewLeaderModal(true);
+                    }}
                     variant="outline"
                     className="h-9 px-3.5 border-[#32323e] bg-[#1a1a24] hover:bg-[#222230] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
                   >
@@ -2872,7 +2926,11 @@ WHERE email IN (
                 </div>
               </div>
               <button
-                onClick={() => !isSubmittingLeader && setShowNewLeaderModal(false)}
+                onClick={() => {
+                  if (isSubmittingLeader) return;
+                  setShowNewLeaderModal(false);
+                  resetNewLeaderForm();
+                }}
                 className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
                 disabled={isSubmittingLeader}
               >
@@ -3001,7 +3059,10 @@ WHERE email IN (
                   type="button"
                   variant="ghost"
                   disabled={isSubmittingLeader}
-                  onClick={() => setShowNewLeaderModal(false)}
+                  onClick={() => {
+                    setShowNewLeaderModal(false);
+                    resetNewLeaderForm();
+                  }}
                   className="h-9 text-xs text-[#a1a1aa] hover:text-white"
                 >
                   Cancelar

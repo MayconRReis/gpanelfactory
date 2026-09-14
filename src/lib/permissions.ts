@@ -124,7 +124,12 @@ export function getUserRule(profile: UserProfile | null): AccessRule {
   const area = String(profile.area || '').toLowerCase().trim();
 
   // Coordenador geral
-  if (role === 'coordinator' || role === 'coordenador' || cargo.includes('coordena') || area === 'coordenação' || area === 'coordenacao') {
+  // Cuidado: usar `cargo.includes('coordena')` daria acesso total (admin) a
+  // qualquer cargo que apenas MENCIONE coordenação sem SER um coordenador —
+  // ex.: "Assistente de Coordenação de Estoque". Por isso exigimos que o
+  // cargo comece com "coordenador" (ex.: "Coordenador Geral", "Coordenador
+  // de Produção"), não apenas contenha o radical em qualquer posição.
+  if (role === 'coordinator' || role === 'coordenador' || cargo.startsWith('coordenador') || area === 'coordenação' || area === 'coordenacao') {
     return 'admin';
   }
 

@@ -185,9 +185,11 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [ops, todayStr, profile]);
 
-  // Resumo do dia
-  const totalBateladasHoje = useMemo(() => {
-    return todayPesagemOps.reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
+  // Resumo do dia — a Pesagem não registra mais Kg (isso só é preenchido pelo
+  // líder de Manipulação ao finalizar), então o resumo do dia agora conta
+  // quantas OSMs foram registradas, não uma soma de Kg (que ficaria sempre 0).
+  const totalOsmsHoje = useMemo(() => {
+    return todayPesagemOps.length;
   }, [todayPesagemOps]);
 
   // Criar nova Ordem de Produção / OSM
@@ -454,7 +456,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
           <div className="flex items-center gap-2 text-xs">
             <span className="hidden sm:inline text-[#71717a]">Hoje na Pesagem:</span>
             <span className="font-mono font-bold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-lg border border-purple-800/40">
-              {totalBateladasHoje.toLocaleString('pt-BR')} Kg
+              {totalOsmsHoje.toLocaleString('pt-BR')} OSM{totalOsmsHoje !== 1 ? 's' : ''}
             </span>
           </div>
         </div>
@@ -656,10 +658,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
             <span className="font-medium text-white">
               {todayPesagemOps.length} {todayPesagemOps.length === 1 ? 'OSM registrada' : 'OSMs registradas'} hoje
-            </span>
-            <span>•</span>
-            <span className="font-bold text-purple-300">
-              {totalBateladasHoje.toLocaleString('pt-BR')} Kg no total
             </span>
           </div>
 

@@ -225,7 +225,11 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // 2. Abrir modal para finalizar OSM com seleção de turno
   const handleOpenFinishModal = (op: ProductionOrder) => {
-    const inputVal = kgInputs[op.id] || String(op.plannedQuantity || 1000);
+    // Não há mais "quantidade planejada" para Manipulação (isso ficou zerado
+    // desde que a Pesagem parou de informar Kg) — não usar `plannedQuantity`
+    // como valor-padrão aqui, ou toda finalização viria pré-preenchida com um
+    // valor arbitrário (ex.: 1000) em vez de forçar o líder a digitar o Kg real.
+    const inputVal = kgInputs[op.id] || '';
     setFinishingOp(op);
     setFinalKg(inputVal);
     setSelectedShift(detectedShift);
@@ -460,7 +464,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {inProgressManipulacaoOps.map((op) => {
-                const currentKgValue = kgInputs[op.id] !== undefined ? kgInputs[op.id] : String(op.plannedQuantity || 1000);
+                const currentKgValue = kgInputs[op.id] !== undefined ? kgInputs[op.id] : '';
 
                 return (
                   <div
@@ -492,9 +496,6 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                     <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3.5 space-y-2">
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-[#d4d4d8] font-semibold">Quantidade Manipulada (Kg):</span>
-                        <span className="text-[11px] font-mono text-[#a1a1aa]">
-                          Planejado: {op.plannedQuantity?.toLocaleString('pt-BR')} Kg
-                        </span>
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -566,7 +567,6 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {availablePesagemOps.map((op) => {
                 const isStarting = startingOpId === op.id;
-                const quantidade = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
 
                 return (
                   <div
@@ -604,14 +604,6 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                           <span className="font-mono text-[11px] font-bold text-cyan-300 bg-cyan-950/40 border border-cyan-800/30 px-1.5 py-0.5 rounded">{op.lote}</span>
                         </div>
                       )}
-
-                      {/* Quantidade — exatamente o que a Pesagem registrou */}
-                      <div className="flex justify-between items-center gap-2">
-                        <span className="text-[11px] text-[#a1a1aa] shrink-0">Quantidade:</span>
-                        <span className="font-mono text-[11px] font-black text-purple-200">
-                          {quantidade.toLocaleString('pt-BR')} Qtd
-                        </span>
-                      </div>
 
                       {/* Observação / granel */}
                       {(op.granel || op.industria) && (

@@ -235,7 +235,10 @@ export function DailyProductionHistory({
     let inProgressCount = 0;
 
     for (const op of opsOfDay) {
-      const qty = Number(op.producedQuantity) || 0;
+      // Mesmo fallback usado em pesagemDailyStats/MonthStats/YearStats logo
+      // abaixo — sem isso, este card e aqueles discordavam entre si para o
+      // mesmo dia (um somava plannedQuantity como reserva, o outro não).
+      const qty = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
       const setor = op.setor || 'Envase';
       const shift = (op.finishedShift || op.scheduledShift || '').toLowerCase();
 
@@ -1624,7 +1627,13 @@ export function DailyProductionHistory({
                   const unit = op.unidade || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'Kg' : 'Un');
                   const produced = Number(op.producedQuantity) || 0;
                   const planned = Number(op.plannedQuantity) || 0;
-                  const progressPct = planned > 0 ? Math.min(100, Math.round((produced / planned) * 100)) : 100;
+                  // Antes caía em 100% sempre que não havia planejado (planned=0),
+                  // o que mostrava "100% atingido" ao lado de "0" produzido para
+                  // OSMs de Pesagem (que não têm mais planejado/produzido em Kg) —
+                  // agora só mostra um percentual quando há algo real para medir.
+                  const progressPct = planned > 0
+                    ? Math.min(100, Math.round((produced / planned) * 100))
+                    : (produced > 0 ? 100 : null);
                   const shift = op.finishedShift || op.scheduledShift || 'Manhã';
                   const isShift2 = shift.toLowerCase().includes('2') || shift.toLowerCase().includes('tarde');
                   const leaderName = op.leaderId ? (leaderMap.get(op.leaderId) || 'Líder') : 'Não atribuído';
@@ -1713,7 +1722,7 @@ export function DailyProductionHistory({
                           {produced.toLocaleString('pt-BR')} <span className="text-[10px] font-sans font-bold text-emerald-300">{unit}</span>
                         </div>
                         <div className="text-[10px] text-[#71717a] font-mono">
-                          {progressPct}% atingido
+                          {progressPct !== null ? `${progressPct}% atingido` : '—'}
                         </div>
                       </td>
 

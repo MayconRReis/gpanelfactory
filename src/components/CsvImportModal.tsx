@@ -260,6 +260,21 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
       setErrorMessage('Nenhum registro de OP pôde ser identificado. Verifique o separador ou use a aba "Colar do Excel".');
     }
 
+    // Marca como inválidas as OPs repetidas dentro do mesmo import — sem isso,
+    // duas linhas com o mesmo número de OP passavam na validação e criavam
+    // duas Ordens de Produção duplicadas no estoque.
+    const seenNumbers = new Set<string>();
+    for (const row of rows) {
+      const key = row.number.trim().toUpperCase();
+      if (!key) continue;
+      if (seenNumbers.has(key)) {
+        row.isValid = false;
+        row.validationError = 'OP duplicada nesta importação';
+      } else {
+        seenNumbers.add(key);
+      }
+    }
+
     setParsedRows(rows);
   };
 
