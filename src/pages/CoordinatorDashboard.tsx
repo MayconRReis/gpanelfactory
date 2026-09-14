@@ -221,7 +221,10 @@ export function CoordinatorDashboard() {
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
-  const [copiedSql, setCopiedSql] = useState(false);
+  // Guarda o e-mail do usuário cujo SQL acabou de ser copiado (não um boolean
+  // único) — assim o ícone de "copiado" aparece só na linha certa da tabela,
+  // em vez de piscar em todas as linhas ao mesmo tempo.
+  const [copiedSqlEmail, setCopiedSqlEmail] = useState<string | null>(null);
 
   const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
     setToastMessage({ text, type });
@@ -395,9 +398,9 @@ UPDATE auth.users SET raw_user_meta_data = raw_user_meta_data || '{"role": "coor
 -- 3. Confirma o e-mail imediatamente:
 UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${userEmail}';`;
     navigator.clipboard.writeText(sql);
-    setCopiedSql(true);
+    setCopiedSqlEmail(userEmail);
     showToast('Script SQL copiado para a área de transferência!');
-    setTimeout(() => setCopiedSql(false), 3000);
+    setTimeout(() => setCopiedSqlEmail((current) => (current === userEmail ? null : current)), 3000);
   };
 
   const handleCopyConfirmEmailSql = (userEmail: string) => {
@@ -977,9 +980,9 @@ WHERE email IN (
       subtitle: 'Controle de linhas de envase, paradas e apontamentos do líder',
       icon: Factory,
     },
-    lines: {
-      title: 'Linhas de Envase & Escala Operacional',
-      subtitle: 'Monitoramento em tempo real do chão de fábrica, status operacional e alocação de líderes',
+    cronograma: {
+      title: 'Cronograma de Envase',
+      subtitle: 'Quadro Kanban para atribuir e mover OPs entre as linhas de envase',
       icon: Layers,
     },
     daily_production: {
@@ -1102,7 +1105,6 @@ WHERE email IN (
                 factoryMonthlyGoal={factoryMonthlyGoal}
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
-                onNewOp={() => setShowNewOpModal(true)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
               />
             )}
@@ -1171,7 +1173,7 @@ WHERE email IN (
               {/* Header do Estoque de OPs com os botões no canto superior direito */}
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
                       Estoque de Ordens de Produção (OPs)
                     </h2>
@@ -1507,7 +1509,7 @@ WHERE email IN (
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => handleOpenEditOPModal(op)}
-                                    className="h-7 w-7 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors"
+                                    className="h-9 w-9 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors"
                                     title={`Editar OP ${op.number}`}
                                   >
                                     <Edit2 className="w-3.5 h-3.5" />
@@ -1517,7 +1519,7 @@ WHERE email IN (
                                   <Button
                                     size="sm"
                                     onClick={() => handleOpenAssignModal(op)}
-                                    className="h-7 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1.5 shadow-sm transition-all hover:scale-[1.02]"
+                                    className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1.5 shadow-sm transition-all hover:scale-[1.02]"
                                     title="Atribuir Linha de Produção & Programar Cronograma"
                                   >
                                     <CalendarDays className="w-3.5 h-3.5" />
@@ -1531,7 +1533,7 @@ WHERE email IN (
                                       e.stopPropagation();
                                       handleOpenDeleteModal(op);
                                     }}
-                                    className="h-7 w-7 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95"
+                                    className="h-9 w-9 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95"
                                     title={`Excluir OP ${op.number} do Estoque`}
                                   >
                                     <Trash2 className="w-3.5 h-3.5 shrink-0" />
@@ -1598,7 +1600,7 @@ WHERE email IN (
                     <Button
                       size="sm"
                       onClick={handleCopyConfirmAllSql}
-                      className="h-7 text-[11px] bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-500/30 rounded-lg px-2.5 font-semibold shrink-0"
+                      className="h-9 text-[11px] bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-500/30 rounded-lg px-2.5 font-semibold shrink-0"
                     >
                       <Copy className="w-3 h-3 mr-1" />
                       Copiar SQL p/ Validar Todos
@@ -1821,7 +1823,7 @@ WHERE email IN (
                               </td>
 
                               <td className="py-3.5 px-4 text-right">
-                                <div className="flex items-center justify-end gap-1.5">
+                                <div className="flex items-center justify-end flex-wrap gap-1.5">
                                   {/* Botão Copiar Acesso Inicial se 1º acesso */}
                                   {(user.status === 'first_access' || user.mustChangePassword) && (
                                     <>
@@ -1829,7 +1831,7 @@ WHERE email IN (
                                         size="sm"
                                         variant="outline"
                                         onClick={() => handleCopyLeaderCredentials(user)}
-                                        className="h-7 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
+                                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
                                         title="Copiar e-mail e senha padrão"
                                       >
                                         <Copy className="w-3 h-3" />
@@ -1840,7 +1842,7 @@ WHERE email IN (
                                         size="sm"
                                         variant="outline"
                                         onClick={() => handleMarkAsActive(user)}
-                                        className="h-7 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
+                                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
                                         title="Confirmar acesso e marcar como Ativo"
                                       >
                                         <CheckCircle2 className="w-3 h-3 text-emerald-400" />
@@ -1855,7 +1857,7 @@ WHERE email IN (
                                       size="sm"
                                       variant="outline"
                                       onClick={() => handleResetLeaderPassword(user)}
-                                      className="h-7 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
+                                      className="h-9 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
                                       title="Redefinir senha temporária"
                                     >
                                       <KeyRound className="w-3 h-3 text-orange-400" />
@@ -1868,7 +1870,7 @@ WHERE email IN (
                                     <Button
                                       size="sm"
                                       onClick={() => handlePromoteToCoordinator(user)}
-                                      className="h-7 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm"
+                                      className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm"
                                       title="Promover a Coordenador Geral"
                                     >
                                       <Award className="w-3 h-3 text-white" />
@@ -1880,7 +1882,7 @@ WHERE email IN (
                                         size="sm"
                                         variant="outline"
                                         onClick={() => handleDemoteToLeader(user)}
-                                        className="h-7 px-2 bg-[#17171d] hover:bg-[#22222a] border-[#292935] text-[#a1a1aa] hover:text-white text-[11px] font-semibold rounded-lg"
+                                        className="h-9 px-2 bg-[#17171d] hover:bg-[#22222a] border-[#292935] text-[#a1a1aa] hover:text-white text-[11px] font-semibold rounded-lg"
                                         title="Alterar para Líder de Produção"
                                       >
                                         <span>Tornar Líder</span>
@@ -1894,7 +1896,7 @@ WHERE email IN (
                                       size="sm"
                                       variant="outline"
                                       onClick={() => handleToggleUserStatus(user)}
-                                      className={`h-7 px-2 text-[11px] font-bold rounded-lg ${
+                                      className={`h-9 px-2 text-[11px] font-bold rounded-lg ${
                                         isActive
                                           ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
                                           : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
@@ -1911,7 +1913,7 @@ WHERE email IN (
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => handleCopyConfirmEmailSql(user.email)}
-                                    className="h-7 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
+                                    className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
                                     title="Copiar SQL para validar/confirmar e-mail no Supabase"
                                   >
                                     <Mail className="w-3.5 h-3.5" />
@@ -1922,10 +1924,10 @@ WHERE email IN (
                                     size="sm"
                                     variant="ghost"
                                     onClick={() => handleCopySqlForUser(user.email)}
-                                    className="h-7 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
+                                    className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
                                     title="Copiar SQL de Coordenador para Supabase"
                                   >
-                                    {copiedSql ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                    {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                                   </Button>
 
                                   {/* Botão Excluir Colaborador */}
@@ -1934,7 +1936,7 @@ WHERE email IN (
                                       size="sm"
                                       variant="ghost"
                                       onClick={() => handleOpenDeleteUserModal(user)}
-                                      className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
+                                      className="h-9 w-9 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
                                       title="Remover Colaborador"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
@@ -1973,8 +1975,8 @@ WHERE email IN (
                 ) : (
                   <div className="divide-y divide-[#1e1e23]">
                     {events.map((evt) => (
-                      <div key={evt.id} className="py-3.5 flex items-start justify-between gap-4">
-                        <div className="flex items-start gap-3">
+                      <div key={evt.id} className="py-3.5 flex flex-col sm:flex-row items-start justify-between gap-2 sm:gap-4">
+                        <div className="flex items-start gap-3 min-w-0">
                           <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
                             evt.type === 'STARTED' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
                             evt.type === 'PAUSED' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
@@ -1989,8 +1991,8 @@ WHERE email IN (
                             {evt.type === 'QUANTITY_REPORTED' && <TrendingUp className="w-3.5 h-3.5" />}
                           </div>
 
-                          <div>
-                            <div className="flex items-center gap-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <span className="text-xs font-bold text-[#f4f4f5]">
                                 {evt.type === 'STARTED' && 'Início de Produção'}
                                 {evt.type === 'PAUSED' && 'Parada de Linha / Pausa'}
@@ -2001,7 +2003,7 @@ WHERE email IN (
                               <span className="text-[10px] text-blue-400 font-mono font-bold">
                                 {evt.opNumber ? `OP ${evt.opNumber}` : ''}
                               </span>
-                              <span className="text-[10px] text-[#71717a]">
+                              <span className="text-[10px] text-[#71717a] truncate max-w-[160px]">
                                 • {evt.lineName || 'Linha'}
                               </span>
                             </div>
@@ -2051,7 +2053,7 @@ WHERE email IN (
                   <Users className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
                       Gestão de Cadastros & Confirmações
                     </h3>
@@ -2068,7 +2070,7 @@ WHERE email IN (
               </div>
               <button
                 onClick={() => setShowAuthorizeModal(false)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1a1a22]"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1a1a22]"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2172,7 +2174,7 @@ WHERE email IN (
                             <Button
                               size="sm"
                               onClick={() => handleApproveUser(user, user.role)}
-                              className="h-7 text-[11px] bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-2.5 font-bold flex items-center gap-1 shadow-sm"
+                              className="h-9 text-[11px] bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-2.5 font-bold flex items-center gap-1 shadow-sm"
                               title="Aprovar e liberar acesso deste usuário"
                             >
                               <CheckCircle2 className="w-3 h-3" />
@@ -2186,7 +2188,7 @@ WHERE email IN (
                               size="sm"
                               variant="outline"
                               onClick={() => handleApproveUser(user, 'coordinator')}
-                              className="h-7 text-[11px] border-blue-600/40 text-blue-400 hover:bg-blue-950/30 rounded-lg px-2 flex items-center gap-1"
+                              className="h-9 text-[11px] border-blue-600/40 text-blue-400 hover:bg-blue-950/30 rounded-lg px-2 flex items-center gap-1"
                               title="Promover a Coordenador Geral"
                             >
                               <Award className="w-3 h-3" />
@@ -2199,8 +2201,8 @@ WHERE email IN (
                             <Button
                               size="sm"
                               variant="ghost"
-                              onClick={() => handleApproveUser(user, 'leader')}
-                              className="h-7 text-[10px] text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1a1a22] rounded-lg px-2"
+                              onClick={() => handleDemoteToLeader(user)}
+                              className="h-9 text-[10px] text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1a1a22] rounded-lg px-2"
                               title="Definir como Líder de Produção"
                             >
                               Tornar Líder
@@ -2212,7 +2214,7 @@ WHERE email IN (
                             size="sm"
                             variant="ghost"
                             onClick={() => handleCopyConfirmEmailSql(user.email)}
-                            className="h-7 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
+                            className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
                             title="Copiar SQL para validar/confirmar e-mail no Supabase"
                           >
                             <Mail className="w-3.5 h-3.5" />
@@ -2223,10 +2225,10 @@ WHERE email IN (
                             size="sm"
                             variant="ghost"
                             onClick={() => handleCopySqlForUser(user.email)}
-                            className="h-7 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
+                            className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
                             title="Copiar SQL completo para Supabase"
                           >
-                            <Copy className="w-3.5 h-3.5" />
+                            {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                           </Button>
 
                           {/* Botão Excluir */}
@@ -2235,7 +2237,7 @@ WHERE email IN (
                               size="sm"
                               variant="ghost"
                               onClick={() => handleOpenDeleteUserModal(user)}
-                              className="h-7 w-7 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
+                              className="h-9 w-9 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
                               title="Remover Colaborador"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -2287,14 +2289,14 @@ WHERE email IN (
                   setShowNewOpModal(false);
                   setEditingOp(null);
                 }}
-                className="text-[#71717a] hover:text-white"
+                className="text-[#71717a] hover:text-white p-2 -m-2 rounded-lg hover:bg-[#1a1a24]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <form onSubmit={handleSaveOP} className="p-5 space-y-4 max-h-[85vh] overflow-y-auto">
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
                     {newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
@@ -2680,7 +2682,7 @@ WHERE email IN (
               </div>
               <button
                 onClick={() => setPauseModalData(null)}
-                className="text-[#71717a] hover:text-white"
+                className="text-[#71717a] hover:text-white p-2 -m-2 rounded-lg hover:bg-[#1f1f28]"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2764,7 +2766,7 @@ WHERE email IN (
 
               <button
                 onClick={() => !isDeletingOp && setDeleteModalOp(null)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
                 disabled={isDeletingOp}
               >
                 <X className="w-5 h-5" />
@@ -2871,7 +2873,7 @@ WHERE email IN (
               </div>
               <button
                 onClick={() => !isSubmittingLeader && setShowNewLeaderModal(false)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
                 disabled={isSubmittingLeader}
               >
                 <X className="w-5 h-5" />
@@ -3045,7 +3047,7 @@ WHERE email IN (
               </div>
               <button
                 onClick={() => setCreatedCredentialsModalData(null)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -3133,7 +3135,7 @@ WHERE email IN (
               {!resetPasswordModal.loading && (
                 <button
                   onClick={() => setResetPasswordModal(null)}
-                  className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                  className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -3230,7 +3232,7 @@ WHERE email IN (
               <button
                 type="button"
                 onClick={() => !isResetting && setShowResetModal(false)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors cursor-pointer"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors cursor-pointer"
                 disabled={isResetting}
               >
                 <X className="w-5 h-5" />
@@ -3330,7 +3332,7 @@ WHERE email IN (
 
               <button
                 onClick={() => !isDeletingUser && setDeleteUserModalData(null)}
-                className="text-[#71717a] hover:text-white p-1 rounded-lg hover:bg-[#1f1f28] transition-colors"
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
                 disabled={isDeletingUser}
               >
                 <X className="w-5 h-5" />

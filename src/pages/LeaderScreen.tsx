@@ -1398,13 +1398,13 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
                 {isManipulacao ? 'Incremento Rápido de Kg' : isPesagem ? 'Incremento Rápido de Bateladas' : 'Incremento Rápido de Peças'}
               </Label>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[50, 100, 250, 500].map(amt => (
                   <button
                     key={amt}
                     type="button"
                     onClick={() => handleReport(amt)}
-                    className="py-2.5 rounded-xl bg-[#1c1c27] hover:bg-blue-600 hover:text-white border border-[#2d2d3f] text-xs font-black font-mono transition-all"
+                    className="py-3 rounded-xl bg-[#1c1c27] hover:bg-blue-600 hover:text-white border border-[#2d2d3f] text-xs font-black font-mono transition-all"
                   >
                     +{amt} {displayUnit}
                   </button>

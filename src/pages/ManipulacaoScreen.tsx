@@ -188,8 +188,12 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     setStartingOpId(pesagemOp.id);
 
     try {
-      const batchCount = Number(pesagemOp.producedQuantity) || Number(pesagemOp.plannedQuantity) || 1;
-      const plannedKg = batchCount * 1000; // Cada batelada ~ 1000kg
+      // A OSM de Pesagem já registra plannedQuantity/producedQuantity em Kg
+      // (ver PesagemScreen: "A quantidade deve ser maior que zero (Kg)" e
+      // unidade: 'Kg') — não é uma contagem de bateladas, então NÃO deve ser
+      // multiplicada por 1000 aqui (isso inflava o Kg planejado da Manipulação
+      // em ~1000x).
+      const plannedKg = Number(pesagemOp.producedQuantity) || Number(pesagemOp.plannedQuantity) || 0;
 
       // Cria OSM de Manipulação já com status in_progress e leaderId — sem updateOP
       await createOP({
@@ -198,7 +202,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         unidade: 'Kg',
         number: pesagemOp.number,
         product: pesagemOp.product,
-        lote: pesagemOp.number,
+        lote: pesagemOp.lote,
         plannedQuantity: plannedKg,
         producedQuantity: 0,
         status: 'in_progress',
@@ -278,22 +282,22 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       {!embedded && (
         <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
           {/* Identificação da Aplicação e Área */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400 shadow-inner">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400 shadow-inner shrink-0">
               <FlaskConical className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
-                <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 shadow-sm flex items-center gap-1">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-black text-lg tracking-tight text-white truncate">GPanel Factory</span>
+                <span className="hidden sm:flex text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 shadow-sm items-center gap-1 shrink-0">
                   <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
                   Área de Manipulação
                 </span>
               </div>
-              <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
+              <p className="text-xs text-[#a1a1aa] flex items-center gap-2 truncate">
                 <span>Execução de Granéis</span>
-                <span>•</span>
-                <span className="font-mono text-cyan-300">Unidade: Kg</span>
+                <span className="hidden sm:inline">•</span>
+                <span className="hidden sm:inline font-mono text-cyan-300">Unidade: Kg</span>
               </p>
             </div>
           </div>
@@ -590,7 +594,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                       {/* Nome / Produto */}
                       <div className="flex justify-between items-start gap-2">
                         <span className="text-[11px] text-[#a1a1aa] shrink-0">Nome:</span>
-                        <span className="text-[11px] font-semibold text-white text-right line-clamp-2">{op.product}</span>
+                        <span className="text-[11px] font-semibold text-white text-right line-clamp-2 flex-1 min-w-0 break-words">{op.product}</span>
                       </div>
 
                       {/* Lote */}
@@ -613,7 +617,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                       {(op.granel || op.industria) && (
                         <div className="flex justify-between items-start gap-2">
                           <span className="text-[11px] text-[#a1a1aa] shrink-0">Obs:</span>
-                          <span className="text-[11px] text-[#e4e4e7] text-right line-clamp-2">{op.granel || op.industria}</span>
+                          <span className="text-[11px] text-[#e4e4e7] text-right line-clamp-2 flex-1 min-w-0 break-words">{op.granel || op.industria}</span>
                         </div>
                       )}
                     </div>

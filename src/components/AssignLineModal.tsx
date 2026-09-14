@@ -70,13 +70,16 @@ export function AssignLineModal({
   allOps,
   onSave,
 }: AssignLineModalProps) {
-  if (!isOpen || !op) return null;
-
+  // IMPORTANTE: os Hooks abaixo precisam SEMPRE ser chamados, na mesma ordem,
+  // em todo render — inclusive quando isOpen=false / op=null (o componente
+  // fica montado o tempo todo pelo pai, só alternando a prop `isOpen`). Por
+  // isso o "early return" fica DEPOIS de todos os hooks, e os valores
+  // iniciais usam `op?.` para não quebrar quando op ainda é null.
   const todayStr = new Date().toISOString().split('T')[0];
-  const [selectedLineId, setSelectedLineId] = useState<string | null>(op.lineId || (lines[0]?.id || 'line-1'));
-  const [selectedDate, setSelectedDate] = useState<string>(op.scheduledDate || todayStr);
-  const [selectedDays, setSelectedDays] = useState<number>(op.scheduledDays || 1);
-  const [selectedShift, setSelectedShift] = useState<string>(op.scheduledShift || 'Integral');
+  const [selectedLineId, setSelectedLineId] = useState<string | null>(op?.lineId || (lines[0]?.id || 'line-1'));
+  const [selectedDate, setSelectedDate] = useState<string>(op?.scheduledDate || todayStr);
+  const [selectedDays, setSelectedDays] = useState<number>(op?.scheduledDays || 1);
+  const [selectedShift, setSelectedShift] = useState<string>(op?.scheduledShift || 'Integral');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Calcula a data final a partir dos dias
@@ -106,7 +109,8 @@ export function AssignLineModal({
   const weekInfo = useMemo(() => getWeekRange(selectedDate), [selectedDate]);
 
   const statsForDateAndWeek = useMemo(() => {
-    const otherOps = allOps.filter((o) => o.id !== op.id);
+    const opPlannedQuantity = op?.plannedQuantity || 0;
+    const otherOps = allOps.filter((o) => o.id !== op?.id);
 
     // No dia selecionado
     const opsInDay = otherOps.filter((o) => o.scheduledDate === selectedDate);
@@ -126,15 +130,18 @@ export function AssignLineModal({
     return {
       dayOpsCount: dayOpsInSelectedLine.length,
       dayVolume: dayVolumeInSelectedLine,
-      newDayVolume: selectedLineId ? dayVolumeInSelectedLine + op.plannedQuantity : dayVolumeInSelectedLine,
-      dayTotalFactoryVolume: selectedLineId ? dayVolumeTotal + op.plannedQuantity : dayVolumeTotal,
+      newDayVolume: selectedLineId ? dayVolumeInSelectedLine + opPlannedQuantity : dayVolumeInSelectedLine,
+      dayTotalFactoryVolume: selectedLineId ? dayVolumeTotal + opPlannedQuantity : dayVolumeTotal,
 
       weekOpsCount: weekOpsInSelectedLine.length,
       weekVolume: weekVolumeInSelectedLine,
-      newWeekVolume: selectedLineId ? weekVolumeInSelectedLine + op.plannedQuantity : weekVolumeInSelectedLine,
-      weekTotalFactoryVolume: selectedLineId ? weekVolumeTotal + op.plannedQuantity : weekVolumeTotal,
+      newWeekVolume: selectedLineId ? weekVolumeInSelectedLine + opPlannedQuantity : weekVolumeInSelectedLine,
+      weekTotalFactoryVolume: selectedLineId ? weekVolumeTotal + opPlannedQuantity : weekVolumeTotal,
     };
   }, [allOps, op, selectedDate, selectedLineId, weekInfo]);
+
+  // Só agora, DEPOIS de todos os Hooks, é seguro sair cedo.
+  if (!isOpen || !op) return null;
 
   const handleConfirm = async () => {
     setIsSubmitting(true);

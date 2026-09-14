@@ -621,7 +621,7 @@ export function ManipulacaoDashboard({
               <button
                 type="button"
                 onClick={handlePrevDay}
-                className="w-8 h-8 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
                 title="Dia anterior"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -636,7 +636,7 @@ export function ManipulacaoDashboard({
               <button
                 type="button"
                 onClick={handleNextDay}
-                className="w-8 h-8 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
                 title="Próximo dia"
               >
                 <ChevronRight className="w-4 h-4" />
@@ -675,7 +675,7 @@ export function ManipulacaoDashboard({
               <button
                 type="button"
                 onClick={handlePrevWeek}
-                className="w-8 h-8 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
                 title="Semana anterior"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -690,7 +690,7 @@ export function ManipulacaoDashboard({
               <button
                 type="button"
                 onClick={handleNextWeek}
-                className="w-8 h-8 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+                className="w-9 h-9 rounded-lg bg-[#1a1a20] border border-[#2e2e36] hover:border-cyan-500/50 flex items-center justify-center text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
                 title="Próxima semana"
               >
                 <ChevronRight className="w-4 h-4" />
@@ -714,7 +714,7 @@ export function ManipulacaoDashboard({
                   key={d.dateStr}
                   type="button"
                   onClick={() => setSelectedDate(d.dateStr)}
-                  className={`py-1 px-0.5 rounded-lg text-center transition-all cursor-pointer ${
+                  className={`py-2 px-0.5 min-h-[40px] rounded-lg text-center transition-all cursor-pointer ${
                     isSelected
                       ? 'bg-cyan-600 text-white font-extrabold shadow-sm'
                       : isToday

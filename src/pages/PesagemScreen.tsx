@@ -66,7 +66,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   const [osmNumber, setOsmNumber] = useState('');
   const [productName, setProductName] = useState('');
   const [batchLot, setBatchLot] = useState('');
-  const [batchCount, setBatchCount] = useState('');
   const [observation, setObservation] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -179,7 +178,10 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
 
       // Se foi criada pelo líder ou setor Pesagem
       const matchesLeader = !op.leaderId || op.leaderId === profile?.uid;
-      return isPesagem && (isToday || op.status === 'completed') && (op.setor === 'Pesagem' || matchesLeader);
+      // OBS: toda OSM de Pesagem já nasce com status 'completed' (ver criação
+      // acima), então incluir "|| op.status === 'completed'" aqui anulava
+      // totalmente o filtro de "hoje" — a lista mostrava o histórico inteiro.
+      return isPesagem && isToday && (op.setor === 'Pesagem' || matchesLeader);
     }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [ops, todayStr, profile]);
 
@@ -200,7 +202,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     setOsmNumber('');
     setProductName('');
     setBatchLot('');
-    setBatchCount('');
     setObservation('');
     setIsModalOpen(true);
   };
@@ -214,7 +215,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     setOsmNumber(op.number || '');
     setProductName(op.product || '');
     setBatchLot(op.lote || '');
-    setBatchCount(String(op.producedQuantity || op.plannedQuantity || ''));
     setObservation(op.granel || op.observation || '');
     setIsModalOpen(true);
   };
@@ -248,7 +248,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     const trimmedNumber = osmNumber.trim();
     const trimmedProduct = productName.trim();
     const trimmedLot = batchLot.trim();
-    const qty = parseFloat(batchCount.replace(',', '.')) || 0;
     const targetDate = osmDate || todayStr;
 
     if (!targetDate) {
@@ -267,30 +266,29 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
       showToast('Informe o Lote.', 'error');
       return;
     }
-    if (isNaN(qty) || qty <= 0) {
-      showToast('A quantidade deve ser maior que zero (Kg).', 'error');
-      return;
-    }
-
     setIsSubmitting(true);
     try {
       if (editingOp) {
-        // Atualização da OSM existente
+        // Atualização da OSM existente — NÃO envia plannedQuantity/producedQuantity
+        // aqui: a quantidade em Kg agora só é preenchida pelo líder de Manipulação
+        // ao finalizar a OSM, então editar aqui não deve sobrescrever esse valor.
         await updateOP(editingOp.id, {
           number: trimmedNumber,
           product: trimmedProduct,
           lote: trimmedLot,
-          plannedQuantity: qty,
-          producedQuantity: qty,
           scheduledDate: targetDate,
-          granel: observation.trim() || undefined,
-          observation: observation.trim() || undefined,
+          // Sempre string (nunca undefined): se undefined, updateOP ignora o campo
+          // e o valor antigo de "granel" permanece no banco — isso impedia limpar
+          // a observação ao editar.
+          granel: observation.trim(),
           industria: industria,
         });
 
         showToast(`Ordem de Produção ${trimmedNumber} atualizada com sucesso!`, 'success');
       } else {
-        // Criação de nova OSM já como completed — pesagem conclui no ato do registro
+        // Criação de nova OSM já como completed — pesagem conclui no ato do registro.
+        // A quantidade em Kg fica zerada por enquanto: quem preenche o Kg
+        // manipulado é o líder de Manipulação, ao finalizar a OSM.
         await createOP({
           tipoDocumento: 'OSM',
           setor: 'Pesagem',
@@ -298,8 +296,8 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
           number: trimmedNumber,
           product: trimmedProduct,
           lote: trimmedLot,
-          plannedQuantity: qty,
-          producedQuantity: qty,
+          plannedQuantity: 0,
+          producedQuantity: 0,
           status: 'completed',
           leaderId: profile.uid,
           priority: 'Normal',
@@ -348,22 +346,22 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
       {!embedded && (
         <header className="bg-[#121216] border-b border-[#27272a] px-4 lg:px-8 py-3.5 sticky top-0 z-30 flex items-center justify-between gap-4">
           {/* Identificação da Aplicação e Área */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-400 shadow-inner">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-400 shadow-inner shrink-0">
               <Scale className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-black text-lg tracking-tight text-white">GPanel Factory</span>
-                <span className="text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-purple-950/90 text-purple-300 border border-purple-700/60 shadow-sm flex items-center gap-1">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="font-black text-lg tracking-tight text-white truncate">GPanel Factory</span>
+                <span className="hidden sm:flex text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-purple-950/90 text-purple-300 border border-purple-700/60 shadow-sm items-center gap-1 shrink-0">
                   <Sparkles className="w-2.5 h-2.5 text-purple-400" />
                   Área de Pesagem
                 </span>
               </div>
-              <p className="text-xs text-[#a1a1aa] flex items-center gap-2">
+              <p className="text-xs text-[#a1a1aa] flex items-center gap-2 truncate">
                 <span>Turno Único (Manhã)</span>
-                <span>•</span>
-                <span className="font-mono text-purple-300">Série 300</span>
+                <span className="hidden sm:inline">•</span>
+                <span className="hidden sm:inline font-mono text-purple-300">Série 300</span>
               </p>
             </div>
           </div>
@@ -547,7 +545,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {todayPesagemOps.map((op) => {
-                  const batches = Number(op.producedQuantity) || Number(op.plannedQuantity) || 1;
                   const formattedTime = op.createdAt
                     ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
                     : '--:--';
@@ -576,7 +573,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                           </h2>
                         </div>
 
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-2">
                           <span className="text-[11px] font-bold px-2 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 flex items-center gap-1.5 shadow-sm">
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                             <span className="hidden sm:inline">Registrado</span>
@@ -586,7 +583,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                             type="button"
                             id={`btn-edit-osm-${op.id}`}
                             onClick={() => handleOpenEditModal(op)}
-                            className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
+                            className="p-2.5 rounded-lg bg-[#27272a]/70 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
                             title="Editar OSM"
                             aria-label="Editar OSM"
                           >
@@ -597,7 +594,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                             type="button"
                             id={`btn-delete-osm-${op.id}`}
                             onClick={() => handleOpenDeleteModal(op)}
-                            className="p-1.5 rounded-lg bg-[#27272a]/70 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
+                            className="p-2.5 rounded-lg bg-[#27272a]/70 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
                             title="Excluir OSM"
                             aria-label="Excluir OSM"
                           >
@@ -621,16 +618,16 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                         </div>
                       </div>
 
-                      {/* Informações de Quantidade */}
+                      {/* Observação da OSM */}
                       <div className="bg-[#121215] border border-[#232328] rounded-xl p-3 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <div className="w-7 h-7 rounded-lg bg-purple-950/60 border border-purple-800/40 flex items-center justify-center text-purple-300">
                             <Boxes className="w-3.5 h-3.5" />
                           </div>
-                          <div>
-                            <div className="text-[10px] text-[#a1a1aa] font-medium">Quantidade</div>
-                            <div className="font-mono font-black text-sm text-purple-200">
-                              {batches.toLocaleString('pt-BR')} <span className="text-[11px] text-purple-400 font-sans font-bold">{op.unidade || 'Kg'}</span>
+                          <div className="min-w-0">
+                            <div className="text-[10px] text-[#a1a1aa] font-medium">Observação</div>
+                            <div className={`font-sans font-bold text-xs truncate ${(op.granel || op.observation) ? 'text-purple-200' : 'text-[#71717a]'}`}>
+                              {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
                             </div>
                           </div>
                         </div>
@@ -643,13 +640,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                           </div>
                         </div>
                       </div>
-
-                      {/* Observação (se houver) */}
-                      {op.granel && op.granel !== op.number && (
-                        <div className="text-[11px] text-[#a1a1aa] bg-[#141417] px-2.5 py-1.5 rounded-lg border border-[#222227] italic truncate">
-                          Obs: {op.granel}
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -792,37 +782,14 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               />
             </div>
 
-            {/* 6. Quantidade */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <Label className="text-xs font-semibold text-[#d4d4d8] flex items-center gap-1.5">
-                  <Scale className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Quantidade <span className="text-purple-400">*</span></span>
-                </Label>
-                <span className="text-[10px] text-purple-400 font-mono font-bold bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800/40">
-                  Unidade: Kg
-                </span>
-              </div>
-              <Input
-                type="number"
-                min="0.01"
-                step="any"
-                placeholder="Ex: 1000"
-                value={batchCount}
-                onChange={(e) => setBatchCount(e.target.value)}
-                required
-                className="bg-[#121215] border-[#27272a] focus:border-purple-500 text-white font-mono text-sm placeholder:text-[#52525b] h-10 rounded-xl"
-              />
-            </div>
-
-            {/* 7. Observação */}
+            {/* 6. Observação */}
             <div>
               <Label className="text-xs font-semibold text-[#d4d4d8] flex items-center gap-1.5 mb-1.5">
                 <FileText className="w-3.5 h-3.5 text-purple-400" />
                 <span>Observação <span className="text-[#71717a] font-normal">(Opcional)</span></span>
               </Label>
               <textarea
-                placeholder="Ex: adicionado 15kg alcool ceto"
+                placeholder="Ex: aguardando laboratório"
                 value={observation}
                 onChange={(e) => setObservation(e.target.value)}
                 rows={2}

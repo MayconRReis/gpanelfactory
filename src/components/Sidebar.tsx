@@ -319,7 +319,7 @@ export function Sidebar({
               <button
                 onClick={onRefresh}
                 title="Sincronizar dados em tempo real"
-                className={`p-1.5 text-[#71717a] hover:text-white hover:bg-[#1e1e28] rounded-lg transition-colors ${
+                className={`p-2.5 text-[#71717a] hover:text-white hover:bg-[#1e1e28] rounded-lg transition-colors ${
                   isRefreshing ? 'animate-spin text-blue-400' : ''
                 }`}
               >
@@ -328,7 +328,7 @@ export function Sidebar({
               <button
                 onClick={onSignOut}
                 title="Encerrar sessão"
-                className="p-1.5 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors"
+                className="p-2.5 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors"
               >
                 <LogOut className="w-3.5 h-3.5" />
               </button>
@@ -346,7 +346,7 @@ export function Sidebar({
               <button
                 onClick={onRefresh}
                 title="Sincronizar"
-                className={`p-1.5 text-[#71717a] hover:text-white hover:bg-[#1e1e28] rounded-lg ${
+                className={`p-2.5 text-[#71717a] hover:text-white hover:bg-[#1e1e28] rounded-lg ${
                   isRefreshing ? 'animate-spin text-blue-400' : ''
                 }`}
               >
@@ -355,7 +355,7 @@ export function Sidebar({
               <button
                 onClick={onSignOut}
                 title="Sair"
-                className="p-1.5 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg"
+                className="p-2.5 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg"
               >
                 <LogOut className="w-3.5 h-3.5" />
               </button>

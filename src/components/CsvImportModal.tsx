@@ -911,7 +911,7 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
               )}
 
               {/* Tabela Editável de Pré-Visualização */}
-              <div className="bg-[#0e0e12] border border-[#222228] rounded-xl overflow-hidden shadow-xl max-h-[44vh] overflow-y-auto">
+              <div className="bg-[#0e0e12] border border-[#222228] rounded-xl shadow-xl max-h-[44vh] overflow-auto">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-[#17171d] text-[#71717a] uppercase font-bold text-[10px] tracking-wider border-b border-[#24242c] sticky top-0 z-10">
                     <tr>
@@ -1013,7 +1013,7 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
                           <button
                             type="button"
                             onClick={() => handleDeleteRow(idx)}
-                            className="text-[#71717a] hover:text-red-400 p-1 rounded hover:bg-red-950/30 transition-colors"
+                            className="text-[#71717a] hover:text-red-400 p-2 rounded hover:bg-red-950/30 transition-colors"
                             title="Remover linha"
                           >
                             <Trash2 className="w-3.5 h-3.5" />

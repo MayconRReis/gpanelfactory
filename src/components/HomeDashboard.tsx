@@ -6,8 +6,8 @@ import {
   Eye,
   LayoutDashboard,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth, saveMonthlyGoal } from '../services/db';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
+import { groupProductionByDayAndSetor, groupProductionByMonth } from '../services/db';
 import {
   ResponsiveContainer,
   BarChart,
@@ -27,8 +27,11 @@ interface HomeDashboardProps {
   events: ProductionEvent[];
   rotations?: Record<string, string>;
   goals?: MonthlyGoal[];
+  /** Meta mensal ÚNICA da fábrica (tabela factory_monthly_goal), editada via GoalsModal na Sidebar. */
+  factoryMonthlyGoal?: number | null;
+  /** Metas diárias fixas por linha (tabela line_daily_goals), editadas via GoalsModal na Sidebar. */
+  lineDailyGoals?: LineDailyGoal[];
   onNavigateTab?: (tab: 'cronograma' | 'ops' | 'users' | 'events' | 'daily_production') => void;
-  onNewOp?: () => void;
   onOpenShareModal?: () => void;
   isReadOnly?: boolean;
 }
@@ -104,8 +107,9 @@ export function HomeDashboard({
   events,
   rotations = {},
   goals = [],
+  factoryMonthlyGoal = null,
+  lineDailyGoals = [],
   onNavigateTab,
-  onNewOp,
   onOpenShareModal,
   isReadOnly = false,
 }: HomeDashboardProps) {
@@ -125,28 +129,20 @@ export function HomeDashboard({
     return 100000;
   }, [goals, currentCalendarYear, currentCalendarMonth]);
 
-  const [customGoal, setCustomGoal] = useState<number | null>(null);
-  const monthlyGoal = customGoal !== null ? customGoal : currentMonthGoalFromDb;
-  const [isEditingGoal, setIsEditingGoal] = useState(false);
-  const [tempGoal, setTempGoal] = useState(monthlyGoal.toString());
+  // Meta mensal: prioriza a meta ÚNICA da fábrica (factory_monthly_goal,
+  // editada via botão "Metas de Produção" na Sidebar); só cai para o cálculo
+  // legado por linha (monthly_goals) enquanto a meta da fábrica ainda não
+  // tiver sido configurada. Edição acontece exclusivamente pelo GoalsModal —
+  // não há mais edição inline aqui.
+  const monthlyGoal = (factoryMonthlyGoal !== null && factoryMonthlyGoal !== undefined)
+    ? factoryMonthlyGoal
+    : currentMonthGoalFromDb;
 
-  const handleSaveGoal = async () => {
-    const val = parseInt(tempGoal, 10);
-    if (!isNaN(val) && val > 0) {
-      setCustomGoal(val);
-      try {
-        await saveMonthlyGoal({
-          lineId: 'line-1',
-          year: currentCalendarYear,
-          month: currentCalendarMonth,
-          goalQuantity: val,
-        });
-      } catch (err) {
-        console.warn('Erro ao persistir meta mensal no Supabase:', err);
-      }
-    }
-    setIsEditingGoal(false);
-  };
+  // Resolve a meta diária fixa de uma linha específica (line_daily_goals).
+  const getLineDailyGoal = useCallback((lineId: string): number | null => {
+    const found = lineDailyGoals.find(g => g.lineId === lineId);
+    return found ? found.goalQuantity : null;
+  }, [lineDailyGoals]);
 
   // ---------------- HELPER PARA RESOLVER LÍDER DA LINHA PELA ESCALA ----------------
   const getLineLeader = useCallback((lineId: string): UserProfile | null => {
@@ -204,9 +200,11 @@ export function HomeDashboard({
     return Math.min(Math.round((monthProducedQuantity / monthlyGoal) * 100 * 10) / 10, 100);
   }, [monthProducedQuantity, monthlyGoal]);
 
-  // 2. OPs Concluídas no Mês
+  // 2. OPs Concluídas no Mês — apenas OPs "da série 400" (número começa com "4"),
+  // ou seja, OPs reais de produção/Envase, excluindo as OSMs de Pesagem/Manipulação
+  // (que também ficam com status 'completed', mas não são OPs de produção).
   const completedOpsMonth = useMemo(() => {
-    return opsThisMonth.filter((o) => o.status === 'completed').length;
+    return opsThisMonth.filter((o) => o.status === 'completed' && /^4/.test(String(o.number).trim())).length;
   }, [opsThisMonth]);
 
   const totalCompletedOps = useMemo(() => {
@@ -284,8 +282,10 @@ export function HomeDashboard({
 
       const s = op.setor;
       if (s === 'Pesagem') {
-        if (isYear) pesagemAno += qty;
-        if (isMonth) pesagemMes += qty;
+        // Pesagem não produz Kg/Un (isso fica zerado até a Manipulação finalizar
+        // a OSM) — aqui "Qtd" é a contagem de OSMs que a Pesagem adicionou.
+        if (isYear) pesagemAno += 1;
+        if (isMonth) pesagemMes += 1;
       } else if (s === 'Manipulação') {
         if (isYear) manipAno += qty;
         if (isMonth) manipMes += qty;
@@ -474,8 +474,8 @@ export function HomeDashboard({
 
         </div>
 
-        {/* ── 2. OS 6 VIBRANT CARDS DE MÉTRICAS OPERACIONAIS ── */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        {/* ── 2. OS 5 VIBRANT CARDS DE MÉTRICAS OPERACIONAIS ── */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           
           {/* CARD 1: AZUL (OPs Ativas) */}
           <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
@@ -517,37 +517,28 @@ export function HomeDashboard({
             </div>
           </div>
 
-          {/* CARD 4: VERDE ESMERALDA (Tempo Trabalhado) */}
-          <div className="bg-[#059669] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
+          {/* CARD 4: LILÁS PASTEL (Tempo Trabalhado) — cor e conteúdo ajustados
+              manualmente pelo usuário, mantido aqui para ficar em sincronia. */}
+          <div className="bg-[#9157CD] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
-              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
+              <span className="text-[10px] font-black uppercase tracking-wider text-amber-100 truncate">
                 TEMP TRABALHADO
               </span>
               {WORK_HOURS_ARE_ESTIMATED && (
                 <span
                   className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0"
-                  title="Métrica estimada: horas de turno e ritmo médio"
+                  title="Métrica baseada em estimativa do ritmo diário"
                 >
                   Estimado
                 </span>
               )}
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
-              {workHoursToday}h {workMinutesToday}m
+              {idleHoursToday}h {idleMinutesToday}m
             </div>
           </div>
 
-          {/* CARD 5: ÍNDIGO (Total Produzido) */}
-          <div className="bg-[#4f46e5] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
-            <div className="text-[10px] font-black uppercase tracking-wider text-indigo-100 truncate">
-              TOTAL PRODUZIDO
-            </div>
-            <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
-              {totalProduced.toLocaleString()}
-            </div>
-          </div>
-
-          {/* CARD 6: VERDE ESMERALDA CLARO (OP Finalizadas) */}
+          {/* CARD 5: VERDE ESMERALDA CLARO (OP Finalizadas) */}
           <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
             <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
               OPS FINALIZADAS
@@ -594,24 +585,29 @@ export function HomeDashboard({
             </div>
           </div>
 
-          <div className="h-[210px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={monthlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
-                <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
-                  formatter={(value: any, name: any) => [
-                    `${Number(value || 0).toLocaleString('pt-BR')} un`,
-                    name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name
-                  ]}
-                />
-                <ReferenceLine y={activeMonthGoal} stroke="#3b82f6" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: 'Meta Mês', fill: '#3b82f6', fontSize: 9, position: 'insideTopRight' }} />
-                <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
-                <Bar dataKey="realizado" fill="#ef4444" radius={[4, 4, 0, 0]} name="Realizado" />
-              </BarChart>
-            </ResponsiveContainer>
+          {/* Em telas estreitas os 12 meses ficam ilegíveis se espremidos no
+              container — deixamos o gráfico com uma largura mínima e o
+              container rola horizontalmente em vez de comprimir as barras. */}
+          <div className="h-[210px] w-full overflow-x-auto">
+            <div className="h-full min-w-[600px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={monthlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                    formatter={(value: any, name: any) => [
+                      `${Number(value || 0).toLocaleString('pt-BR')} un`,
+                      name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name
+                    ]}
+                  />
+                  <ReferenceLine y={activeMonthGoal} stroke="#3b82f6" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: 'Meta Mês', fill: '#3b82f6', fontSize: 9, position: 'insideTopRight' }} />
+                  <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
+                  <Bar dataKey="realizado" fill="#ef4444" radius={[4, 4, 0, 0]} name="Realizado" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         </div>
 
@@ -647,6 +643,7 @@ export function HomeDashboard({
             
             const lineTarget = Math.max(1, Math.round(monthlyGoal / Math.max(1, lines.length)));
             const linePercent = Math.min(Math.round((lineProduced / lineTarget) * 100), 100);
+            const lineDailyTarget = getLineDailyGoal(line.id);
 
             // Líder alocado pela escala
             const assignedLeader = getLineLeader(line.id);
@@ -677,22 +674,22 @@ export function HomeDashboard({
                     <div>
                       {/* Cabeçalho do Card */}
                       <div className="border-b border-[#1f1f28] pb-2.5">
-                        <div className="flex items-center justify-between">
-                          <h4 className="text-xs font-black text-white uppercase tracking-wider">
+                        <div className="flex items-center justify-between gap-2">
+                          <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0">
                             {line.name}
                           </h4>
-                          <span className="text-[10px] text-[#71717a] font-semibold">
+                          <span className="text-[10px] text-[#71717a] font-semibold shrink-0">
                             {lineOps.length} OPs • {linePlanned.toLocaleString()} un
                           </span>
                         </div>
 
                         {/* Líder Escalado */}
-                        <div className="flex items-center justify-between mt-1 text-[11px]">
-                          <span className="text-[#71717a] flex items-center gap-1">
+                        <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
+                          <span className="text-[#71717a] flex items-center gap-1 shrink-0">
                             <Users className="w-3 h-3 text-blue-400" />
                             <span>Líder:</span>
                           </span>
-                          <span className="font-bold text-blue-300">
+                          <span className="font-bold text-blue-300 truncate min-w-0 text-right">
                             {assignedLeader?.name || 'Aguardando escala'}
                           </span>
                         </div>
@@ -793,6 +790,12 @@ export function HomeDashboard({
                         <span>{lineProduced.toLocaleString()} un ({lineCompletedOps.length} OPs)</span>
                         <span>meta {lineTarget.toLocaleString()} un</span>
                       </div>
+
+                      {lineDailyTarget !== null && (
+                        <div className="flex items-center justify-end text-[10px] text-[#52525b] font-medium">
+                          <span>meta diária {lineDailyTarget.toLocaleString()} un/dia</span>
+                        </div>
+                      )}
                     </div>
 
                   </div>

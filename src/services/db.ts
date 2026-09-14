@@ -2293,11 +2293,18 @@ export const finishOP = async (
     completed_at: completedAtIso,
   };
 
+  // `production_orders` não tem a coluna `completed_at` (confirmado em produção
+  // — mesma causa do erro "Could not find the 'scheduled_days' column of
+  // 'production_orders'"). Envia o payload restrito para ela e o completo (com
+  // completed_at) só para `ops`.
+  const opPayloadForProductionOrders: any = { ...opPayload };
+  delete opPayloadForProductionOrders.completed_at;
+
   try {
     // Tenta production_orders primeiro — se falhar, tenta ops
     const { error: err1 } = await supabase
       .from('production_orders')
-      .update(opPayload)
+      .update(opPayloadForProductionOrders)
       .eq('id', opId);
 
     if (err1) {
@@ -2352,15 +2359,45 @@ export const reportQuantity = async (opId: string, lineId: string, leaderId: str
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  // Grava sequencialmente com log de erro por tabela (NÃO usar Promise.allSettled
+  // aqui: uma falha silenciosa em `production_orders` é exatamente o motivo pelo
+  // qual o KPI de Envase ficava zerado — getAllOPs() lê primeiro de
+  // `production_orders`, então se só esse write falhar, o valor reportado nunca
+  // aparece após um refresh, mesmo a tela do líder mostrando certo na hora).
   try {
-    await Promise.allSettled([
-      supabase.from('production_orders').update({ produced_quantity: newQty }).eq('id', opId),
-      supabase.from('ops').update({ produced_quantity: newQty }).eq('id', opId),
-      supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt }),
-      supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt }),
-    ]);
-  } catch (error) {
-    console.error('Erro ao registrar quantidade:', error);
+    const resProductionOrders = await supabase.from('production_orders').update({ produced_quantity: newQty }).eq('id', opId);
+    if (resProductionOrders.error) {
+      console.error(`[reportQuantity] Falha ao gravar produced_quantity em production_orders (OP ${opId}):`, resProductionOrders.error.message);
+    }
+  } catch (err) {
+    console.error(`[reportQuantity] Erro inesperado ao gravar em production_orders (OP ${opId}):`, err);
+  }
+
+  try {
+    const resOps = await supabase.from('ops').update({ produced_quantity: newQty }).eq('id', opId);
+    if (resOps.error) {
+      console.error(`[reportQuantity] Falha ao gravar produced_quantity em ops (OP ${opId}):`, resOps.error.message);
+    }
+  } catch (err) {
+    console.error(`[reportQuantity] Erro inesperado ao gravar em ops (OP ${opId}):`, err);
+  }
+
+  try {
+    const resProdEvents = await supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt });
+    if (resProdEvents.error) {
+      console.error(`[reportQuantity] Falha ao gravar em production_events (OP ${opId}):`, resProdEvents.error.message);
+    }
+  } catch (err) {
+    console.error(`[reportQuantity] Erro inesperado ao gravar em production_events (OP ${opId}):`, err);
+  }
+
+  try {
+    const resEvents = await supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt });
+    if (resEvents.error) {
+      console.error(`[reportQuantity] Falha ao gravar em events (OP ${opId}):`, resEvents.error.message);
+    }
+  } catch (err) {
+    console.error(`[reportQuantity] Erro inesperado ao gravar em events (OP ${opId}):`, err);
   }
 };
 
