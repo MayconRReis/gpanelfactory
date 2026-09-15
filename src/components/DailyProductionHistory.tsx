@@ -814,12 +814,12 @@ export function DailyProductionHistory({
         /* CARDS EXCLUSIVOS DO SETOR DE PESAGEM */
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           
-          {/* CARD 1: QUANTIDADE DE OSMs ADICIONADAS NO DIA */}
+          {/* CARD 1: QUANTIDADE DE OPs ADICIONADAS NO DIA */}
           <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between shadow-md">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
                 <Scale className="w-3.5 h-3.5" />
-                OSMs ADICIONADAS NO DIA
+                OPs ADICIONADAS NO DIA
               </span>
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-950/70 text-purple-300 border border-purple-800/40 font-mono">
                 {selectedDate}
@@ -832,7 +832,7 @@ export function DailyProductionHistory({
                   {pesagemDailyStats.count}
                 </span>
                 <span className="text-xs font-bold text-purple-300">
-                  {pesagemDailyStats.count === 1 ? 'OSM no dia' : 'OSMs no dia'}
+                  {pesagemDailyStats.count === 1 ? 'OP no dia' : 'OPs no dia'}
                 </span>
               </div>
               <div className="text-xs font-mono text-[#a1a1aa] mt-1 flex items-center gap-1.5">
@@ -864,7 +864,7 @@ export function DailyProductionHistory({
                 <span className="text-3xl font-black text-[#f4f4f5] font-mono tracking-tight">
                   {pesagemMonthStats.count}
                 </span>
-                <span className="text-xs font-bold text-cyan-300">OSMs no mês</span>
+                <span className="text-xs font-bold text-cyan-300">OPs no mês</span>
               </div>
               <div className="text-xs font-mono text-[#a1a1aa] mt-1 flex items-center gap-1.5">
                 <span>Volume Mensal:</span>
@@ -895,7 +895,7 @@ export function DailyProductionHistory({
                 <span className="text-3xl font-black text-[#f4f4f5] font-mono tracking-tight">
                   {pesagemYearStats.count}
                 </span>
-                <span className="text-xs font-bold text-emerald-300">OSMs no ano</span>
+                <span className="text-xs font-bold text-emerald-300">OPs no ano</span>
               </div>
               <div className="text-xs font-mono text-[#a1a1aa] mt-1 flex items-center gap-1.5">
                 <span>Volume Acumulado:</span>
@@ -905,7 +905,7 @@ export function DailyProductionHistory({
 
             <div className="pt-2 border-t border-[#27272a]/60 text-[10px] text-[#71717a] flex items-center justify-between font-mono">
               <span>Média mensal:</span>
-              <strong className="text-emerald-300">~{pesagemYearStats.avgOsmPerMonth} OSMs/mês</strong>
+              <strong className="text-emerald-300">~{pesagemYearStats.avgOsmPerMonth} OPs/mês</strong>
             </div>
           </div>
 
@@ -1106,7 +1106,7 @@ export function DailyProductionHistory({
                     </h3>
                     <p className="text-[11px] text-[#71717a]">
                       {isPesagemMode
-                        ? `Quantidade de OSMs e volume (Kg) pesado dia a dia. Clique em um dia para inspecionar as OSMs.`
+                        ? `Quantidade de OPs e volume (Kg) pesado dia a dia. Clique em um dia para inspecionar as OPs.`
                         : `Volume dia a dia. Clique em um dia para inspecionar o histórico produtivo.`}
                     </p>
                   </div>
@@ -1121,7 +1121,7 @@ export function DailyProductionHistory({
                             dailyChartMode === 'osms' ? 'bg-purple-600 text-white shadow' : 'text-[#a1a1aa] hover:text-white'
                           }`}
                         >
-                          Qtd de OSMs
+                          Qtd de OPs
                         </button>
                         <button
                           onClick={() => setDailyChartMode('volume')}
@@ -1169,7 +1169,7 @@ export function DailyProductionHistory({
                     <>
                       {dailyChartMode === 'osms' && (
                         <span className="flex items-center gap-1 text-purple-400 font-medium">
-                          <span className="w-2.5 h-2.5 rounded-sm bg-purple-500"></span> OSMs Adicionadas (Turno Único)
+                          <span className="w-2.5 h-2.5 rounded-sm bg-purple-500"></span> OPs Adicionadas (Turno Único)
                         </span>
                       )}
                       {dailyChartMode === 'volume' && (
@@ -1178,7 +1178,7 @@ export function DailyProductionHistory({
                         </span>
                       )}
                       <span className="flex items-center gap-1 text-[#a1a1aa] font-medium ml-auto">
-                        Total no Mês: <strong className="text-white font-mono">{pesagemMonthStats.count} OSMs ({pesagemMonthStats.totalKg.toLocaleString('pt-BR')} Kg)</strong>
+                        Total no Mês: <strong className="text-white font-mono">{pesagemMonthStats.count} OPs ({pesagemMonthStats.totalKg.toLocaleString('pt-BR')} Kg)</strong>
                       </span>
                     </>
                   ) : (
@@ -1253,17 +1253,17 @@ export function DailyProductionHistory({
                       formatter={(value: any, name: any, item: any) => {
                         if (isPesagemMode) {
                           const payload = item?.payload;
-                          if (name === 'osms' || name === 'OSMs Adicionadas') {
-                            return [`${Number(value || 0)} OSMs (${Number(payload?.pesagemKg || 0).toLocaleString('pt-BR')} Kg)`, 'Pesagem'];
+                          if (name === 'osms' || name === 'OPs Adicionadas' || name === 'OSMs Adicionadas') {
+                            return [`${Number(value || 0)} OPs (${Number(payload?.pesagemKg || 0).toLocaleString('pt-BR')} Kg)`, 'Pesagem'];
                           }
                           if (name === 'pesagemKg' || name === 'Volume Pesado (Kg)') {
-                            return [`${Number(value || 0).toLocaleString('pt-BR')} Kg (${Number(payload?.osms || 0)} OSMs)`, 'Volume Pesado'];
+                            return [`${Number(value || 0).toLocaleString('pt-BR')} Kg (${Number(payload?.osms || 0)} OPs)`, 'Volume Pesado'];
                           }
-                          if (name === 'turno1Osm' || name === '1º Turno (OSMs)') {
-                            return [`${Number(value || 0)} OSMs (${Number(payload?.turno1PesagemKg || 0).toLocaleString('pt-BR')} Kg)`, '1º Turno'];
+                          if (name === 'turno1Osm' || name === '1º Turno (OPs)') {
+                            return [`${Number(value || 0)} OPs (${Number(payload?.turno1PesagemKg || 0).toLocaleString('pt-BR')} Kg)`, '1º Turno'];
                           }
-                          if (name === 'turno2Osm' || name === '2º Turno (OSMs)') {
-                            return [`${Number(value || 0)} OSMs (${Number(payload?.turno2PesagemKg || 0).toLocaleString('pt-BR')} Kg)`, '2º Turno'];
+                          if (name === 'turno2Osm' || name === '2º Turno (OPs)') {
+                            return [`${Number(value || 0)} OPs (${Number(payload?.turno2PesagemKg || 0).toLocaleString('pt-BR')} Kg)`, '2º Turno'];
                           }
                           return [`${Number(value || 0)}`, name];
                         }
@@ -1292,7 +1292,7 @@ export function DailyProductionHistory({
                     {isPesagemMode ? (
                       <>
                         {dailyChartMode === 'osms' && (
-                          <Bar dataKey="osms" fill="#a855f7" radius={[4, 4, 0, 0]} name="OSMs Adicionadas (Turno Único)">
+                          <Bar dataKey="osms" fill="#a855f7" radius={[4, 4, 0, 0]} name="OPs Adicionadas (Turno Único)">
                             {dailyChartData.map((entry, index) => (
                               <Cell
                                 key={`cell-osms-${index}`}
@@ -1433,7 +1433,7 @@ export function DailyProductionHistory({
                         if (isPesagemMode) {
                           const payload = item?.payload;
                           return [
-                            `${Number(payload?.pesagemOsms || 0)} OSMs (${Number(payload?.pesagemKg || 0).toLocaleString('pt-BR')} Kg)`,
+                            `${Number(payload?.pesagemOsms || 0)} OPs (${Number(payload?.pesagemKg || 0).toLocaleString('pt-BR')} Kg)`,
                             'Pesagem'
                           ];
                         }
@@ -1454,7 +1454,7 @@ export function DailyProductionHistory({
                       dataKey={isPesagemMode ? "pesagemOsms" : "realizado"}
                       fill="#a855f7"
                       radius={[4, 4, 0, 0]}
-                      name={isPesagemMode ? "OSMs Adicionadas" : "Realizado"}
+                      name={isPesagemMode ? "OPs Adicionadas" : "Realizado"}
                     >
                       {monthlyChartData.map((entry, index) => (
                         <Cell
@@ -1473,7 +1473,7 @@ export function DailyProductionHistory({
                 <span>Mês em foco: <strong className="text-purple-300">{monthlyChartData[selectedMonthIndex]?.monthName}</strong></span>
                 <span>
                   {isPesagemMode ? (
-                    <>Total Mês: <strong className="text-white font-mono">{monthlyChartData[selectedMonthIndex]?.pesagemOsms} OSMs ({monthlyChartData[selectedMonthIndex]?.pesagemKg.toLocaleString('pt-BR')} Kg)</strong></>
+                    <>Total Mês: <strong className="text-white font-mono">{monthlyChartData[selectedMonthIndex]?.pesagemOsms} OPs ({monthlyChartData[selectedMonthIndex]?.pesagemKg.toLocaleString('pt-BR')} Kg)</strong></>
                   ) : (
                     <>Atingimento no mês: <strong className="text-white">{monthGoal > 0 ? Math.round((monthlyChartData[selectedMonthIndex]?.realizado / monthGoal) * 100) : 0}%</strong></>
                   )}
@@ -1493,7 +1493,7 @@ export function DailyProductionHistory({
           <div>
             <h3 className="text-sm font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
               <Package className="w-4 h-4 text-emerald-400" />
-              {isPesagemMode ? `OSMs Adicionadas Neste Dia (${filteredOpsOfDay.length})` : 'O Que Foi Produzido Neste Dia'}
+              {isPesagemMode ? `OPs Adicionadas Neste Dia (${filteredOpsOfDay.length})` : 'O Que Foi Produzido Neste Dia'}
             </h3>
             <p className="text-xs text-[#a1a1aa] mt-0.5">
               {isPesagemMode

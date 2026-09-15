@@ -45,8 +45,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // Estado para inputs de Kg manipulados em andamento: map de opId -> string
   const [kgInputs, setKgInputs] = useState<Record<string, string>>({});
 
-  // Sub-abas de visualização: Dashboard de Produção (Diária & Semanal) vs Operação em Tempo Real
-  const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('dashboard');
+  // Sub-abas de visualização: Operação em Tempo Real vs Dashboard de Produção (Diária & Semanal)
+  const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('operacao');
 
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
@@ -213,7 +213,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         scheduledDate: new Date().toISOString().split('T')[0],
       });
 
-      showToast(`Manipulação da OSM ${pesagemOp.number} iniciada com sucesso!`, 'success');
+      showToast(`Manipulação da OP ${pesagemOp.number} iniciada com sucesso!`, 'success');
       await fetchData(true);
     } catch (err) {
       console.error('Erro ao iniciar manipulação:', err);
@@ -223,7 +223,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     }
   };
 
-  // 2. Abrir modal para finalizar OSM com seleção de turno
+  // 2. Abrir modal para finalizar OP com seleção de turno
   const handleOpenFinishModal = (op: ProductionOrder) => {
     // Não há mais "quantidade planejada" para Manipulação (isso ficou zerado
     // desde que a Pesagem parou de informar Kg) — não usar `plannedQuantity`
@@ -235,7 +235,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     setSelectedShift(detectedShift);
   };
 
-  // 3. Confirmar finalização da OSM
+  // 3. Confirmar finalização da OP
   const handleConfirmFinish = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!profile || !finishingOp) return;
@@ -251,12 +251,12 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       // Passa producedQuantity direto para finishOP — grava tudo em uma operação
       await finishOP(finishingOp.id, 'area-manipulacao', profile.uid, selectedShift, kgNum);
 
-      showToast(`OSM ${finishingOp.number} finalizada no turno da ${selectedShift}!`, 'success');
+      showToast(`OP ${finishingOp.number} finalizada no turno da ${selectedShift}!`, 'success');
       setFinishingOp(null);
       await fetchData(true);
     } catch (err) {
-      console.error('Erro ao finalizar OSM:', err);
-      showToast('Erro ao finalizar OSM.', 'error');
+      console.error('Erro ao finalizar OP:', err);
+      showToast('Erro ao finalizar OP.', 'error');
     } finally {
       setIsFinishingSubmitting(false);
     }
@@ -366,39 +366,19 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
       {/* BARRA DE NAVEGAÇÃO DE ABAS (OPERACIONAL VS DASHBOARD DE PRODUÇÃO) */}
       <div className={`bg-[#121216]/95 border border-[#27272a] px-4 lg:px-6 py-2.5 z-20 backdrop-blur-md ${embedded ? 'rounded-2xl shadow-md' : 'sticky top-[65px] border-b'}`}>
-        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveViewTab('dashboard')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
-                activeViewTab === 'dashboard'
-                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
-                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              <span>Dashboard de Produção</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans font-bold ${
-                activeViewTab === 'dashboard'
-                  ? 'bg-cyan-800 text-cyan-200'
-                  : 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/40'
-              }`}>
-                diária & semanal
-              </span>
-            </button>
-
+        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
             <button
               type="button"
               onClick={() => setActiveViewTab('operacao')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
                 activeViewTab === 'operacao'
                   ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
                   : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
               }`}
             >
-              <FlaskConical className="w-4 h-4" />
-              <span>Operação em Tempo Real</span>
+              <FlaskConical className="w-4 h-4 shrink-0" />
+              <span>OPERAÇÃO</span>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
                 activeViewTab === 'operacao'
                   ? 'bg-cyan-800 text-white'
@@ -407,11 +387,31 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 {inProgressManipulacaoOps.length + availablePesagemOps.length}
               </span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveViewTab('dashboard')}
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                activeViewTab === 'dashboard'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 shrink-0" />
+              <span>DASHBOARD</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
+                activeViewTab === 'dashboard'
+                  ? 'bg-cyan-800 text-cyan-200'
+                  : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
+              }`}>
+                diária & semanal
+              </span>
+            </button>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
-            <span className="hidden sm:inline text-[#71717a]">Hoje na Manipulação:</span>
-            <span className="font-mono font-bold text-cyan-300 bg-cyan-950/60 px-2.5 py-1 rounded-lg border border-cyan-800/40">
+          <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">
+            <span className="text-[#71717a]">Hoje na Manipulação:</span>
+            <span className="font-mono font-bold text-cyan-300 bg-cyan-950/60 px-2.5 py-1 rounded-lg border border-cyan-800/40 whitespace-nowrap">
               {totalKgHoje.toLocaleString('pt-BR')} Kg
             </span>
           </div>
@@ -428,35 +428,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           />
         ) : (
           <>
-            {/* Barra de ação rápida na visão operacional */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 rounded-2xl">
-              <div>
-                <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  <FlaskConical className="w-4 h-4 text-cyan-400" />
-                  <span>Painel Operacional de Manipulação</span>
-                </h2>
-                <p className="text-xs text-[#a1a1aa] mt-0.5">
-                  Acompanhe os reatores, inicie misturas a partir da Pesagem e encerre com o turno.
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setActiveViewTab('dashboard')}
-                className="h-9 px-3 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-cyan-300 hover:text-white text-xs font-bold flex items-center gap-1.5"
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                <span>Ver Gráficos & Produção Semanal</span>
-              </Button>
-            </div>
-        {/* SEÇÃO 1: OSMS EM ANDAMENTO (DA MANIPULAÇÃO) */}
-        {inProgressManipulacaoOps.length > 0 && (
+            {/* SEÇÃO 1: OPS EM ANDAMENTO (DA MANIPULAÇÃO) */}
+            {inProgressManipulacaoOps.length > 0 && (
           <section className="space-y-4">
             <div className="flex items-center justify-between border-b border-[#27272a] pb-3">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
                 <h2 className="text-lg font-bold text-white tracking-tight">
-                  OSMs em Andamento ({inProgressManipulacaoOps.length})
+                  OPs em Andamento ({inProgressManipulacaoOps.length})
                 </h2>
               </div>
               <span className="text-xs text-cyan-400 font-medium">Processo de Mistura / Homogeneização</span>
@@ -465,31 +444,73 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {inProgressManipulacaoOps.map((op) => {
                 const currentKgValue = kgInputs[op.id] !== undefined ? kgInputs[op.id] : '';
+                const formattedTime = op.startedAt
+                  ? new Date(op.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                  : op.createdAt
+                  ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                  : '--:--';
 
                 return (
                   <div
                     key={op.id}
                     className="bg-[#18181b] border-2 border-cyan-500/50 shadow-lg shadow-cyan-950/20 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all"
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <span className="text-[10px] font-black uppercase tracking-wider text-cyan-400 bg-cyan-950/80 border border-cyan-800/60 px-2 py-0.5 rounded-md">
-                          Em Manipulação
+                    {/* Linha 1: Badges (indústria + status) à esquerda */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {op.industria && (
+                          <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 font-sans shadow-sm">
+                            {op.industria}
+                          </span>
+                        )}
+                        <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-cyan-950/90 text-cyan-300 border border-cyan-800/60 flex items-center gap-1.5 shadow-sm">
+                          <FlaskConical className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                          <span>Em Processo</span>
                         </span>
-                        <h3 className="font-mono text-xl font-black text-white mt-1">
-                          {op.number}
-                        </h3>
                       </div>
-
-                      <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-cyan-950/90 text-cyan-300 border border-cyan-800/60 flex items-center gap-1.5">
-                        <FlaskConical className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                        <span>Em Processo</span>
-                      </span>
                     </div>
 
-                    <div>
-                      <div className="text-xs text-[#a1a1aa]">Produto:</div>
-                      <div className="text-sm font-bold text-white mt-0.5">{op.product}</div>
+                    {/* Linha 2: Número da OP (esquerda) + Lote (direita) */}
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-mono text-2xl font-black text-white tracking-tight">
+                        {op.number}
+                      </h3>
+                      {op.lote ? (
+                        <span className="text-xs font-mono font-bold text-cyan-200 bg-cyan-950/80 border border-cyan-800/60 px-2.5 py-1 rounded-lg shadow-sm">
+                          Lote: {op.lote}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {/* Linha 3: Nome / Produto */}
+                    <div className="space-y-1">
+                      <div className="text-xs text-[#a1a1aa] font-medium">Nome:</div>
+                      <div className="text-sm font-bold text-white uppercase tracking-tight leading-snug">
+                        {op.product}
+                      </div>
+                    </div>
+
+                    {/* Bloco de Observação e Horário */}
+                    <div className="bg-[#121215] border border-[#27272a]/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-300 shrink-0 shadow-sm">
+                          <Boxes className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Observação</div>
+                          <div className={`text-xs font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
+                            {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Horário</div>
+                        <div className="font-mono text-xs font-bold text-white flex items-center gap-1 justify-end mt-1">
+                          <Clock className="w-3.5 h-3.5 text-[#71717a]" />
+                          <span>{formattedTime}</span>
+                        </div>
+                      </div>
                     </div>
 
                     {/* Entrada de Kg manipulados */}
@@ -521,7 +542,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                       className="h-11 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Finalizar OSM</span>
+                      <span>Finalizar OP</span>
                     </Button>
                   </div>
                 );
@@ -530,20 +551,20 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           </section>
         )}
 
-        {/* SEÇÃO 2: OSMS DISPONÍVEIS (DA PESAGEM) */}
+        {/* SEÇÃO 2: OPS DISPONÍVEIS (DA PESAGEM) */}
         <section className="space-y-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-[#27272a] pb-3">
-            <div>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-[#27272a] pb-3">
+            <div className="min-w-0 flex-1">
               <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                <Scale className="w-5 h-5 text-amber-400" />
-                <span>OSMs Disponíveis da Pesagem</span>
+                <Scale className="w-5 h-5 text-amber-400 shrink-0" />
+                <span>OPs Disponíveis da Pesagem</span>
               </h2>
               <p className="text-xs text-[#a1a1aa] mt-0.5">
                 Ordens pesadas aguardando início da manipulação e mistura.
               </p>
             </div>
 
-            <span className="text-xs text-amber-400 font-mono font-semibold bg-amber-950/60 border border-amber-800/40 px-2.5 py-1 rounded-lg">
+            <span className="text-xs text-amber-400 font-mono font-semibold bg-amber-950/60 border border-amber-800/40 px-2.5 py-1 rounded-lg shrink-0 self-start sm:self-auto whitespace-nowrap">
               {availablePesagemOps.length} disponíveis
             </span>
           </div>
@@ -558,60 +579,80 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               <div className="w-12 h-12 rounded-xl bg-amber-950/30 border border-amber-800/30 flex items-center justify-center text-amber-400 mb-3">
                 <Check className="w-6 h-6" />
               </div>
-              <h4 className="text-sm font-bold text-white mb-1">Nenhuma OSM aguardando manipulação</h4>
+              <h4 className="text-sm font-bold text-white mb-1">Nenhuma OP aguardando manipulação</h4>
               <p className="text-xs text-[#a1a1aa] max-w-sm">
-                Assim que o líder de Pesagem registrar uma nova OSM, ela aparecerá aqui automaticamente.
+                Assim que o líder de Pesagem registrar uma nova OP, ela aparecerá aqui automaticamente.
               </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {availablePesagemOps.map((op) => {
                 const isStarting = startingOpId === op.id;
+                const formattedTime = op.createdAt
+                  ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                  : '--:--';
 
                 return (
                   <div
                     key={op.id}
                     className="bg-[#18181b] border border-[#27272a] hover:border-amber-700/50 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-lg hover:shadow-amber-950/10"
                   >
-                    {/* Header — badges */}
-                    <div className="flex items-start justify-between gap-2">
-                      <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 bg-purple-950/70 border border-purple-800/50 px-2 py-0.5 rounded-md">
-                        Pesagem Concluída
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1 shrink-0">
+                    {/* Linha 1: Badges à esquerda e à direita (indústria + status) */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {op.industria && (
+                          <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-950/60 text-amber-300 border border-amber-800/40 font-sans shadow-sm">
+                            {op.industria}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1 shrink-0 shadow-sm">
                         <Clock className="w-3 h-3 text-amber-400" />
                         <span>Aguardando Manipulação</span>
                       </span>
                     </div>
 
-                    {/* Número da OSM */}
-                    <h3 className="font-mono text-xl font-black text-white">
-                      {op.number}
-                    </h3>
+                    {/* Linha 2: Número da OSM (esquerda) + Lote (direita) */}
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="font-mono text-2xl font-black text-white tracking-tight">
+                        {op.number}
+                      </h3>
+                      {op.lote ? (
+                        <span className="text-xs font-mono font-bold text-amber-200 bg-amber-950/80 border border-amber-800/60 px-2.5 py-1 rounded-lg shadow-sm">
+                          Lote: {op.lote}
+                        </span>
+                      ) : null}
+                    </div>
 
-                    {/* Dados da OSM */}
-                    <div className="space-y-2">
-                      {/* Nome / Produto */}
-                      <div className="flex justify-between items-start gap-2">
-                        <span className="text-[11px] text-[#a1a1aa] shrink-0">Nome:</span>
-                        <span className="text-[11px] font-semibold text-white text-right line-clamp-2 flex-1 min-w-0 break-words">{op.product}</span>
+                    {/* Linha 3: Nome / Produto */}
+                    <div className="space-y-1">
+                      <div className="text-xs text-[#a1a1aa] font-medium">Nome:</div>
+                      <div className="text-sm font-bold text-white uppercase tracking-tight leading-snug">
+                        {op.product}
+                      </div>
+                    </div>
+
+                    {/* Linha 4: Bloco de Observação e Horário */}
+                    <div className="bg-[#121215] border border-[#27272a]/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-xl bg-amber-950/80 border border-amber-800/60 flex items-center justify-center text-amber-300 shrink-0 shadow-sm">
+                          <Boxes className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Observação</div>
+                          <div className={`text-xs font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
+                            {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
+                          </div>
+                        </div>
                       </div>
 
-                      {/* Lote */}
-                      {op.lote && (
-                        <div className="flex justify-between items-center gap-2">
-                          <span className="text-[11px] text-[#a1a1aa] shrink-0">Lote:</span>
-                          <span className="font-mono text-[11px] font-bold text-cyan-300 bg-cyan-950/40 border border-cyan-800/30 px-1.5 py-0.5 rounded">{op.lote}</span>
+                      <div className="text-right shrink-0">
+                        <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Horário</div>
+                        <div className="font-mono text-xs font-bold text-white flex items-center gap-1 justify-end mt-1">
+                          <Clock className="w-3.5 h-3.5 text-[#71717a]" />
+                          <span>{formattedTime}</span>
                         </div>
-                      )}
-
-                      {/* Observação / granel */}
-                      {(op.granel || op.industria) && (
-                        <div className="flex justify-between items-start gap-2">
-                          <span className="text-[11px] text-[#a1a1aa] shrink-0">Obs:</span>
-                          <span className="text-[11px] text-[#e4e4e7] text-right line-clamp-2 flex-1 min-w-0 break-words">{op.granel || op.industria}</span>
-                        </div>
-                      )}
+                      </div>
                     </div>
 
                     <Button
@@ -638,13 +679,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
         </section>
 
-        {/* SEÇÃO 3: HISTÓRICO DE OSMS FINALIZADAS NA MANIPULAÇÃO */}
+        {/* SEÇÃO 3: HISTÓRICO DE OPS FINALIZADAS NA MANIPULAÇÃO */}
         {completedManipulacaoOps.length > 0 && (
           <section className="space-y-4 pt-4 border-t border-[#27272a]">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <History className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-white">OSMs Finalizadas na Manipulação</h3>
+                <h3 className="text-base font-bold text-white">OPs Finalizadas na Manipulação</h3>
               </div>
               <span className="text-xs text-[#a1a1aa] font-mono">
                 {completedManipulacaoOps.length} concluídas
@@ -706,7 +747,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               <FlaskConical className="w-5 h-5" />
             </div>
             <DialogTitle className="text-lg font-bold text-white">
-              Finalizar OSM {finishingOp?.number}
+              Finalizar OP {finishingOp?.number}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
               Confirme a quantidade de granel manipulada e selecione o turno de encerramento.

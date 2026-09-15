@@ -438,7 +438,7 @@ export function ManipulacaoDashboard({
     return arr.slice(0, 6);
   }, [viewTab, dailyData.opsDoDia, weeklyData.opsDaSemana]);
 
-  // ---------------- 4. TABELA DE DETALHE DE OSMS ----------------
+  // ---------------- 4. TABELA DE DETALHE DE OPS ----------------
   const displayedTableOps = useMemo(() => {
     const baseOps = tableScope === 'day' ? dailyData.opsDoDia : weeklyData.opsDaSemana;
 
@@ -467,7 +467,7 @@ export function ManipulacaoDashboard({
   const handleExportCsv = () => {
     if (displayedTableOps.length === 0) return;
 
-    const headers = ['Data', 'Turno', 'OSM', 'Produto/Granel', 'Lote', 'Indústria', 'Qtd Planejada (Kg)', 'Qtd Manipulada (Kg)', 'Status'];
+    const headers = ['Data', 'Turno', 'OP', 'Produto/Granel', 'Lote', 'Indústria', 'Qtd Planejada (Kg)', 'Qtd Manipulada (Kg)', 'Status'];
     const rows = displayedTableOps.map(op => {
       const shift = getNormalizedShift(op);
       const planned = op.plannedQuantity || 0;
@@ -1144,7 +1144,7 @@ export function ManipulacaoDashboard({
           <div>
             <h3 className="text-base font-bold text-white flex items-center gap-2">
               <FileSpreadsheet className="w-4 h-4 text-cyan-400" />
-              <span>Ordens de Serviço de Manipulação (OSMs)</span>
+              <span>Ordens de Produção de Manipulação (OPs)</span>
             </h3>
             <p className="text-xs text-[#a1a1aa] mt-0.5">
               Rastreabilidade individual de lotes, produtos e volumes manipulados
@@ -1196,7 +1196,7 @@ export function ManipulacaoDashboard({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Buscar OSM, lote..."
+                placeholder="Buscar OP, lote..."
                 className="w-full h-9 bg-[#18181b] border border-[#27272a] rounded-xl pl-8 pr-3 text-xs text-white placeholder-[#71717a] focus:outline-none focus:border-cyan-500"
               />
             </div>
@@ -1222,7 +1222,7 @@ export function ManipulacaoDashboard({
             <thead className="bg-[#18181f] text-[#a1a1aa] uppercase font-bold text-[10px] tracking-wider border-b border-[#222228]">
               <tr>
                 <th className="py-3 px-4">Data & Turno</th>
-                <th className="py-3 px-4">OSM #</th>
+                <th className="py-3 px-4">OP #</th>
                 <th className="py-3 px-4">Produto / Granel</th>
                 <th className="py-3 px-4">Lote</th>
                 <th className="py-3 px-4">Indústria</th>
@@ -1237,7 +1237,7 @@ export function ManipulacaoDashboard({
                 <tr>
                   <td colSpan={9} className="py-12 text-center text-[#71717a]">
                     <AlertCircle className="w-8 h-8 text-[#3f3f46] mx-auto mb-2" />
-                    <span className="text-sm font-bold block text-[#a1a1aa]">Nenhuma OSM encontrada</span>
+                    <span className="text-sm font-bold block text-[#a1a1aa]">Nenhuma OP encontrada</span>
                     <span className="text-xs">
                       {tableScope === 'day'
                         ? `Não há registros de manipulação para o dia ${selectedDate}.`
@@ -1271,7 +1271,7 @@ export function ManipulacaoDashboard({
                         </div>
                       </td>
 
-                      {/* OSM # */}
+                      {/* OP # */}
                       <td className="py-3 px-4 font-mono font-bold text-cyan-300">
                         {op.number || 'S/N'}
                       </td>

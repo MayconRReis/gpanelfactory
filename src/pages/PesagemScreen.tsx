@@ -362,8 +362,6 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               </div>
               <p className="text-xs text-[#a1a1aa] flex items-center gap-2 truncate">
                 <span>Turno Único (Manhã)</span>
-                <span className="hidden sm:inline">•</span>
-                <span className="hidden sm:inline font-mono text-purple-300">Série 300</span>
               </p>
             </div>
           </div>
@@ -412,18 +410,19 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
 
       {/* BARRA DE NAVEGAÇÃO DE ABAS */}
       <div className={`bg-[#121216]/95 border border-[#27272a] px-4 lg:px-6 py-2.5 z-20 backdrop-blur-md ${embedded ? 'rounded-2xl shadow-md' : 'sticky top-[65px] border-b'}`}>
-        <div className="max-w-6xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
             <button
+              type="button"
               onClick={() => setActiveViewTab('registro')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 ${
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
                 activeViewTab === 'registro'
                   ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
                   : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
               }`}
             >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>Registro de OSMs</span>
+              <FileSpreadsheet className="w-4 h-4 shrink-0" />
+              <span>Registro de OPs</span>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
                 activeViewTab === 'registro'
                   ? 'bg-purple-800 text-white'
@@ -434,14 +433,15 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
             </button>
 
             <button
+              type="button"
               onClick={() => setActiveViewTab('historico')}
-              className={`px-3.5 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 ${
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
                 activeViewTab === 'historico'
                   ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
                   : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
               }`}
             >
-              <BarChart3 className="w-4 h-4" />
+              <BarChart3 className="w-4 h-4 shrink-0" />
               <span>Histórico & Gráficos</span>
               <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
                 activeViewTab === 'historico'
@@ -453,10 +453,10 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
             </button>
           </div>
 
-          <div className="flex items-center gap-2 text-xs">
-            <span className="hidden sm:inline text-[#71717a]">Hoje na Pesagem:</span>
-            <span className="font-mono font-bold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-lg border border-purple-800/40">
-              {totalOsmsHoje.toLocaleString('pt-BR')} OSM{totalOsmsHoje !== 1 ? 's' : ''}
+          <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">
+            <span className="text-[#71717a]">Hoje na Pesagem:</span>
+            <span className="font-mono font-bold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-lg border border-purple-800/40 whitespace-nowrap">
+              {totalOsmsHoje.toLocaleString('pt-BR')} OP{totalOsmsHoje !== 1 ? 's' : ''}
             </span>
           </div>
         </div>
@@ -480,38 +480,38 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
         ) : (
           <>
             {/* Barra Superior da Seção: Título e Botão de Ação */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-5 rounded-2xl">
-              <div>
-                <div className="flex items-center gap-2">
-                  <FileSpreadsheet className="w-5 h-5 text-purple-400" />
-                  <h1 className="text-xl font-bold text-white tracking-tight">Registro de OSMs do Dia</h1>
+            <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 sm:p-5 rounded-2xl shadow-sm">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2.5">
+                  <FileSpreadsheet className="w-5 h-5 text-purple-400 shrink-0" />
+                  <h1 className="text-base sm:text-xl font-bold text-white tracking-tight">Registro de OPs do Dia</h1>
                 </div>
-                <p className="text-xs text-[#a1a1aa] mt-1">
+                <p className="text-xs text-[#a1a1aa] mt-1 line-clamp-2 sm:line-clamp-none">
                   Registre as bateladas pesadas de granel para disponibilização à equipe de Manipulação.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full lg:w-auto shrink-0">
                 <Button
                   variant="outline"
                   onClick={() => setActiveViewTab('historico')}
-                  className="h-11 px-4 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-purple-300 hover:text-white text-xs font-bold flex items-center gap-2"
+                  className="h-10 sm:h-11 px-3.5 sm:px-4 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-purple-300 hover:text-white text-xs font-bold flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap cursor-pointer"
                 >
-                  <BarChart3 className="w-4 h-4 text-purple-400" />
+                  <BarChart3 className="w-4 h-4 text-purple-400 shrink-0" />
                   <span>Ver Histórico & Gráficos</span>
                 </Button>
 
                 <Button
                   onClick={handleOpenModal}
-                  className="h-11 px-5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-sm shadow-lg shadow-purple-950/40 flex items-center gap-2 flex-1 sm:flex-initial justify-center transition-all transform active:scale-95"
+                  className="h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-purple-950/40 flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap transition-all transform active:scale-95 cursor-pointer"
                 >
-                  <Plus className="w-4 h-4 stroke-[3]" />
-                  <span>+ Nova OSM</span>
+                  <Plus className="w-4 h-4 stroke-[2.5] shrink-0" />
+                  <span>Nova OP</span>
                 </Button>
               </div>
             </div>
 
-            {/* LISTAGEM DE OSMS REGISTRADAS */}
+            {/* LISTAGEM DE OPS REGISTRADAS */}
             {loading ? (
               <div className="flex-1 flex flex-col items-center justify-center py-20 text-[#a1a1aa]">
                 <RefreshCw className="w-8 h-8 text-purple-500 animate-spin mb-3" />
@@ -522,7 +522,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                 <div className="w-16 h-16 rounded-2xl bg-purple-950/40 border border-purple-800/40 flex items-center justify-center text-purple-400 mb-4">
                   <Scale className="w-8 h-8" />
                 </div>
-                <h3 className="text-base font-bold text-white mb-1">Nenhuma OSM registrada hoje</h3>
+                <h3 className="text-base font-bold text-white mb-1">Nenhuma OP registrada hoje</h3>
                 <p className="text-xs text-[#a1a1aa] max-w-md mb-6">
                   Inicie os registros do turno clicando no botão abaixo para adicionar as bateladas pesadas.
                 </p>
@@ -532,7 +532,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                     className="h-10 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs flex items-center gap-2"
                   >
                     <Plus className="w-4 h-4 stroke-[3]" />
-                    <span>Registrar Primeira OSM</span>
+                    <span>Registrar Primeira OP</span>
                   </Button>
                   <Button
                     variant="outline"
@@ -557,87 +557,83 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                       id={`osm-card-${op.id}`}
                       className="bg-[#18181b] border border-[#27272a] hover:border-purple-800/60 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-xl hover:shadow-purple-950/10 group"
                     >
-                      {/* Topo do Card: Número e Status + Ações */}
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-[10px] font-black uppercase tracking-wider text-purple-400 bg-purple-950/70 border border-purple-800/50 px-2 py-0.5 rounded-md">
-                              OSM Série 300
+                      {/* Linha 1: Badges à esquerda + Ações (Editar/Excluir) à direita */}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {op.industria && (
+                            <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-purple-950/80 text-purple-300 border border-purple-800/60 font-sans shadow-sm">
+                              {op.industria}
                             </span>
-                            {op.industria && (
-                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-purple-950/60 text-purple-300 border border-purple-800/50 font-sans">
-                                {op.industria}
-                              </span>
-                            )}
-                          </div>
-                          <h2 className="font-mono text-xl font-black text-white mt-1 group-hover:text-purple-300 transition-colors">
-                            {op.number}
-                          </h2>
+                          )}
+                          <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-emerald-950/80 text-emerald-400 border border-emerald-800/60 flex items-center gap-1.5 shadow-sm">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Registrado</span>
+                          </span>
                         </div>
 
-                        <div className="flex items-center gap-2">
-                          <span className="text-[11px] font-bold px-2 py-1 rounded-lg bg-emerald-950/80 text-emerald-300 border border-emerald-800/50 flex items-center gap-1.5 shadow-sm">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="hidden sm:inline">Registrado</span>
-                          </span>
-
+                        <div className="flex items-center gap-1.5 shrink-0">
                           <button
                             type="button"
-                            id={`btn-edit-osm-${op.id}`}
+                            id={`btn-edit-op-${op.id}`}
                             onClick={() => handleOpenEditModal(op)}
-                            className="p-2.5 rounded-lg bg-[#27272a]/70 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
-                            title="Editar OSM"
-                            aria-label="Editar OSM"
+                            className="p-2 rounded-xl bg-[#27272a]/60 hover:bg-purple-950 text-[#a1a1aa] hover:text-purple-300 border border-[#3f3f46]/40 hover:border-purple-700/60 transition-all cursor-pointer shadow-sm"
+                            title="Editar OP"
+                            aria-label="Editar OP"
                           >
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
 
                           <button
                             type="button"
-                            id={`btn-delete-osm-${op.id}`}
+                            id={`btn-delete-op-${op.id}`}
                             onClick={() => handleOpenDeleteModal(op)}
-                            className="p-2.5 rounded-lg bg-[#27272a]/70 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
-                            title="Excluir OSM"
-                            aria-label="Excluir OSM"
+                            className="p-2 rounded-xl bg-[#27272a]/60 hover:bg-rose-950 text-[#a1a1aa] hover:text-rose-400 border border-[#3f3f46]/40 hover:border-rose-700/60 transition-all cursor-pointer shadow-sm"
+                            title="Excluir OP"
+                            aria-label="Excluir OP"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
 
-                      {/* Detalhes do Produto / Nome e Lote */}
-                      <div>
-                        <div className="flex items-center justify-between">
-                          <div className="text-xs text-[#a1a1aa]">Nome:</div>
-                          {op.lote && (
-                            <span className="text-[10px] font-mono font-bold text-purple-300 bg-purple-950/60 px-1.5 py-0.5 rounded border border-purple-800/40">
-                              Lote: {op.lote}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-sm font-bold text-[#f4f4f5] mt-0.5 line-clamp-2">
+                      {/* Linha 2: Número da OP (esquerda) + Badge Lote (direita) */}
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="font-mono text-2xl font-black text-white group-hover:text-purple-300 transition-colors tracking-tight">
+                          {op.number}
+                        </h2>
+                        {op.lote ? (
+                          <span className="text-xs font-mono font-bold text-white bg-purple-950/80 border border-purple-800/60 px-2.5 py-1 rounded-lg shadow-sm">
+                            Lote: {op.lote}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {/* Linha 3: Nome / Produto */}
+                      <div className="space-y-1">
+                        <div className="text-xs text-[#a1a1aa] font-medium">Nome:</div>
+                        <div className="text-sm font-bold text-white uppercase tracking-tight leading-snug">
                           {op.product}
                         </div>
                       </div>
 
-                      {/* Observação da OSM */}
-                      <div className="bg-[#121215] border border-[#232328] rounded-xl p-3 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-purple-950/60 border border-purple-800/40 flex items-center justify-center text-purple-300">
-                            <Boxes className="w-3.5 h-3.5" />
+                      {/* Linha 4: Bloco de Observação e Horário */}
+                      <div className="bg-[#121215] border border-[#27272a]/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-xl bg-purple-950/80 border border-purple-800/60 flex items-center justify-center text-purple-300 shrink-0 shadow-sm">
+                            <Boxes className="w-4 h-4" />
                           </div>
                           <div className="min-w-0">
-                            <div className="text-[10px] text-[#a1a1aa] font-medium">Observação</div>
-                            <div className={`font-sans font-bold text-xs truncate ${(op.granel || op.observation) ? 'text-purple-200' : 'text-[#71717a]'}`}>
+                            <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Observação</div>
+                            <div className={`text-xs font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
                               {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
                             </div>
                           </div>
                         </div>
 
-                        <div className="text-right">
-                          <div className="text-[10px] text-[#71717a]">Horário</div>
-                          <div className="font-mono text-xs text-[#d4d4d8] flex items-center gap-1 justify-end">
-                            <Clock className="w-3 h-3 text-[#a1a1aa]" />
+                        <div className="text-right shrink-0">
+                          <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Horário</div>
+                          <div className="font-mono text-xs font-bold text-white flex items-center gap-1 justify-end mt-1">
+                            <Clock className="w-3.5 h-3.5 text-[#71717a]" />
                             <span>{formattedTime}</span>
                           </div>
                         </div>
@@ -651,31 +647,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
         )}
       </main>
 
-      {/* RODAPÉ INFORMATIVO */}
-      <footer className="bg-[#121216] border-t border-[#27272a] px-4 py-3.5 text-center text-xs text-[#a1a1aa] sticky bottom-0 z-20">
-        <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span className="font-medium text-white">
-              {todayPesagemOps.length} {todayPesagemOps.length === 1 ? 'OSM registrada' : 'OSMs registradas'} hoje
-            </span>
-          </div>
-
-          <div className="flex items-center gap-3 text-[11px] text-[#71717a] font-mono">
-            <button
-              type="button"
-              onClick={() => setActiveViewTab(activeViewTab === 'registro' ? 'historico' : 'registro')}
-              className="text-purple-400 hover:text-purple-300 underline underline-offset-2 transition-colors cursor-pointer"
-            >
-              {activeViewTab === 'registro' ? 'Alternar para Histórico & Gráficos →' : '← Voltar ao Registro de OSMs'}
-            </button>
-            <span>•</span>
-            <span>Área de Pesagem • Supabase</span>
-          </div>
-        </div>
-      </footer>
-
-      {/* MODAL NOVA ORDEM DE PRODUÇÃO / OSM (OU EDITAR) */}
+      {/* MODAL NOVA ORDEM DE PRODUÇÃO / OP (OU EDITAR) */}
       <Dialog
         open={isModalOpen}
         onOpenChange={(open) => {
@@ -689,12 +661,12 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               {editingOp ? <Pencil className="w-5 h-5" /> : <Scale className="w-5 h-5" />}
             </div>
             <DialogTitle className="text-lg font-bold text-white">
-              {editingOp ? 'Editar Ordem de Serviço (OSM)' : 'Nova Ordem de Serviço (OSM)'}
+              {editingOp ? 'Editar Ordem de Produção (OP)' : 'Nova Ordem de Produção (OP)'}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
               {editingOp
                 ? 'Atualize as informações da pesagem registrada.'
-                : 'Cadastre uma nova pesagem na área de pesagem (Série 300).'}
+                : 'Cadastre uma nova pesagem na área de pesagem.'}
             </p>
           </DialogHeader>
 
@@ -839,10 +811,10 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               <Trash2 className="w-5 h-5" />
             </div>
             <DialogTitle className="text-base font-bold text-white">
-              Excluir Ordem de Serviço
+              Excluir Ordem de Produção
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa] mt-1">
-              Tem certeza que deseja excluir a OSM <strong className="text-white font-mono">{deleteModalOp?.number}</strong> ({deleteModalOp?.product})? Esta ação removerá o registro permanentemente.
+              Tem certeza que deseja excluir a OP <strong className="text-white font-mono">{deleteModalOp?.number}</strong> ({deleteModalOp?.product})? Esta ação removerá o registro permanentemente.
             </p>
           </DialogHeader>
 

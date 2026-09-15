@@ -593,7 +593,7 @@ WHERE email IN (
     setIsSubmittingOp(true);
     try {
       const tipoDocumento = getTipoDocumento(newOpSetor);
-      const docLabel = tipoDocumento === 'OSM' ? 'Ordem de Serviço (OSM)' : 'Ordem de Produção (OP)';
+      const docLabel = 'Ordem de Produção (OP)';
 
       const opPayload = {
         number: newOpNumber.trim(),
@@ -1000,22 +1000,22 @@ WHERE email IN (
   > = {
     home: {
       title: 'Dashboard Geral',
-      subtitle: 'Painel Geral de Indicadores de Produção, OEE & Metas',
+      subtitle: 'Painel de Indicadores de Produção',
       icon: LayoutDashboard,
     },
     pesagem: {
       title: 'Área de Pesagem',
-      subtitle: 'Matérias-primas, fracionamento de insumos e emissão de OSM',
+      subtitle: 'Pesagem e separação de materias primas',
       icon: Scale,
     },
     manipulacao: {
       title: 'Área de Manipulação',
-      subtitle: 'Dashboard de produção diária e semanal de granéis industriais, controle de misturas e liberação',
+      subtitle: 'Manipulação de materias primas',
       icon: FlaskConical,
     },
     envase: {
       title: 'Chão de Fábrica (Envase)',
-      subtitle: 'Controle de linhas de envase, paradas e apontamentos do líder',
+      subtitle: 'Controle de linhas de envase',
       icon: Factory,
     },
     cronograma: {
@@ -1127,15 +1127,6 @@ WHERE email IN (
                 <span className="hidden sm:inline">Dashboard</span>
               </button>
             )}
-            <button
-              onClick={handleManualRefresh}
-              disabled={isRefreshing}
-              className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-[#15151c] hover:bg-[#1f1f2a] border border-[#262632] text-xs font-semibold text-[#a1a1aa] hover:text-white flex items-center gap-1.5 transition-all shrink-0"
-              title="Sincronizar dados em tempo real"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Sincronizar</span>
-            </button>
           </div>
         </header>
 
@@ -1197,7 +1188,7 @@ WHERE email IN (
                     </h2>
                     <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Live Supabase
+                      Tempo Real
                     </span>
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
@@ -1222,13 +1213,13 @@ WHERE email IN (
             <div className="space-y-4">
               
               {/* Header do Estoque de OPs com os botões no canto superior direito */}
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
-                <div>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl overflow-hidden">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
                       Estoque de Ordens de Produção (OPs)
                     </h2>
-                    <span className="text-[10px] bg-blue-950/80 text-blue-400 border border-blue-800/40 px-2 py-0.5 rounded-full font-bold">
+                    <span className="text-[10px] bg-blue-950/80 text-blue-400 border border-blue-800/40 px-2 py-0.5 rounded-full font-bold whitespace-nowrap">
                       {ops.length} OPs cadastradas
                     </span>
                   </div>
@@ -1238,7 +1229,7 @@ WHERE email IN (
                 </div>
 
                 {/* Botões no canto superior direito */}
-                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
+                <div className="flex items-center gap-2 w-full md:w-auto shrink-0 flex-wrap sm:flex-nowrap">
                   {ops.length > 0 && (
                     <button
                       type="button"
@@ -1247,7 +1238,7 @@ WHERE email IN (
                         e.stopPropagation();
                         setShowResetModal(true);
                       }}
-                      className="h-9 px-3.5 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 hover:border-red-700/60 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95"
+                      className="h-9 px-3.5 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 hover:border-red-700/60 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95 whitespace-nowrap flex-1 sm:flex-initial"
                       title="Limpar todas as OPs e resetar a base de dados"
                     >
                       <Trash2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
@@ -1257,18 +1248,18 @@ WHERE email IN (
 
                   <Button
                     onClick={() => setShowCsvImportModal(true)}
-                    className="h-9 px-3.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-blue-400 hover:text-blue-300 text-xs font-bold rounded-xl flex items-center gap-2 shadow-sm transition-all"
+                    className="h-9 px-3.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-blue-400 hover:text-blue-300 text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
                     title="Importar planilha de OPs em estoque via arquivo CSV"
                   >
-                    <FileSpreadsheet className="w-4 h-4 text-blue-400" />
+                    <FileSpreadsheet className="w-4 h-4 text-blue-400 shrink-0" />
                     <span>Importar CSV</span>
                   </Button>
 
                   <Button
                     onClick={() => handleOpenCreateOPModal()}
-                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(37,99,235,0.3)] transition-all"
+                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-[0_0_12px_rgba(37,99,235,0.3)] transition-all whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
                   >
-                    <Plus className="w-4 h-4" />
+                    <Plus className="w-4 h-4 shrink-0" />
                     <span>Cadastrar Nova OP</span>
                   </Button>
                 </div>
@@ -1605,8 +1596,8 @@ WHERE email IN (
           {/* ---------------- ABA 4: GESTÃO DE EQUIPE & ACESSOS ---------------- */}
           {activeTab === 'users' && (
             <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
                   <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
                     Gestão de Equipe, Acessos & Promoção de Coordenadores
                   </h2>
@@ -1615,24 +1606,24 @@ WHERE email IN (
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 w-full md:w-auto shrink-0 flex-wrap sm:flex-nowrap">
                   <Button
                     onClick={() => {
                       resetNewLeaderForm();
                       setShowNewLeaderModal(true);
                     }}
                     variant="outline"
-                    className="h-9 px-3.5 border-[#32323e] bg-[#1a1a24] hover:bg-[#222230] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center gap-1.5"
+                    className="h-9 px-3.5 border-[#32323e] bg-[#1a1a24] hover:bg-[#222230] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
                   >
-                    <Plus className="w-3.5 h-3.5 text-blue-400" />
-                    <span>+ Novo Líder</span>
+                    <Plus className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    <span>Novo Líder</span>
                   </Button>
 
                   <Button
                     onClick={() => setShowAuthorizeModal(true)}
-                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-2 shadow-[0_0_12px_rgba(37,99,235,0.3)]"
+                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-[0_0_12px_rgba(37,99,235,0.3)] whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
                   >
-                    <Users className="w-4 h-4" />
+                    <Users className="w-4 h-4 shrink-0" />
                     <span>Cadastros & Acessos</span>
                     {pendingCount > 0 && (
                       <span className="bg-amber-400 text-black text-[10px] font-black px-1.5 py-0.5 rounded-full">
@@ -2330,12 +2321,8 @@ WHERE email IN (
                 <Package className="w-4 h-4 text-blue-400" />
                 <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
                   {editingOp 
-                    ? (newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
-                        ? `Editar Ordem de Serviço de Manipulação (OSM ${editingOp.number})`
-                        : `Editar Ordem de Produção (OP ${editingOp.number})`)
-                    : (newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
-                        ? 'Nova Ordem de Serviço de Manipulação (OSM)'
-                        : 'Nova Ordem de Produção (OP)')}
+                    ? `Editar Ordem de Produção (OP ${editingOp.number})`
+                    : 'Nova Ordem de Produção (OP)'}
                 </h3>
               </div>
               <button
@@ -2353,12 +2340,10 @@ WHERE email IN (
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
-                    {newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação'
-                      ? 'Número da OSM *'
-                      : 'Número da OP *'}
+                    Número da OP *
                   </Label>
                   <Input
-                    placeholder={newOpSetor === 'Pesagem' || newOpSetor === 'Manipulação' ? 'Ex: 310-450' : 'Ex: 40236'}
+                    placeholder="Ex: 40236"
                     value={newOpNumber}
                     onChange={(e) => setNewOpNumber(e.target.value)}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"

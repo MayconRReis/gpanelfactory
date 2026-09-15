@@ -200,9 +200,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   // Filtro automático de documentos por área do líder
   const visibleOps = useMemo(() => {
     if (!profile?.area) return allOps; // sem área definida → vê tudo (compatibilidade)
-    if (profile.area === 'Envase') return allOps.filter(op => op.tipoDocumento === 'OP' || !op.tipoDocumento);
-    if (profile.area === 'Pesagem') return allOps.filter(op => op.tipoDocumento === 'OSM' && op.setor === 'Pesagem');
-    if (profile.area === 'Manipulação') return allOps.filter(op => op.tipoDocumento === 'OSM' && op.setor === 'Manipulação');
+    if (profile.area === 'Envase') return allOps.filter(op => op.setor === 'Envase' || (!op.setor && op.tipoDocumento !== 'OSM'));
+    if (profile.area === 'Pesagem') return allOps.filter(op => op.setor === 'Pesagem' || op.tipoDocumento === 'OSM');
+    if (profile.area === 'Manipulação') return allOps.filter(op => op.setor === 'Manipulação');
     return allOps;
   }, [allOps, profile?.area]);
 
@@ -488,31 +488,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 <Factory className="w-5 h-5" />
               </div>
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className="text-sm font-black text-white tracking-tight uppercase truncate">
-                    Chão de Fábrica (Envase)
-                  </h1>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-blue-950 text-blue-400 border border-blue-800/40">
-                    {profile?.cargo || 'Líder de Produção'}
-                  </span>
-                  {profile?.area && (
-                    <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-md border uppercase tracking-wider ${
-                      profile.area === 'Envase' ? 'bg-blue-950/80 text-[#3b82f6] border-blue-500/40' :
-                      profile.area === 'Pesagem' ? 'bg-purple-950/80 text-[#a855f7] border-purple-500/40' :
-                      profile.area === 'Manipulação' ? 'bg-cyan-950/80 text-[#06b6d4] border-cyan-500/40' :
-                      'bg-zinc-800 text-zinc-300 border-zinc-700'
-                    }`}>
-                      {profile.area}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-[#a1a1aa] font-medium flex items-center gap-1.5 truncate">
-                  <span>{profile?.name}</span>
-                  <span className="text-[#52525b]">•</span>
-                  <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    Online
-                  </span>
+                <h1 className="text-sm font-black text-white tracking-tight uppercase truncate">
+                  Chão de Fábrica (Envase)
+                </h1>
+                <p className="text-xs text-[#71717a]">
+                  Acompanhamento de produção em tempo real
                 </p>
               </div>
             </div>
@@ -557,19 +537,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               <Clock className="w-3.5 h-3.5 text-blue-400 shrink-0" />
               <span>{currentTime.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
             </div>
-
-            {/* Botão Sincronizar */}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => fetchData(true)}
-              disabled={isRefreshing}
-              className="bg-[#14141b] border-[#272733] text-[#a1a1aa] hover:text-white rounded-xl text-xs font-bold h-9"
-              title="Sincronizar dados em tempo real"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 mr-1.5 text-blue-400 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Atualizar</span>
-            </Button>
 
             {/* Logout Desktop (Apenas standalone) */}
             {!embedded && (

@@ -1297,12 +1297,12 @@ export const createLine = async (name: string): Promise<ProductionLine> => {
 
 /**
  * Deriva o tipo de documento a partir do setor.
- * Pesagem e Manipulação usam OSM; demais usam OP.
+ * Todos os setores agora utilizam a nomenclatura padrão OP (Ordem de Produção).
  */
 export function getTipoDocumento(
-  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'
-): 'OP' | 'OSM' {
-  return setor === 'Pesagem' || setor === 'Manipulação' ? 'OSM' : 'OP';
+  _setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'
+): 'OP' {
+  return 'OP';
 }
 
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {

@@ -32,7 +32,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     id: 'pesagem',
     name: 'Líder de Pesagem',
     shortName: 'Pesagem',
-    description: 'Acesso ao Dashboard Geral e módulo de Balança & Fracionamento (OSM)',
+    description: 'Acesso ao Dashboard Geral e módulo de Balança & Fracionamento (OP)',
     badgeClass: 'bg-purple-950/90 text-purple-300 border border-purple-800/50',
     tabs: ['home', 'pesagem'],
   },
@@ -71,7 +71,7 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
   pesagem: {
     label: 'Pesagem',
     group: 'Processos Produtivos',
-    description: 'Pesagem de matérias-primas e emissão de OSM',
+    description: 'Pesagem de matérias-primas e emissão de OP',
   },
   manipulacao: {
     label: 'Manipulação',

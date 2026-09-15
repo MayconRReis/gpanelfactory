@@ -81,7 +81,7 @@ export function Sidebar({
       label: 'Pesagem',
       icon: Scale,
       badge: null,
-      description: 'Matérias-Primas & OSMs',
+      description: 'Matérias-Primas & OPs',
       section: 'PROCESSOS',
     },
     {
@@ -167,9 +167,6 @@ export function Sidebar({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-black tracking-wider text-[#f4f4f5] uppercase truncate">GPANEL</span>
-                <span className="text-[9px] bg-blue-950 text-blue-400 border border-blue-800/40 px-1 py-0.2 rounded font-bold">
-                  FACTORY
-                </span>
               </div>
               <p className="text-[10px] text-[#71717a] truncate font-medium">Fábrica Guarapari • Ybera</p>
             </div>
