@@ -5,7 +5,6 @@ import {
   Maximize2, 
   Minimize2, 
   LogIn, 
-  Eye, 
   Radio, 
   ShieldCheck, 
   Clock,
@@ -146,24 +145,9 @@ export function PublicDashboardView() {
           <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white shadow-lg shadow-blue-600/20 shrink-0">
             <Factory className="w-5 h-5" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm sm:text-base font-black tracking-tight text-[#f4f4f5]">
-                G-Panel
-              </span>
-              <span className="text-[10px] bg-blue-950/80 text-blue-400 border border-blue-800/50 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider flex items-center gap-1">
-                <Eye className="w-3 h-3 text-blue-400" />
-                Somente Visualização
-              </span>
-              <span className="hidden md:flex text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/50 px-2 py-0.5 rounded-full font-bold items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Live
-              </span>
-            </div>
-            <p className="text-[11px] text-[#71717a] font-medium hidden sm:block">
-              Dashboard Geral de Produção Industrial • PCP & Chão de Fábrica
-            </p>
-          </div>
+          <span className="text-base sm:text-lg font-black tracking-tight text-[#f4f4f5]">
+            G-Panel
+          </span>
         </div>
 
         {/* Ações Rápidas: Atualizar, Tela Cheia, Horário e Login */}

@@ -3,7 +3,6 @@ import {
   Users,
   Calendar,
   Share2,
-  Eye,
   LayoutDashboard,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
@@ -360,24 +359,9 @@ export function HomeDashboard({
               <LayoutDashboard className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                  Indicadores Globais de Fábrica
-                </h2>
-                <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Ao Vivo
-                </span>
-                {isReadOnly && (
-                  <span className="text-[10px] bg-amber-950/70 text-amber-300 border border-amber-800/50 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                    <Eye className="w-3 h-3" />
-                    Somente Leitura
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-[#71717a] mt-0.5">
-                Monitoramento consolidado de Pesagem, Manipulação e Linhas de Envase
-              </p>
+              <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
+                Indicadores Globais de Fábrica
+              </h2>
             </div>
           </div>
 
@@ -683,16 +667,18 @@ export function HomeDashboard({
                           </span>
                         </div>
 
-                        {/* Líder Escalado */}
-                        <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
-                          <span className="text-[#71717a] flex items-center gap-1 shrink-0">
-                            <Users className="w-3 h-3 text-blue-400" />
-                            <span>Líder:</span>
-                          </span>
-                          <span className="font-bold text-blue-300 truncate min-w-0 text-right">
-                            {assignedLeader?.name || 'Aguardando escala'}
-                          </span>
-                        </div>
+                        {/* Líder Escalado (exibido apenas se houver líder vinculado) */}
+                        {assignedLeader?.name && (
+                          <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
+                            <span className="text-[#71717a] flex items-center gap-1 shrink-0">
+                              <Users className="w-3 h-3 text-blue-400" />
+                              <span>Líder:</span>
+                            </span>
+                            <span className="font-bold text-blue-300 truncate min-w-0 text-right">
+                              {assignedLeader.name}
+                            </span>
+                          </div>
+                        )}
 
                         {/* OP Atual da Linha */}
                         {activeLineOp && (
