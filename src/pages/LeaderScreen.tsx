@@ -29,7 +29,6 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
-  getLeaderRotation,
   getLines,
   getAllOPs,
   getActiveOP,
@@ -62,6 +61,32 @@ import {
 } from 'recharts';
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
+
+// Data local (não UTC) no formato YYYY-MM-DD — usar toISOString() aqui
+// adiantava o "hoje" em ~3h por causa do fuso do Brasil (UTC-3), o que
+// fazia uma OP marcar "atrasada" (ou deixar de marcar) cedo demais perto
+// da meia-noite.
+function getLocalDateStr(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Uma OP está "atrasada" quando foi programada para uma data que já passou
+// e ainda nem foi iniciada (continua 'pending'). Uma vez iniciada, pausada
+// ou concluída, ela deixa de contar como atrasada — o que importa aqui é
+// avisar o líder que algo ainda parado deveria ter começado.
+function isOpOverdue(op: ProductionOrder, todayStr: string): boolean {
+  return op.status === 'pending' && !!op.scheduledDate && op.scheduledDate < todayStr;
+}
+
+// Chave de localStorage usada para lembrar a última linha selecionada pelo
+// líder neste navegador — puramente uma conveniência de UX (evita reabrir
+// sempre na linha 1), sem nenhum vínculo com "linha responsável" no banco.
+function leaderLineStorageKey(leaderUid: string): string {
+  return `gpanel_leader_selected_line_${leaderUid}`;
+}
 
 interface LeaderScreenProps {
   embedded?: boolean;
@@ -99,11 +124,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     return () => clearInterval(timer);
   }, []);
 
-  // Ref para saber se o líder trocou de linha manualmente nesta sessão.
-  // Expira após 30 minutos para permitir que o coordenador reatribua depois.
-  const manualLineRef = useRef<string | null>(null);
-  const manualLineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Ref para manter o selectedLineId sincronizado sem invalidar o useCallback do fetchData
   const selectedLineIdRef = useRef<string | null>(null);
 
@@ -138,17 +158,23 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
         setPauseReasonsList(loadedReasons);
       }
 
-      // Sempre re-consulta a rotação atribuída pelo coordenador.
-      // Só ignora se o próprio líder trocou de linha manualmente (e o bloqueio ainda não expirou).
-      if (!manualLineRef.current) {
-        const assignedLineId = await getLeaderRotation(
-          profile.uid,
-          profile.email,
-          profile.name,
-        );
-        if (assignedLineId && loadedLines.some(l => l.id === assignedLineId)) {
-          setSelectedLineId(assignedLineId);
-        } else if (!selectedLineIdRef.current) {
+      // As OPs agora são atribuídas à LINHA (pelo cronograma de envase), não
+      // ao líder — qualquer líder pode operar qualquer linha, bastando
+      // selecioná-la aqui. Por isso não existe mais uma "linha responsável"
+      // vinda do coordenador: só respeitamos a linha já selecionada nesta
+      // sessão e, na ausência dela, a última que o próprio líder escolheu
+      // neste navegador (puro conforto de UX, via localStorage) — ou a
+      // primeira linha disponível, como último recurso.
+      if (!selectedLineIdRef.current) {
+        let restoredLineId: string | null = null;
+        try {
+          restoredLineId = localStorage.getItem(leaderLineStorageKey(profile.uid));
+        } catch {
+          // localStorage pode não estar disponível (ex.: modo privado) — sem problema, cai no fallback abaixo.
+        }
+        if (restoredLineId && loadedLines.some(l => l.id === restoredLineId)) {
+          setSelectedLineId(restoredLineId);
+        } else {
           setSelectedLineId(loadedLines[0]?.id || 'line-1');
         }
       }
@@ -176,7 +202,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, stable)
@@ -197,20 +222,25 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     return lines.find(l => l.id === selectedLineId) || lines[0] || null;
   }, [lines, selectedLineId]);
 
-  // Filtro automático de documentos por área do líder
-  const visibleOps = useMemo(() => {
-    if (!profile?.area) return allOps; // sem área definida → vê tudo (compatibilidade)
-    if (profile.area === 'Envase') return allOps.filter(op => op.setor === 'Envase' || (!op.setor && op.tipoDocumento !== 'OSM'));
-    if (profile.area === 'Pesagem') return allOps.filter(op => op.setor === 'Pesagem' || op.tipoDocumento === 'OSM');
-    if (profile.area === 'Manipulação') return allOps.filter(op => op.setor === 'Manipulação');
-    return allOps;
-  }, [allOps, profile?.area]);
+  // OPs válidas para as linhas de produção (Chão de Fábrica - Envase)
+  // IMPORTANTE: Esta tela é exclusivamente o Chão de Fábrica de Envase.
+  // Ela NUNCA deve filtrar por `profile.area`: se a OP está alocada para esta linha
+  // física de envase (atribuída via Cronograma de Envase ou Estoque), ela DEVE
+  // aparecer e ser operada aqui, independentemente do cargo/área do usuário logado
+  // (ex.: coordenador, líder de envase ou operador visualizando a linha).
+  const envaseOps = useMemo(() => {
+    return allOps.filter(op => {
+      // Exclui apenas se for expressamente uma OSM restrita de Pesagem ou Manipulação (que possuem suas próprias telas dedicadas)
+      const isRestrictedOtherArea = (op.setor === 'Pesagem' || op.setor === 'Manipulação') && op.tipoDocumento === 'OSM';
+      return !isRestrictedOtherArea;
+    });
+  }, [allOps]);
 
-  // OPs da linha atual (baseado nos documentos visíveis para a área do líder)
+  // OPs da linha atual de envase
   const lineOps = useMemo(() => {
     if (!currentLine) return [];
-    return visibleOps.filter(op => op.lineId === currentLine.id);
-  }, [visibleOps, currentLine]);
+    return envaseOps.filter(op => String(op.lineId) === String(currentLine.id));
+  }, [envaseOps, currentLine]);
 
   // OP ativa da linha (em progresso, pausada ou primeira pendente)
   const activeOp = useMemo(() => {
@@ -237,19 +267,27 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     return recentEvents.filter(e => e.lineId === currentLine.id || e.lineName === currentLine.name);
   }, [recentEvents, currentLine]);
 
-  // Troca de linha (iniciada pelo próprio líder)
-  const handleSwitchLine = async (lineId: string) => {
-    // Bloqueia atualização automática pelo coordenador por 30 minutos.
-    // Depois disso, a rotação do coordenador volta a ter prioridade.
-    manualLineRef.current = lineId;
-    if (manualLineTimerRef.current) clearTimeout(manualLineTimerRef.current);
-    manualLineTimerRef.current = setTimeout(() => {
-      manualLineRef.current = null;
-    }, 30 * 60 * 1000);
-
+  // Troca de linha (o líder pode pular livremente entre as linhas a
+  // qualquer momento — as OPs pertencem à linha, não a ele; nada aqui
+  // restringe ou "trava" o líder numa linha fixa). Guardamos a escolha em
+  // dois lugares com propósitos diferentes:
+  // 1. localStorage deste navegador — só para reabrir na mesma linha da
+  //    próxima vez que ESTE líder entrar (conveniência de UX).
+  // 2. saveLeaderRotation (Supabase) — mantém o painel do coordenador
+  //    (Dashboard Geral) informado sobre "quem está em qual linha agora",
+  //    que é só um indicador de leitura lá, sem nenhum efeito de volta
+  //    sobre o que o líder pode ver ou selecionar.
+  const handleSwitchLine = (lineId: string) => {
     setSelectedLineId(lineId);
     if (profile) {
-      await saveLeaderRotation(profile.uid, lineId, profile.email, profile.name);
+      try {
+        localStorage.setItem(leaderLineStorageKey(profile.uid), lineId);
+      } catch {
+        // Sem localStorage disponível — a troca ainda funciona nesta sessão, só não persiste para a próxima visita.
+      }
+      saveLeaderRotation(profile.uid, lineId, profile.email, profile.name).catch((err) => {
+        console.warn('Não foi possível atualizar o indicador de linha atual no painel do coordenador:', err);
+      });
     }
     setIsLineSelectOpen(false);
   };
@@ -289,13 +327,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
-    if (profile.area === 'Manipulação' && !finishShift) return;
 
     await finishOP(
       activeOp.id,
       currentLine.id,
-      profile.uid,
-      profile.area === 'Manipulação' && finishShift ? finishShift : undefined
+      profile.uid
     );
     setIsFinishOpen(false);
     setFinishShift(null);
@@ -305,7 +341,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   // -------------------------------------------------------------
   // CÁLCULOS DO DASHBOARD DIÁRIO (HOJE)
   // -------------------------------------------------------------
-  const todayDateStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const todayDateStr = useMemo(() => getLocalDateStr(), []);
 
   const dailyMetrics = useMemo(() => {
     // Apontamentos de hoje na linha
@@ -453,24 +489,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const missingQty = activeOp ? Math.max(activeOp.plannedQuantity - activeOp.producedQuantity, 0) : 0;
 
-  // Variáveis contextuais por Área de Atuação do Líder
-  const isManipulacao = profile?.area === 'Manipulação';
-  const isPesagem = profile?.area === 'Pesagem';
-  const isOsmArea = isManipulacao || isPesagem;
-
-  const docTypeLabel = isOsmArea ? 'OSM' : 'OP';
-  const displayUnit = isManipulacao ? 'Kg' : isPesagem ? 'Qtd' : (activeOp?.unidade || 'un');
-  const qtyProducedLabel = isManipulacao 
-    ? 'Kg manipulados' 
-    : isPesagem 
-    ? 'Bateladas pesadas' 
-    : 'Volume Produzido';
-
-  const reportButtonLabel = isManipulacao
-    ? 'APONTAR KG MANIPULADOS'
-    : isPesagem
-    ? 'APONTAR BATELADAS'
-    : 'APONTAR PRODUÇÃO';
+  // Variáveis contextuais do Chão de Fábrica (Envase)
+  // Como esta tela é o posto operacional de Envase, o tipo de documento é sempre OP (Ordem de Produção)
+  const docTypeLabel = 'OP';
+  const displayUnit = activeOp?.unidade || 'un';
+  const qtyProducedLabel = 'Volume Produzido';
+  const reportButtonLabel = 'APONTAR PRODUÇÃO';
 
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] font-sans flex flex-col antialiased space-y-4" : "min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white"}>
@@ -706,6 +730,15 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       {activeOp.status === 'in_progress' ? 'Em Andamento' :
                        activeOp.status === 'paused' ? 'Pausada' : 'Aguardando'}
                     </span>
+
+                    {/* OP programada para uma data que já passou e ainda nem
+                        foi iniciada — alerta em vermelho para o líder. */}
+                    {isOpOverdue(activeOp, todayDateStr) && (
+                      <span className="px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 border bg-red-950 text-red-400 border-red-800/60 animate-pulse">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        Atrasada
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -880,22 +913,36 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
               {queuedOps.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {queuedOps.map((op, idx) => (
+                  {queuedOps.map((op, idx) => {
+                    const overdue = isOpOverdue(op, todayDateStr);
+                    return (
                     <div
                       key={op.id}
-                      className="p-4 rounded-xl bg-[#16161e] border border-[#242430] flex flex-col justify-between gap-3 hover:border-[#353545] transition-all"
+                      className={`p-4 rounded-xl border flex flex-col justify-between gap-3 transition-all ${
+                        overdue
+                          ? 'bg-red-950/30 border-red-800/60 hover:border-red-600'
+                          : 'bg-[#16161e] border-[#242430] hover:border-[#353545]'
+                      }`}
                     >
                       <div className="space-y-1">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
                           <span className="text-[10px] font-bold text-blue-400 font-mono bg-blue-950/50 px-2 py-0.5 rounded-md border border-blue-800/30">
                             #{idx + 1} • {docTypeLabel} {op.number}
                           </span>
-                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                            op.priority === 'Crítica' ? 'bg-rose-950 text-rose-400' :
-                            op.priority === 'Alta' ? 'bg-amber-950 text-amber-400' : 'bg-blue-950 text-blue-400'
-                          }`}>
-                            {op.priority}
-                          </span>
+                          <div className="flex items-center gap-1">
+                            {overdue && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/60 flex items-center gap-1">
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                                Atrasada
+                              </span>
+                            )}
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              op.priority === 'Crítica' ? 'bg-rose-950 text-rose-400' :
+                              op.priority === 'Alta' ? 'bg-amber-950 text-amber-400' : 'bg-blue-950 text-blue-400'
+                            }`}>
+                              {op.priority}
+                            </span>
+                          </div>
                         </div>
                         <h4 className="text-xs font-bold text-white truncate pt-1">
                           {op.product}
@@ -907,10 +954,17 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
                       <div className="pt-2 border-t border-[#20202b] flex items-center justify-between text-[11px] text-[#a1a1aa]">
                         <span>Progresso: 0%</span>
-                        <span className="text-blue-400 font-semibold">Na fila</span>
+                        {overdue ? (
+                          <span className="text-red-400 font-semibold">
+                            Atrasada desde {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR')}
+                          </span>
+                        ) : (
+                          <span className="text-blue-400 font-semibold">Na fila</span>
+                        )}
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-xs text-[#71717a] italic py-2">
@@ -1363,7 +1417,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             {/* Botões Rápidos de Incremento */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                {isManipulacao ? 'Incremento Rápido de Kg' : isPesagem ? 'Incremento Rápido de Bateladas' : 'Incremento Rápido de Peças'}
+                Incremento Rápido de Unidades
               </Label>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[50, 100, 250, 500].map(amt => (
@@ -1382,14 +1436,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             {/* Entrada Manual de Quantidade */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                {isManipulacao ? 'Ou Digite os Kg a Adicionar' : isPesagem ? 'Ou Digite as Bateladas a Adicionar' : 'Ou Digite a Quantidade a Adicionar'}
+                Ou Digite a Quantidade a Adicionar
               </Label>
               <Input
                 type="number"
                 value={quantity}
                 onChange={e => setQuantity(e.target.value)}
                 className="bg-[#181822] border-[#2c2c3c] text-xl font-mono text-white h-12 rounded-xl text-center font-black focus:border-blue-500"
-                placeholder={isManipulacao ? 'Ex: 250' : isPesagem ? 'Ex: 10' : 'Ex: 300'}
+                placeholder="Ex: 300"
                 autoFocus
               />
             </div>
@@ -1481,14 +1535,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           <DialogHeader>
             <DialogTitle className="uppercase tracking-wider text-sm font-black text-emerald-400 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5" />
-              Finalizar {docTypeLabel === 'OSM' ? 'Ordem de Serviço (OSM)' : 'Ordem de Produção (OP)'}
+              Finalizar Ordem de Produção (OP)
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4 py-3">
             <div className="bg-[#181822] p-4 rounded-2xl border border-[#27272a] text-xs space-y-2">
               <p className="text-white font-bold">
-                {docTypeLabel} {activeOp?.number} • {activeOp?.product}
+                OP {activeOp?.number} • {activeOp?.product}
               </p>
               <div className="grid grid-cols-2 gap-2 text-[#a1a1aa] font-mono pt-1">
                 <div>Planejado: <strong className="text-white">{activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
@@ -1496,45 +1550,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </div>
             </div>
 
-            {/* Seleção de Turno Obrigatória para Líderes de Manipulação (2 turnos) */}
-            {isManipulacao && (
-              <div className="space-y-2 pt-2 border-t border-[#27272a]">
-                <Label className="text-xs font-bold uppercase text-[#a1a1aa] flex items-center justify-between">
-                  <span>Qual turno está finalizando esta OSM? *</span>
-                  <span className="text-[10px] text-cyan-400 font-normal">Obrigatório</span>
-                </Label>
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setFinishShift('Manhã')}
-                    className={`py-3 px-4 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
-                      finishShift === 'Manhã'
-                        ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-950/60 ring-2 ring-blue-400/30'
-                        : 'bg-[#181822] text-[#a1a1aa] border-[#27272a] hover:border-blue-500/50 hover:text-white hover:bg-[#20202c]'
-                    }`}
-                  >
-                    <span className={`w-2.5 h-2.5 rounded-full ${finishShift === 'Manhã' ? 'bg-amber-300 animate-pulse' : 'bg-amber-400/60'}`} />
-                    <span>Manhã</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setFinishShift('Tarde')}
-                    className={`py-3 px-4 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all ${
-                      finishShift === 'Tarde'
-                        ? 'bg-cyan-600 text-white border-cyan-500 shadow-lg shadow-cyan-950/60 ring-2 ring-cyan-400/30'
-                        : 'bg-[#181822] text-[#a1a1aa] border-[#27272a] hover:border-cyan-500/50 hover:text-white hover:bg-[#20202c]'
-                    }`}
-                  >
-                    <span className={`w-2.5 h-2.5 rounded-full ${finishShift === 'Tarde' ? 'bg-cyan-300 animate-pulse' : 'bg-cyan-400/60'}`} />
-                    <span>Tarde</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
             <p className="text-xs text-[#a1a1aa]">
-              Ao confirmar a finalização, a {docTypeLabel} será marcada como <strong>Concluída</strong> e a linha ficará livre para a próxima ordem da fila.
+              Ao confirmar a finalização, a OP será marcada como <strong>Concluída</strong> e a linha ficará livre para a próxima ordem da fila.
             </p>
           </div>
 
@@ -1551,8 +1568,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             </Button>
             <Button
               onClick={handleFinish}
-              disabled={isManipulacao && !finishShift}
-              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-black uppercase tracking-wider"
+              className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
             >
               Confirmar Conclusão
             </Button>
@@ -1573,7 +1589,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           <div className="space-y-2.5 py-3">
             {lines.map(l => {
               const isSelected = l.id === selectedLineId;
-              const opCount = visibleOps.filter(o => o.lineId === l.id && o.status !== 'completed').length;
+              const opCount = envaseOps.filter(o => String(o.lineId) === String(l.id) && o.status !== 'completed').length;
               return (
                 <button
                   key={l.id}

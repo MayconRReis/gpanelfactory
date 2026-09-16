@@ -29,6 +29,7 @@ import {
 import { getAllOPs, createOP, finishOP } from '../services/db';
 import { ProductionOrder } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
+import { getIndustriaBadgeClass } from '../lib/industria';
 
 interface ManipulacaoScreenProps {
   embedded?: boolean;
@@ -211,6 +212,11 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         lineId: 'area-manipulacao',
         scheduledShift: detectedShift,
         scheduledDate: new Date().toISOString().split('T')[0],
+        // Propaga a indústria da OSM de origem (Ybera/Carvalho/Macpaul) —
+        // sem isso, a OSM de Manipulação perdia a marcação de indústria
+        // assim que a manipulação era iniciada, e o selo colorido por
+        // indústria desaparecia do card em andamento e do histórico.
+        industria: pesagemOp.industria,
       });
 
       showToast(`Manipulação da OP ${pesagemOp.number} iniciada com sucesso!`, 'success');
@@ -459,7 +465,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {op.industria && (
-                          <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 font-sans shadow-sm">
+                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
                             {op.industria}
                           </span>
                         )}
@@ -601,7 +607,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         {op.industria && (
-                          <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-950/60 text-amber-300 border border-amber-800/40 font-sans shadow-sm">
+                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
                             {op.industria}
                           </span>
                         )}
@@ -703,7 +709,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                     className="bg-[#141418] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3"
                   >
                     <div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-mono font-bold text-sm text-white">{op.number}</span>
                         <span
                           className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${
@@ -714,6 +720,11 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                         >
                           {shift}
                         </span>
+                        {op.industria && (
+                          <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>
+                            {op.industria}
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-[#a1a1aa] truncate max-w-[180px] mt-0.5">
                         {op.product}

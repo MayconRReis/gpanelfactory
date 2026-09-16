@@ -2063,10 +2063,75 @@ export const saveLeaderRotation = async (
       updated_at: new Date().toISOString(),
     };
 
-    await Promise.allSettled([
-      supabase.from('weekly_rotations').upsert(payload, { onConflict: 'leader_id' }),
-      supabase.from('rotations').upsert(payload, { onConflict: 'leader_id' }),
-    ]);
+    // IMPORTANTE:
+    // 1. `rotations` é a tabela física principal no Supabase.
+    // 2. `weekly_rotations` é uma VIEW (SELECT * FROM rotations) criada para compatibilidade.
+    //    No PostgreSQL, VIEWs NUNCA suportam `onConflict`, gerando o erro:
+    //    "there is no unique or exclusion constraint matching the ON CONFLICT specification".
+    // 3. Se a tabela física `rotations` não possuir constraint UNIQUE em `leader_id`,
+    //    o upsert com onConflict também falha com esse mesmo erro.
+    //
+    // Solução robusta:
+    // A. Tenta upsert na tabela física `rotations`. Se falhar por falta de constraint UNIQUE,
+    //    faz fallback seguro (SELECT -> UPDATE ou INSERT), sem quebrar a aplicação.
+    // B. Como `weekly_rotations` é uma VIEW sobre `rotations`, salvar em `rotations` já atualiza
+    //    `weekly_rotations` automaticamente. Só tentamos `weekly_rotations` se `rotations` falhar.
+    const saveToTable = async (tableName: 'rotations' | 'weekly_rotations'): Promise<boolean> => {
+      // Tenta upsert direto se for a tabela física 'rotations'
+      if (tableName === 'rotations') {
+        try {
+          const res = await supabase.from(tableName).upsert(payload, { onConflict: 'leader_id' });
+          if (!res.error) return true;
+
+          const isMissingConstraint =
+            res.error.message?.includes('no unique or exclusion constraint') ||
+            (res.error as any).code === '42P10';
+
+          if (!isMissingConstraint) {
+            console.error(`[saveLeaderRotation] Falha ao gravar em ${tableName} (líder ${canonicalId}):`, res.error.message);
+            return false;
+          }
+        } catch (err) {
+          console.error(`[saveLeaderRotation] Erro ao tentar upsert em ${tableName}:`, err);
+        }
+      }
+
+      // Fallback seguro: SELECT -> UPDATE se existir, ou INSERT se não existir
+      // (Não depende de constraint UNIQUE no PostgreSQL, funciona em VIEWs e tabelas normais)
+      try {
+        const { data: existing, error: selErr } = await supabase
+          .from(tableName)
+          .select('id, leader_id')
+          .eq('leader_id', canonicalId)
+          .limit(1);
+
+        if (!selErr && existing && existing.length > 0) {
+          const updateRes = await supabase
+            .from(tableName)
+            .update({ line_id: lineId, updated_at: payload.updated_at })
+            .eq('leader_id', canonicalId);
+          if (!updateRes.error) return true;
+          console.error(`[saveLeaderRotation] Falha no update em ${tableName} (líder ${canonicalId}):`, updateRes.error.message);
+        } else {
+          const insertRes = await supabase
+            .from(tableName)
+            .insert(payload);
+          if (!insertRes.error) return true;
+          console.error(`[saveLeaderRotation] Falha no insert em ${tableName} (líder ${canonicalId}):`, insertRes.error.message);
+        }
+      } catch (innerErr) {
+        console.error(`[saveLeaderRotation] Erro inesperado no fallback de ${tableName}:`, innerErr);
+      }
+      return false;
+    };
+
+    // Grava primeiro na tabela física 'rotations'
+    const savedInRotations = await saveToTable('rotations');
+
+    // Se não salvou em 'rotations' (ex.: tabela não existe no banco legado), tenta em 'weekly_rotations'
+    if (!savedInRotations) {
+      await saveToTable('weekly_rotations');
+    }
 
     if (canonicalId !== leaderId && leaderId.includes('@')) {
       await Promise.allSettled([

@@ -41,7 +41,8 @@ import {
   Menu,
   KeyRound,
   Edit2,
-  Loader2
+  Loader2,
+  Info
 } from 'lucide-react';
 import { 
   getLines, 
@@ -208,7 +209,6 @@ export function CoordinatorDashboard() {
   const [showNewLeaderModal, setShowNewLeaderModal] = useState(false);
   const [newLeaderName, setNewLeaderName] = useState('');
   const [newLeaderEmail, setNewLeaderEmail] = useState('');
-  const [newLeaderLineId, setNewLeaderLineId] = useState('');
   const [newLeaderCargo, setNewLeaderCargo] = useState('Líder de Produção');
   const [newLeaderArea, setNewLeaderArea] = useState<'Envase' | 'Pesagem' | 'Manipulação'>('Envase');
   const [isSubmittingLeader, setIsSubmittingLeader] = useState(false);
@@ -221,7 +221,6 @@ export function CoordinatorDashboard() {
     password: string;
     cargo: string;
     area?: string;
-    lineName?: string;
   } | null>(null);
 
   // Modal: Redefinir Senha do Líder
@@ -824,7 +823,6 @@ WHERE email IN (
   const resetNewLeaderForm = () => {
     setNewLeaderName('');
     setNewLeaderEmail('');
-    setNewLeaderLineId('');
     setNewLeaderCargo('Líder de Produção');
     setNewLeaderArea('Envase');
     setIsAutoEmail(true);
@@ -858,13 +856,17 @@ WHERE email IN (
       : defaultCargoForArea;
 
     try {
+      // Líderes de Envase não têm mais uma "linha responsável" fixa —
+      // qualquer um deles pode operar qualquer linha, bastando selecioná-la
+      // na própria tela do líder (as OPs pertencem à linha, atribuídas pelo
+      // cronograma de envase, não ao líder). Por isso não enviamos mais
+      // lineId aqui na criação do cadastro.
       const res = await preAuthorizeUser({
         name,
         email,
         role: 'leader',
         cargo: effectiveCargo,
         area: newLeaderArea,
-        lineId: newLeaderLineId || undefined,
         mustChangePassword: true,
         defaultPassword: tempPassword,
       });
@@ -875,7 +877,6 @@ WHERE email IN (
         } else {
           showToast(`Líder ${name} cadastrado com sucesso no Supabase!`);
         }
-        const assignedLineObj = lines.find(l => l.id === newLeaderLineId);
 
         // Exibe o modal com os dados de acesso gerados para cópia imediata
         setCreatedCredentialsModalData({
@@ -884,12 +885,10 @@ WHERE email IN (
           password: tempPassword,
           cargo: effectiveCargo,
           area: newLeaderArea,
-          lineName: assignedLineObj?.name,
         });
 
         setNewLeaderName('');
         setNewLeaderEmail('');
-        setNewLeaderLineId('');
         setNewLeaderCargo('Líder de Envase');
         setNewLeaderArea('Envase');
         setIsAutoEmail(true);
@@ -946,16 +945,33 @@ WHERE email IN (
   const pendingCount = allUsers.filter(u => u.status === 'pending' || u.status === 'inactive').length;
   const pendingSyncCount = allUsers.filter(u => u.role === 'leader' && ((u as any).pendingSupabaseSync || u.uid?.startsWith('usr-'))).length;
 
+  // Uma OP/OSM é considerada "finalizada" (deve sumir do estoque e só
+  // aparecer na aba "Concluídas") quando seu status é 'completed' — EXCETO
+  // a OSM de Pesagem, que já nasce com status 'completed' no banco só para
+  // indicar "registrada e disponível para a Manipulação" (ver
+  // "Pronta p/ Manipulação" logo abaixo). Essa OSM ainda está em estoque,
+  // então não deve sumir das demais abas como se já tivesse sido concluída.
+  const isOpFinalizada = (op: ProductionOrder) => {
+    if (op.setor === 'Pesagem') return false;
+    return op.status === 'completed';
+  };
+
   // Filtered OPs
   const filteredOps = ops.filter(op => {
     const term = searchTerm.toLowerCase();
-    const matchSearch = op.number.toLowerCase().includes(term) || 
+    const matchSearch = op.number.toLowerCase().includes(term) ||
                         op.product.toLowerCase().includes(term) ||
                         (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
                         (op.granel ? op.granel.toLowerCase().includes(term) : false);
-    
+
     let matchStatus = true;
-    if (statusFilter === 'today') {
+    if (statusFilter === 'completed') {
+      matchStatus = isOpFinalizada(op);
+    } else if (isOpFinalizada(op)) {
+      // Fora da aba "Concluídas", uma OP finalizada nunca deve aparecer —
+      // ela some do estoque disponível assim que é concluída.
+      matchStatus = false;
+    } else if (statusFilter === 'today') {
       matchStatus = op.scheduledDate === todayStr;
     } else if (statusFilter === 'week') {
       matchStatus = Boolean(op.scheduledDate && op.scheduledDate >= currentWeekRange.startStr && op.scheduledDate <= currentWeekRange.endStr);
@@ -2993,10 +3009,8 @@ WHERE email IN (
                     setNewLeaderArea(area);
                     if (area === 'Pesagem') {
                       setNewLeaderCargo('Líder de Pesagem');
-                      setNewLeaderLineId('');
                     } else if (area === 'Manipulação') {
                       setNewLeaderCargo('Líder de Manipulação');
-                      setNewLeaderLineId('');
                     } else {
                       setNewLeaderCargo('Líder de Envase');
                     }
@@ -3021,20 +3035,11 @@ WHERE email IN (
               </div>
 
               {newLeaderArea === 'Envase' && (
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-semibold text-[#a1a1aa]">Alocação de Linha de Envase</Label>
-                  <select
-                    value={newLeaderLineId}
-                    onChange={(e) => setNewLeaderLineId(e.target.value)}
-                    className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500"
-                  >
-                    <option value="">Sem linha inicial (alocar depois)</option>
-                    {lines.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.name}
-                      </option>
-                    ))}
-                  </select>
+                <div className="bg-blue-950/20 border border-blue-800/30 rounded-xl p-3 flex items-start gap-2">
+                  <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-blue-200/80">
+                    Líderes de Envase não têm mais uma linha fixa: qualquer um deles pode escolher e trocar de linha livremente na própria tela, a qualquer momento. As OPs continuam sendo atribuídas à linha pelo cronograma de envase, não ao líder.
+                  </p>
                 </div>
               )}
 
@@ -3118,13 +3123,6 @@ WHERE email IN (
                     {createdCredentialsModalData.password}
                   </span>
                 </div>
-
-                {createdCredentialsModalData.lineName && (
-                  <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                    <span className="text-[#71717a] font-semibold">Linha Alocada:</span>
-                    <span className="font-bold text-emerald-400">{createdCredentialsModalData.lineName}</span>
-                  </div>
-                )}
 
                 <div className="pt-1 text-[11px] text-[#a1a1aa] flex items-start gap-2">
                   <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />

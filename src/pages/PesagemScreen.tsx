@@ -32,6 +32,7 @@ import {
 import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents } from '../services/db';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
+import { getIndustriaBadgeClass, isManualExitEligible } from '../lib/industria';
 
 interface PesagemScreenProps {
   embedded?: boolean;
@@ -68,6 +69,15 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   const [batchLot, setBatchLot] = useState('');
   const [observation, setObservation] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Modal de "Saída Manual" — exclusivo para OSMs de indústrias que raramente
+  // passam pela Manipulação da Ybera (Carvalho / Macpaul). Permite ao líder
+  // de Pesagem encerrar a OSM diretamente, sem depender de alguém iniciar e
+  // finalizar a manipulação.
+  const [manualExitOp, setManualExitOp] = useState<ProductionOrder | null>(null);
+  const [manualExitKg, setManualExitKg] = useState('');
+  const [manualExitShift, setManualExitShift] = useState<'Manhã' | 'Tarde'>('Manhã');
+  const [isManualExitSubmitting, setIsManualExitSubmitting] = useState(false);
 
   // Toast
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
@@ -155,35 +165,65 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     return `${year}-${month}-${day}`;
   }, []);
 
+  // Função auxiliar: uma OSM "é de hoje" se a data agendada ou a data de
+  // criação baterem com o dia local atual.
+  const isOpFromToday = useCallback((op: ProductionOrder, referenceDateStr?: string) => {
+    if (op.scheduledDate === todayStr) return true;
+    const dateToCheck = referenceDateStr || op.createdAt;
+    if (!dateToCheck) return false;
+    const d = new Date(dateToCheck);
+    if (isNaN(d.getTime())) return false;
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}` === todayStr;
+  }, [todayStr]);
+
   const todayPesagemOps = useMemo(() => {
     return ops.filter(op => {
-      const isPesagem = op.setor === 'Pesagem' || op.tipoDocumento === 'OSM';
-      if (!isPesagem) return false;
+      // Uma OSM só deve continuar aparecendo na lista principal da Pesagem
+      // enquanto o setor dela ainda for 'Pesagem' (ou não tiver setor
+      // definido, para compatibilidade com registros antigos que não tinham
+      // essa coluna preenchida).
+      //
+      // Bug corrigido: antes, `op.tipoDocumento === 'OSM'` sozinho já era
+      // suficiente para passar nesse filtro — só que a OSM criada na
+      // Manipulação (ao iniciar/finalizar) também nasce com
+      // tipoDocumento 'OSM' (só o setor muda para 'Manipulação'). Então,
+      // sempre que o leaderId dessa nova linha batesse com o usuário logado
+      // na tela de Pesagem (ex.: mesma conta usada para mais de um setor),
+      // a OSM finalizada na Manipulação reaparecia AQUI TAMBÉM, duplicando
+      // o número da OSM na tela. Agora, uma vez que o setor muda para
+      // 'Manipulação' (ou qualquer outro que não seja 'Pesagem'), a OSM
+      // nunca mais volta a aparecer na lista principal — ela some daqui e
+      // passa a aparecer apenas no "Mini Histórico" de finalizadas, abaixo.
+      const isPesagemSetor = op.setor === 'Pesagem';
+      const isLegacyOsmSemSetor = !op.setor && op.tipoDocumento === 'OSM';
+      if (!isPesagemSetor && !isLegacyOsmSemSetor) return false;
 
-      // Verificar se foi criada hoje
-      let isToday = false;
-      if (op.scheduledDate === todayStr) {
-        isToday = true;
-      } else if (op.createdAt) {
-        const createdDate = new Date(op.createdAt);
-        if (!isNaN(createdDate.getTime())) {
-          const cYear = createdDate.getFullYear();
-          const cMonth = String(createdDate.getMonth() + 1).padStart(2, '0');
-          const cDay = String(createdDate.getDate()).padStart(2, '0');
-          if (`${cYear}-${cMonth}-${cDay}` === todayStr) {
-            isToday = true;
-          }
-        }
-      }
+      if (!isOpFromToday(op)) return false;
 
-      // Se foi criada pelo líder ou setor Pesagem
+      if (isPesagemSetor) return true;
+
+      // Registro antigo sem setor: mantém a regra anterior (mostra se foi
+      // criado pelo próprio líder logado, ou sem líder definido).
       const matchesLeader = !op.leaderId || op.leaderId === profile?.uid;
-      // OBS: toda OSM de Pesagem já nasce com status 'completed' (ver criação
-      // acima), então incluir "|| op.status === 'completed'" aqui anulava
-      // totalmente o filtro de "hoje" — a lista mostrava o histórico inteiro.
-      return isPesagem && isToday && (op.setor === 'Pesagem' || matchesLeader);
+      return matchesLeader;
     }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [ops, todayStr, profile]);
+  }, [ops, isOpFromToday, profile]);
+
+  // Mini Histórico: OSMs registradas pela Pesagem que já foram finalizadas —
+  // seja pela Manipulação (fluxo normal) ou por "saída manual" dada pelo
+  // próprio líder de Pesagem (ver handleManualExit). É aqui que uma OSM
+  // "some" da lista principal para reaparecer de forma compacta, sem
+  // duplicar o card original.
+  const finishedTodayOps = useMemo(() => {
+    return ops.filter(op => {
+      if (op.setor !== 'Manipulação' || op.status !== 'completed') return false;
+      const refDate = op.completedAt || op.scheduledDate || op.createdAt;
+      return isOpFromToday(op, refDate);
+    }).sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime());
+  }, [ops, isOpFromToday]);
 
   // Resumo do dia — a Pesagem não registra mais Kg (isso só é preenchido pelo
   // líder de Manipulação ao finalizar), então o resumo do dia agora conta
@@ -321,6 +361,63 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
       showToast(editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.', 'error');
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  // Abrir modal de Saída Manual (Carvalho / Macpaul)
+  const handleOpenManualExit = (op: ProductionOrder) => {
+    const currentHour = new Date().getHours();
+    setManualExitOp(op);
+    setManualExitKg('');
+    setManualExitShift(currentHour < 12 ? 'Manhã' : 'Tarde');
+  };
+
+  // Confirmar Saída Manual: cria diretamente a OSM de Manipulação já
+  // finalizada (setor 'Manipulação', status 'completed'), pulando o passo de
+  // iniciar/finalizar pela tela de Manipulação. Isso reaproveita o mesmo
+  // formato de dado que o fluxo normal gera, então a OSM aparece
+  // corretamente no Mini Histórico da Pesagem e em "OPs Finalizadas na
+  // Manipulação" — deixando claro para os dois times que essa OSM já foi
+  // encerrada, sem duplicar nada na lista principal da Pesagem.
+  const handleConfirmManualExit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profile || !manualExitOp) return;
+
+    const kgNum = parseFloat(manualExitKg);
+    if (isNaN(kgNum) || kgNum <= 0) {
+      showToast('Informe uma quantidade válida em Kg.', 'error');
+      return;
+    }
+
+    setIsManualExitSubmitting(true);
+    try {
+      await createOP({
+        tipoDocumento: 'OSM',
+        setor: 'Manipulação',
+        unidade: 'Kg',
+        number: manualExitOp.number,
+        product: manualExitOp.product,
+        lote: manualExitOp.lote,
+        plannedQuantity: kgNum,
+        producedQuantity: kgNum,
+        status: 'completed',
+        leaderId: profile.uid,
+        priority: 'Normal',
+        lineId: 'area-manipulacao',
+        scheduledShift: manualExitShift,
+        scheduledDate: todayStr,
+        industria: manualExitOp.industria,
+        granel: manualExitOp.granel || manualExitOp.observation,
+      });
+
+      showToast(`Saída manual da OSM ${manualExitOp.number} registrada com sucesso!`, 'success');
+      setManualExitOp(null);
+      await fetchData(true);
+    } catch (err) {
+      console.error('Erro ao registrar saída manual:', err);
+      showToast('Erro ao registrar saída manual.', 'error');
+    } finally {
+      setIsManualExitSubmitting(false);
     }
   };
 
@@ -561,7 +658,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 flex-wrap">
                           {op.industria && (
-                            <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-purple-950/80 text-purple-300 border border-purple-800/60 font-sans shadow-sm">
+                            <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
                               {op.industria}
                             </span>
                           )}
@@ -638,10 +735,71 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                           </div>
                         </div>
                       </div>
+
+                      {/* Saída Manual — só para indústrias que raramente são
+                          manipuladas na própria Ybera (Carvalho / Macpaul):
+                          o líder de Pesagem pode encerrar a OSM direto. */}
+                      {isManualExitEligible(op.industria) && (
+                        <Button
+                          type="button"
+                          onClick={() => handleOpenManualExit(op)}
+                          className="h-10 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs shadow-md shadow-orange-950/40 flex items-center justify-center gap-1.5 transition-all transform active:scale-95"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                          <span>Dar Saída Manual</span>
+                        </Button>
+                      )}
                     </div>
                   );
                 })}
               </div>
+            )}
+
+            {/* MINI HISTÓRICO: OSMS FINALIZADAS (VIA MANIPULAÇÃO OU SAÍDA MANUAL) */}
+            {finishedTodayOps.length > 0 && (
+              <section className="space-y-3 pt-2">
+                <div className="flex items-center justify-between border-t border-[#27272a] pt-4">
+                  <div className="flex items-center gap-2">
+                    <History className="w-4 h-4 text-emerald-400" />
+                    <h3 className="text-sm font-bold text-white">Mini Histórico — OPs Finalizadas Hoje</h3>
+                  </div>
+                  <span className="text-xs text-[#a1a1aa] font-mono">
+                    {finishedTodayOps.length} finalizada{finishedTodayOps.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {finishedTodayOps.map((op) => (
+                    <div
+                      key={op.id}
+                      className="bg-[#141418] border border-[#27272a] rounded-xl p-3.5 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-mono font-bold text-sm text-white">{op.number}</span>
+                          {op.industria && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>
+                              {op.industria}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-[#a1a1aa] truncate max-w-[180px] mt-0.5">
+                          {op.product}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-mono font-black text-sm text-emerald-400">
+                          {(Number(op.producedQuantity) || 0).toLocaleString('pt-BR')} Kg
+                        </div>
+                        <div className="text-[10px] text-emerald-500 flex items-center gap-1 justify-end font-semibold">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>Concluído</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
             )}
           </>
         )}
@@ -848,6 +1006,114 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL DE SAÍDA MANUAL (CARVALHO / MACPAUL) */}
+      <Dialog open={!!manualExitOp} onOpenChange={(open) => !open && setManualExitOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <div className="w-10 h-10 rounded-xl bg-orange-950/80 border border-orange-800/60 flex items-center justify-center text-orange-400 mb-2">
+              <LogOut className="w-5 h-5" />
+            </div>
+            <DialogTitle className="text-lg font-bold text-white">
+              Saída Manual — OSM {manualExitOp?.number}
+            </DialogTitle>
+            <p className="text-xs text-[#a1a1aa]">
+              Encerre esta OSM diretamente, sem passar pela Manipulação — indicado para OSMs de{' '}
+              <strong className="text-white">{manualExitOp?.industria || 'outra indústria'}</strong>, que raramente
+              são manipuladas na Ybera.
+            </p>
+          </DialogHeader>
+
+          {manualExitOp && (
+            <form onSubmit={handleConfirmManualExit} className="space-y-4 mt-2">
+              {/* Produto */}
+              <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3">
+                <div className="text-[11px] text-[#a1a1aa]">Produto / Granel</div>
+                <div className="text-xs font-bold text-white mt-0.5">{manualExitOp.product}</div>
+              </div>
+
+              {/* Quantidade em Kg */}
+              <div>
+                <Label className="text-xs font-semibold text-[#d4d4d8]">
+                  Quantidade Final (Kg) <span className="text-orange-400">*</span>
+                </Label>
+                <Input
+                  type="number"
+                  step="1"
+                  min="1"
+                  value={manualExitKg}
+                  onChange={(e) => setManualExitKg(e.target.value)}
+                  required
+                  autoFocus
+                  className="mt-1 bg-[#121215] border-[#27272a] focus:border-orange-500 text-white font-mono text-sm h-10 rounded-xl"
+                />
+              </div>
+
+              {/* Seleção de Turno */}
+              <div>
+                <Label className="text-xs font-semibold text-[#d4d4d8] mb-2 block">
+                  Turno de Conclusão <span className="text-orange-400">*</span>
+                </Label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setManualExitShift('Manhã')}
+                    className={`p-3 rounded-xl border text-center flex flex-col items-center justify-center gap-1.5 transition-all ${
+                      manualExitShift === 'Manhã'
+                        ? 'bg-blue-950/80 border-blue-500 text-blue-200 ring-2 ring-blue-500/30'
+                        : 'bg-[#121215] border-[#27272a] text-[#a1a1aa] hover:border-[#3f3f46]'
+                    }`}
+                  >
+                    <span className="text-xs font-bold">Turno Manhã</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setManualExitShift('Tarde')}
+                    className={`p-3 rounded-xl border text-center flex flex-col items-center justify-center gap-1.5 transition-all ${
+                      manualExitShift === 'Tarde'
+                        ? 'bg-amber-950/80 border-amber-500 text-amber-200 ring-2 ring-amber-500/30'
+                        : 'bg-[#121215] border-[#27272a] text-[#a1a1aa] hover:border-[#3f3f46]'
+                    }`}
+                  >
+                    <span className="text-xs font-bold">Turno Tarde</span>
+                  </button>
+                </div>
+              </div>
+
+              <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setManualExitOp(null)}
+                  disabled={isManualExitSubmitting}
+                  className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
+                >
+                  Cancelar
+                </Button>
+
+                <Button
+                  type="submit"
+                  disabled={isManualExitSubmitting}
+                  className="h-10 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs shadow-lg shadow-orange-950/50 flex items-center justify-center gap-1.5 w-full sm:w-auto"
+                >
+                  {isManualExitSubmitting ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Registrando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Confirmar Saída Manual</span>
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
         </DialogContent>
       </Dialog>
     </div>
