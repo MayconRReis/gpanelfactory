@@ -94,7 +94,7 @@ export function AssignStockOpToLineModal({
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wider">
-                  Vincular OP do Estoque à {targetLine.name}
+                  Vincular OP do Estoque a {targetLine.name}
                 </h3>
                 <span className="text-[10px] bg-blue-950/80 text-blue-400 border border-blue-800/40 px-2 py-0.5 rounded-full font-bold">
                   {filteredOps.length} OPs disponíveis
@@ -210,7 +210,9 @@ export function AssignStockOpToLineModal({
                           <>
                             <span>•</span>
                             <span className="text-blue-400">
-                              {isAlreadyInThisLine ? 'Já vinculada a esta linha' : `Vinculada à Linha ${op.lineId}`}
+                              {isAlreadyInThisLine
+                                ? 'Já vinculada a esta linha'
+                                : `Vinculada a ${op.lineId === 'line-1' ? 'Envase 1' : op.lineId === 'line-2' ? 'Envase 2' : op.lineId === 'line-sleeve' ? 'Sleev' : op.lineId}`}
                             </span>
                           </>
                         )}

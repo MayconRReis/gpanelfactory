@@ -9,27 +9,36 @@ interface CronogramaBoardProps {
   onAssignToQueue: (opId: string, lineId: string) => Promise<void>;
   /** Arrasta um card de OP de volta para a coluna "Estoque" (remove a linha). */
   onUnassign: (opId: string) => Promise<void>;
+  /** Solta um card sobre outro DENTRO da mesma coluna — reordena a fila de produção daquela coluna. */
+  onReorderColumn: (columnId: string, orderedOpIds: string[]) => Promise<void>;
   /** Botão "+" no topo de cada coluna de linha — abre o modal de vincular OP do estoque. */
   onOpenAssignModal: (line: ProductionLine) => void;
   /** Clique em um card de OP para editar seus dados. */
   onOpenEditOpModal?: (op: ProductionOrder) => void;
 }
 
-const BACKLOG_COLUMN_ID = '__estoque__';
+export const BACKLOG_COLUMN_ID = '__estoque__';
 
 export function CronogramaBoard({
   lines,
   ops,
   onAssignToQueue,
   onUnassign,
+  onReorderColumn,
   onOpenAssignModal,
   onOpenEditOpModal,
 }: CronogramaBoardProps) {
   const [draggingOpId, setDraggingOpId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  // Sobre qual card específico o item arrastado está pairando agora — usado
+  // para desenhar o indicador de "vai entrar aqui" e para decidir a posição
+  // exata de inserção ao soltar dentro da MESMA coluna (reordenar a fila).
+  const [dragOverOpId, setDragOverOpId] = useState<string | null>(null);
   const [isDropping, setIsDropping] = useState(false);
 
-  // OPs sem linha atribuída (ainda no estoque) e não concluídas
+  // OPs sem linha atribuída (ainda no estoque) e não concluídas — a ordem já
+  // vem por `sequence` (a consulta ao Supabase em getAllOPs ordena por essa
+  // coluna), então também dá pra reordenar esta coluna.
   const backlogOps = useMemo(
     () => ops.filter(o => !o.lineId && o.status !== 'completed'),
     [ops]
@@ -45,6 +54,9 @@ export function CronogramaBoard({
     return map;
   }, [lines, ops]);
 
+  const columnOps = (columnId: string): ProductionOrder[] =>
+    columnId === BACKLOG_COLUMN_ID ? backlogOps : (opsByLine[columnId] || []);
+
   const handleDragStart = (e: React.DragEvent, opId: string) => {
     e.dataTransfer.setData('text/plain', opId);
     e.dataTransfer.effectAllowed = 'move';
@@ -54,6 +66,7 @@ export function CronogramaBoard({
   const handleDragEnd = () => {
     setDraggingOpId(null);
     setDragOverColumn(null);
+    setDragOverOpId(null);
   };
 
   const handleDragOverColumn = (e: React.DragEvent, columnId: string) => {
@@ -62,17 +75,75 @@ export function CronogramaBoard({
     if (dragOverColumn !== columnId) setDragOverColumn(columnId);
   };
 
+  // Pairar sobre um card específico — prende o evento (stopPropagation) pra
+  // não deixar o onDragOver da coluna "vazar" e atrapalhar o indicador.
+  const handleDragOverCard = (e: React.DragEvent, columnId: string, opId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverColumn !== columnId) setDragOverColumn(columnId);
+    if (dragOverOpId !== opId) setDragOverOpId(opId);
+  };
+
+  // Solto em cima de um card específico: se for a MESMA coluna do item
+  // arrastado, reordena a fila (insere na posição do card-alvo); se for de
+  // outra coluna/estoque, primeiro atribui a esta coluna (reatribuição de
+  // linha) e mantém a ordem que a atribuição já resolve.
+  const handleDropOnCard = async (e: React.DragEvent, columnId: string, targetOpId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const opId = e.dataTransfer.getData('text/plain') || draggingOpId;
+    setDragOverColumn(null);
+    setDragOverOpId(null);
+    setDraggingOpId(null);
+    if (!opId || opId === targetOpId) return;
+
+    const op = ops.find(o => o.id === opId);
+    if (!op) return;
+
+    const currentColumnId = op.lineId || BACKLOG_COLUMN_ID;
+
+    setIsDropping(true);
+    try {
+      if (currentColumnId !== columnId) {
+        // Veio de outra coluna — primeiro reatribui a linha (ou tira do
+        // estoque), depois deixa a nova ordem definida pelo próximo passo.
+        if (columnId === BACKLOG_COLUMN_ID) {
+          await onUnassign(opId);
+        } else {
+          await onAssignToQueue(opId, columnId);
+        }
+      }
+
+      // Monta a nova ordem desta coluna com o card arrastado na posição do alvo
+      const currentIds = columnOps(columnId)
+        .filter(o => o.id !== opId)
+        .map(o => o.id);
+      const targetIdx = currentIds.indexOf(targetOpId);
+      const insertAt = targetIdx === -1 ? currentIds.length : targetIdx;
+      const newOrder = [...currentIds.slice(0, insertAt), opId, ...currentIds.slice(insertAt)];
+
+      await onReorderColumn(columnId, newOrder);
+    } finally {
+      setIsDropping(false);
+    }
+  };
+
+  // Solto na área vazia da coluna (fora de qualquer card específico) —
+  // comportamento antigo: só atribui/reatribui a linha, indo pro fim da fila.
   const handleDropOnColumn = async (e: React.DragEvent, columnId: string) => {
     e.preventDefault();
     const opId = e.dataTransfer.getData('text/plain') || draggingOpId;
     setDragOverColumn(null);
+    setDragOverOpId(null);
     setDraggingOpId(null);
     if (!opId) return;
 
     const op = ops.find(o => o.id === opId);
     if (!op) return;
 
-    // Já está na mesma coluna — nada a fazer
+    // Já está na mesma coluna — nada a fazer (o drop já teria sido tratado
+    // pelo card individual caso fosse sobre um card).
     if (columnId === BACKLOG_COLUMN_ID && !op.lineId) return;
     if (op.lineId === columnId) return;
 
@@ -88,27 +159,40 @@ export function CronogramaBoard({
     }
   };
 
-  const renderCard = (op: ProductionOrder) => {
+  const renderCard = (op: ProductionOrder, columnId: string) => {
     const isCritical = op.priority === 'Crítica' || op.priority === 'Alta';
+    const isDragOverTarget = dragOverOpId === op.id && draggingOpId !== op.id;
     return (
       <div
         key={op.id}
         draggable
         onDragStart={(e) => handleDragStart(e, op.id)}
         onDragEnd={handleDragEnd}
+        onDragOver={(e) => handleDragOverCard(e, columnId, op.id)}
+        onDrop={(e) => handleDropOnCard(e, columnId, op.id)}
         onClick={() => onOpenEditOpModal && onOpenEditOpModal(op)}
         className={`p-2.5 rounded-xl border text-xs cursor-grab active:cursor-grabbing transition-all shadow-sm select-none ${
           draggingOpId === op.id ? 'opacity-30' : 'opacity-100'
         } ${
           op.status === 'in_progress'
-            ? 'bg-emerald-950/70 border-emerald-700/60 hover:border-emerald-500'
+            ? 'bg-emerald-950/70 hover:border-emerald-500'
             : op.priority === 'Crítica'
-            ? 'bg-red-950/60 border-red-800/60 hover:border-red-500'
+            ? 'bg-red-950/60 hover:border-red-500'
             : op.priority === 'Alta'
-            ? 'bg-orange-950/50 border-orange-800/50 hover:border-orange-500'
-            : 'bg-[#181822] border-[#2c2c3c] hover:border-blue-500'
+            ? 'bg-orange-950/50 hover:border-orange-500'
+            : 'bg-[#181822] hover:border-blue-500'
+        } ${
+          isDragOverTarget
+            ? 'border-blue-400 ring-2 ring-blue-500/40'
+            : op.status === 'in_progress'
+            ? 'border-emerald-700/60'
+            : op.priority === 'Crítica'
+            ? 'border-red-800/60'
+            : op.priority === 'Alta'
+            ? 'border-orange-800/50'
+            : 'border-[#2c2c3c]'
         }`}
-        title="Arraste para outra coluna para reatribuir a linha"
+        title="Arraste para reordenar a fila desta linha, ou solte em outra coluna para reatribuir"
       >
         <div className="flex items-center justify-between gap-1.5 mb-1">
           <div className="flex items-center gap-1">
@@ -173,7 +257,7 @@ export function CronogramaBoard({
             {backlogOps.length === 0 ? (
               <p className="text-[11px] text-[#52525b] text-center py-6">Nenhuma OP em estoque</p>
             ) : (
-              backlogOps.map(renderCard)
+              backlogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
             )}
           </div>
         </div>
@@ -205,13 +289,10 @@ export function CronogramaBoard({
                   <span className="text-xs font-bold text-[#f4f4f5] truncate">{line.name}</span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa]">
-                    {lineOps.length}
-                  </span>
                   <button
                     type="button"
                     onClick={() => onOpenAssignModal(line)}
-                    title={`Vincular OP do estoque à ${line.name}`}
+                    title={`Vincular OP do estoque a ${line.name}`}
                     className="p-1 rounded-lg text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 transition-colors"
                   >
                     <Plus className="w-3.5 h-3.5" />
@@ -222,7 +303,7 @@ export function CronogramaBoard({
                 {lineOps.length === 0 ? (
                   <p className="text-[11px] text-[#52525b] text-center py-6">Arraste uma OP aqui</p>
                 ) : (
-                  lineOps.map(renderCard)
+                  lineOps.map((op) => renderCard(op, line.id))
                 )}
               </div>
             </div>
@@ -232,7 +313,7 @@ export function CronogramaBoard({
 
       {isDropping && (
         <p className="text-[11px] text-blue-400 font-semibold mt-2 flex items-center gap-1.5">
-          <Layers className="w-3 h-3 animate-pulse" /> Atualizando linha da OP...
+          <Layers className="w-3 h-3 animate-pulse" /> Atualizando fila de produção...
         </p>
       )}
     </div>

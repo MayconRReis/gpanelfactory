@@ -331,11 +331,68 @@ if (typeof window !== 'undefined' && window.localStorage) {
   } catch {}
 }
 
-// Configuração oficial de linhas de produção: 2 linhas de envase e 1 linha para sleeve
+// Configuração oficial de linhas de produção: Envase 1, Envase 2 e Sleev (sem o prefixo 'Linha')
+export const normalizeLineName = (id: string, name?: string | null): string => {
+  const cleanId = String(id || '').toLowerCase().trim();
+  const cleanName = String(name || '').toLowerCase().trim();
+
+  // Envase 1
+  if (
+    cleanId === 'line-1' ||
+    cleanName === 'linha 01 - envase' ||
+    cleanName === 'linha 1 - envase' ||
+    cleanName === 'linha 1' ||
+    cleanName === 'linha 01' ||
+    cleanName === 'envase 1' ||
+    cleanName === 'envase 01' ||
+    (cleanName.includes('envase') && (cleanName.includes('1') || cleanName.includes('01')))
+  ) {
+    return 'Envase 1';
+  }
+
+  // Envase 2
+  if (
+    cleanId === 'line-2' ||
+    cleanName === 'linha 02 - envase' ||
+    cleanName === 'linha 2 - envase' ||
+    cleanName === 'linha 2' ||
+    cleanName === 'linha 02' ||
+    cleanName === 'envase 2' ||
+    cleanName === 'envase 02' ||
+    (cleanName.includes('envase') && (cleanName.includes('2') || cleanName.includes('02')))
+  ) {
+    return 'Envase 2';
+  }
+
+  // Sleev
+  if (
+    cleanId === 'line-sleeve' ||
+    cleanId === 'line-sleev' ||
+    cleanName === 'linha sleeve' ||
+    cleanName === 'linha sleev' ||
+    cleanName === 'sleeve' ||
+    cleanName === 'sleev' ||
+    cleanName.includes('sleeve') ||
+    cleanName.includes('sleev')
+  ) {
+    return 'Sleev';
+  }
+
+  // Se qualquer outra linha começar com "Linha " ou "Linha - "
+  if (name && /^linha\s*[-–—]?\s*/i.test(name.trim())) {
+    const stripped = name.trim().replace(/^linha\s*[-–—]?\s*/i, '');
+    if (stripped.length > 0) {
+      return stripped.charAt(0).toUpperCase() + stripped.slice(1);
+    }
+  }
+
+  return name || id;
+};
+
 const DEFAULT_LINES: ProductionLine[] = [
-  { id: 'line-1', name: 'Linha 01 - Envase', status: 'idle', currentOpId: null },
-  { id: 'line-2', name: 'Linha 02 - Envase', status: 'idle', currentOpId: null },
-  { id: 'line-sleeve', name: 'Linha Sleeve', status: 'idle', currentOpId: null },
+  { id: 'line-1', name: 'Envase 1', status: 'idle', currentOpId: null },
+  { id: 'line-2', name: 'Envase 2', status: 'idle', currentOpId: null },
+  { id: 'line-sleeve', name: 'Sleev', status: 'idle', currentOpId: null },
 ];
 
 // Default initial fallback OPs (Vazio por padrão para novas atribuições e importações)
@@ -1233,18 +1290,29 @@ export const getLines = async (): Promise<ProductionLine[]> => {
     }
 
     if (data && data.length > 0 && !error) {
-      const mapped: ProductionLine[] = data.map((d: any) => ({
-        id: String(d.id),
-        name: d.name,
-        status: (d.status || 'idle') as 'active' | 'idle' | 'paused',
-        currentOpId: d.current_op_id ? String(d.current_op_id) : (d.currentOpId ? String(d.currentOpId) : null),
-      }));
+      const mapped: ProductionLine[] = data.map((d: any) => {
+        const normName = normalizeLineName(String(d.id), d.name);
+        // Sincroniza atualização do nome no Supabase se ainda tiver o formato antigo com 'Linha'
+        if (d.name && d.name !== normName) {
+          try {
+            supabase.from('production_lines').update({ name: normName }).eq('id', d.id).then();
+            supabase.from('lines').update({ name: normName }).eq('id', d.id).then();
+          } catch {}
+        }
+
+        return {
+          id: String(d.id),
+          name: normName,
+          status: (d.status || 'idle') as 'active' | 'idle' | 'paused',
+          currentOpId: d.current_op_id ? String(d.current_op_id) : (d.currentOpId ? String(d.currentOpId) : null),
+        };
+      });
 
       const existingMap = new Map(inMemoryLines.map(l => [l.id, l]));
       mapped.forEach(remoteLine => {
         const local = existingMap.get(remoteLine.id);
         existingMap.set(remoteLine.id, {
-          name: remoteLine.name || local?.name || remoteLine.id,
+          name: remoteLine.name || normalizeLineName(remoteLine.id, local?.name),
           id: remoteLine.id,
           status: remoteLine.status,
           currentOpId: remoteLine.currentOpId,
@@ -1257,13 +1325,14 @@ export const getLines = async (): Promise<ProductionLine[]> => {
     console.warn('Usando linhas de produção em cache local:', err);
   }
 
-  // Sanitize line status if currentOpId is a mock or non-existent OP
+  // Sanitize line status if currentOpId is a mock or non-existent OP, and ensure normalized names
   const opIds = new Set(inMemoryOps.map(o => o.id));
   inMemoryLines = inMemoryLines.map(line => {
+    const normName = normalizeLineName(line.id, line.name);
     if (line.currentOpId && (!opIds.has(line.currentOpId) || isMockOp({ id: line.currentOpId }))) {
-      return { ...line, currentOpId: null, status: 'idle' };
+      return { ...line, name: normName, currentOpId: null, status: 'idle' };
     }
-    return line;
+    return { ...line, name: normName };
   });
 
   persistLines();

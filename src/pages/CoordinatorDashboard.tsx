@@ -90,7 +90,7 @@ import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_ME
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { CronogramaBoard } from '../components/CronogramaBoard';
+import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
 import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
@@ -514,13 +514,42 @@ WHERE email IN (
 
   const handleAssignToQueue = async (opId: string, lineId: string) => {
     const today = getLocalDateStr();
-    await updateOP(opId, { 
-      lineId, 
+    await updateOP(opId, {
+      lineId,
       scheduledDate: today,
       scheduledEndDate: today,
       scheduledDays: 1,
     });
     showToast(`OP colocada na fila de produção da linha com sucesso.`);
+    await loadData();
+  };
+
+  // Reordena a fila de produção de uma coluna do Cronograma (uma linha, ou o
+  // "Estoque / Sem Linha") depois que o coordenador arrasta um card para
+  // cima de outro. Em vez de inventar novos números de sequência, reusamos
+  // exatamente o MESMO conjunto de valores de `sequence` que essa coluna já
+  // tinha — só redistribuídos na nova ordem — então cada OP recebe apenas
+  // uma pequena atualização, sem bagunçar a sequência global entre colunas.
+  const handleReorderColumn = async (columnId: string, orderedOpIds: string[]) => {
+    const columnOps = columnId === CRONOGRAMA_BACKLOG_COLUMN_ID
+      ? ops.filter(o => !o.lineId && o.status !== 'completed')
+      : ops.filter(o => o.lineId === columnId && o.status !== 'completed');
+
+    const sortedSequences = columnOps
+      .map(o => o.sequence || 0)
+      .sort((a, b) => a - b);
+
+    const updates: Array<Promise<any>> = [];
+    orderedOpIds.forEach((opId, idx) => {
+      const newSequence = sortedSequences[idx];
+      const currentOp = columnOps.find(o => o.id === opId);
+      if (newSequence === undefined || !currentOp || currentOp.sequence === newSequence) return;
+      updates.push(updateOP(opId, { sequence: newSequence }));
+    });
+
+    if (updates.length === 0) return;
+
+    await Promise.all(updates);
     await loadData();
   };
 
@@ -1218,6 +1247,7 @@ WHERE email IN (
                 ops={ops}
                 onAssignToQueue={handleAssignToQueue}
                 onUnassign={(opId) => handleSaveAssignment(opId, { lineId: null })}
+                onReorderColumn={handleReorderColumn}
                 onOpenAssignModal={(line) => setAssignStockModalTargetLine(line)}
                 onOpenEditOpModal={(op) => handleOpenEditOPModal(op)}
               />

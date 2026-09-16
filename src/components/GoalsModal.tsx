@@ -162,7 +162,7 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, lineDai
               </h4>
             </div>
             <p className="text-[11px] text-[#71717a] -mt-1.5">
-              Quantidade/dia esperada de cada linha (ex: linha1 18.000, linha2 18.000, sleeve 10.000). Fica fixa até você atualizar.
+              Quantidade/dia esperada de cada linha (ex: Envase 1: 18.000, Envase 2: 18.000, Sleev: 10.000). Fica fixa até você atualizar.
             </p>
 
             <div className="space-y-2">

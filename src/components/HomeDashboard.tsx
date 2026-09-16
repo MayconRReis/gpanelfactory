@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  Users,
   Calendar,
   Share2,
   LayoutDashboard,
@@ -391,9 +390,6 @@ export function HomeDashboard({
                 <span className="w-2 h-2 rounded-full bg-purple-500 inline-block shadow-[0_0_8px_rgba(168,85,247,0.8)]"></span>
                 PESAGEM ({sectorKpis.pesagem.unidade})
               </span>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-950/60 text-purple-300 border border-purple-800/40">
-                Setor 1
-              </span>
             </div>
             <div className="my-3">
               <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
@@ -415,9 +411,6 @@ export function HomeDashboard({
                 <span className="w-2 h-2 rounded-full bg-cyan-500 inline-block shadow-[0_0_8px_rgba(6,182,212,0.8)]"></span>
                 MANIPULAÇÃO ({sectorKpis.manipulacao.unidade})
               </span>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-800/40">
-                Setor 2
-              </span>
             </div>
             <div className="my-3">
               <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
@@ -438,9 +431,6 @@ export function HomeDashboard({
               <span className="text-[11px] font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-blue-500 inline-block shadow-[0_0_8px_rgba(59,130,246,0.8)]"></span>
                 ENVASE ({sectorKpis.envase.unidade})
-              </span>
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-950/60 text-blue-300 border border-blue-800/40">
-                Setor 3
               </span>
             </div>
             <div className="my-3">
@@ -629,9 +619,6 @@ export function HomeDashboard({
             const linePercent = Math.min(Math.round((lineProduced / lineTarget) * 100), 100);
             const lineDailyTarget = getLineDailyGoal(line.id);
 
-            // Líder alocado pela escala
-            const assignedLeader = getLineLeader(line.id);
-
             // OP ativa / em produção ou próxima na fila
             const activeLineOp = line.currentOpId 
               ? ops.find(o => o.id === line.currentOpId)
@@ -666,19 +653,6 @@ export function HomeDashboard({
                             {lineOps.length} OPs • {linePlanned.toLocaleString()} un
                           </span>
                         </div>
-
-                        {/* Líder Escalado (exibido apenas se houver líder vinculado) */}
-                        {assignedLeader?.name && (
-                          <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
-                            <span className="text-[#71717a] flex items-center gap-1 shrink-0">
-                              <Users className="w-3 h-3 text-blue-400" />
-                              <span>Líder:</span>
-                            </span>
-                            <span className="font-bold text-blue-300 truncate min-w-0 text-right">
-                              {assignedLeader.name}
-                            </span>
-                          </div>
-                        )}
 
                         {/* OP Atual da Linha */}
                         {activeLineOp && (
