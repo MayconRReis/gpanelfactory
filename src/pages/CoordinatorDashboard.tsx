@@ -733,7 +733,7 @@ WHERE email IN (
       lineId: op.lineId || 'line-1',
       opNumber: op.number,
     });
-    setSelectedPauseReason(pauseReasons[0]?.name || 'Manutenção Mecânica / Elétrica');
+    setSelectedPauseReason(pauseReasons[0]?.name || 'Aguardando laboratório');
     setPauseObservation('');
   };
 
@@ -2782,7 +2782,7 @@ WHERE email IN (
                   className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
                 >
                   {pauseReasons.map(pr => (
-                    <option key={pr.id} value={pr.name}>{pr.name} ({pr.category || 'Geral'})</option>
+                    <option key={pr.id} value={pr.name}>{pr.name}</option>
                   ))}
                 </select>
               </div>

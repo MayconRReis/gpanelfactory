@@ -110,12 +110,15 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const [isPauseOpen, setIsPauseOpen] = useState(false);
   const [pauseReason, setPauseReason] = useState('');
   const [pauseObs, setPauseObs] = useState('');
+  const [pauseProducedQty, setPauseProducedQty] = useState('');
 
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [quantity, setQuantity] = useState('');
 
   const [isFinishOpen, setIsFinishOpen] = useState(false);
   const [finishShift, setFinishShift] = useState<'Manhã' | 'Tarde' | null>(null);
+  const [finishProducedQty, setFinishProducedQty] = useState('');
+  const [finishProductionType, setFinishProductionType] = useState<'total' | 'parcial'>('total');
   const [isLineSelectOpen, setIsLineSelectOpen] = useState(false);
 
   // Relógio em tempo real
@@ -303,10 +306,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const handlePause = async () => {
     if (!currentLine || !activeOp || !profile || !pauseReason) return;
-    await pauseOP(activeOp.id, currentLine.id, profile.uid, pauseReason, pauseObs);
+    const parsedQty = pauseProducedQty.trim() !== '' ? parseInt(pauseProducedQty, 10) : undefined;
+    await pauseOP(activeOp.id, currentLine.id, profile.uid, pauseReason, pauseObs, parsedQty);
     setIsPauseOpen(false);
     setPauseReason('');
     setPauseObs('');
+    setPauseProducedQty('');
     await fetchData(true);
   };
 
@@ -327,14 +332,19 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
+    const parsedQty = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : undefined;
 
     await finishOP(
       activeOp.id,
       currentLine.id,
-      profile.uid
+      profile.uid,
+      finishShift || undefined,
+      parsedQty
     );
     setIsFinishOpen(false);
     setFinishShift(null);
+    setFinishProducedQty('');
+    setFinishProductionType('total');
     await fetchData(true);
   };
 
@@ -794,13 +804,18 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     </div>
                   </div>
 
-                  {/* Barra visual de progresso */}
-                  <div className="w-full h-3.5 bg-[#0e0e12] rounded-full overflow-hidden p-0.5 border border-[#2a2a38]">
+                  {/* Barra visual de progresso com gradiente de vermelho (0%) a verde (90%+) */}
+                  <div
+                    id="op-progress-container"
+                    className="w-full h-3.5 bg-[#0e0e12] rounded-full overflow-hidden p-0.5 border border-[#2a2a38]"
+                  >
                     <div
-                      className={`h-full rounded-full transition-all duration-500 ${
-                        opProgress >= 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-blue-600 to-cyan-400'
-                      }`}
-                      style={{ width: `${Math.min(opProgress, 100)}%` }}
+                      id="op-progress-bar"
+                      className="h-full rounded-full transition-all duration-500 shadow-sm"
+                      style={{
+                        width: `${Math.min(opProgress, 100)}%`,
+                        background: 'linear-gradient(90deg, #ef4444 0%, #f97316 45%, #eab308 75%, #10b981 90%, #059669 100%)',
+                      }}
                     />
                   </div>
                 </div>
@@ -835,7 +850,10 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
                       {/* Pausar Linha */}
                       <Button
-                        onClick={() => setIsPauseOpen(true)}
+                        onClick={() => {
+                          setPauseProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : '0');
+                          setIsPauseOpen(true);
+                        }}
                         className="h-14 bg-[#181820] hover:bg-amber-950/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
                       >
                         <Pause className="w-5 h-5" />
@@ -846,6 +864,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       <Button
                         onClick={() => {
                           setFinishShift(null);
+                          setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
+                          setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
@@ -870,6 +890,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       <Button
                         onClick={() => {
                           setFinishShift(null);
+                          setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
+                          setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 border border-emerald-500/30 font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2"
@@ -1481,7 +1503,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           <div className="space-y-4 py-3">
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Selecione o Motivo da Parada
+                Selecione o Motivo da Parada *
               </Label>
               <Select onValueChange={setPauseReason} value={pauseReason}>
                 <SelectTrigger className="bg-[#181822] border-[#2c2c3c] rounded-xl h-11 text-xs font-medium">
@@ -1490,11 +1512,31 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 <SelectContent className="bg-[#181822] border-[#2c2c3c] text-[#f4f4f5] max-h-60">
                   {pauseReasonsList.map(r => (
                     <SelectItem key={r.id || r.name} value={r.name} className="text-xs">
-                      {r.name} {r.category ? `(${r.category})` : ''}
+                      {r.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider flex items-center justify-between">
+                <span>Quantidade Produzida até o Momento ({displayUnit})</span>
+                <span className="text-amber-400 font-mono text-[11px]">
+                  Atual: {activeOp?.producedQuantity.toLocaleString('pt-BR')} {displayUnit}
+                </span>
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                value={pauseProducedQty}
+                onChange={e => setPauseProducedQty(e.target.value)}
+                placeholder={`Informe o total produzido (ex: ${activeOp?.producedQuantity || 0})`}
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
+              />
+              <p className="text-[11px] text-[#71717a]">
+                O valor informado atualizará o painel e a barra de progresso imediatamente ao confirmar a pausa.
+              </p>
             </div>
 
             <div className="space-y-2">
@@ -1504,7 +1546,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               <Input
                 value={pauseObs}
                 onChange={e => setPauseObs(e.target.value)}
-                placeholder="Ex: Aguardando chegada do técnico de manutenção..."
+                placeholder="Ex: Aguardando liberação do técnico..."
                 className="bg-[#181822] border-[#2c2c3c] rounded-xl text-xs"
               />
             </div>
@@ -1546,12 +1588,87 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </p>
               <div className="grid grid-cols-2 gap-2 text-[#a1a1aa] font-mono pt-1">
                 <div>Planejado: <strong className="text-white">{activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
-                <div>Produzido: <strong className="text-emerald-400">{activeOp?.producedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
+                <div>Atual: <strong className="text-emerald-400">{activeOp?.producedQuantity.toLocaleString('pt-BR')} {displayUnit}</strong></div>
               </div>
             </div>
 
+            {/* Tipo de Produção: Total ou Parcial */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
+                Tipo de Conclusão *
+              </Label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFinishProductionType('total');
+                    if (activeOp && (!finishProducedQty || parseInt(finishProducedQty) < activeOp.plannedQuantity)) {
+                      setFinishProducedQty(String(activeOp.plannedQuantity));
+                    }
+                  }}
+                  className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1 ${
+                    finishProductionType === 'total'
+                      ? 'bg-emerald-500/15 border-emerald-500 text-emerald-400 shadow-md shadow-emerald-950/40'
+                      : 'bg-[#181822] border-[#2c2c3c] text-[#a1a1aa] hover:border-[#3f3f50] hover:text-white'
+                  }`}
+                >
+                  <span className="uppercase tracking-wider">Produção Total</span>
+                  <span className="text-[10px] opacity-80 font-normal">Meta atingida (100%)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFinishProductionType('parcial');
+                    if (activeOp && (!finishProducedQty || parseInt(finishProducedQty) >= activeOp.plannedQuantity)) {
+                      setFinishProducedQty(String(activeOp.producedQuantity));
+                    }
+                  }}
+                  className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1 ${
+                    finishProductionType === 'parcial'
+                      ? 'bg-amber-500/15 border-amber-500 text-amber-400 shadow-md shadow-amber-950/40'
+                      : 'bg-[#181822] border-[#2c2c3c] text-[#a1a1aa] hover:border-[#3f3f50] hover:text-white'
+                  }`}
+                >
+                  <span className="uppercase tracking-wider">Produção Parcial</span>
+                  <span className="text-[10px] opacity-80 font-normal">Encerrar com saldo</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Input de Quantidade Produzida */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider flex items-center justify-between">
+                <span>Quantidade Produzida Final ({displayUnit}) *</span>
+                <span className="text-emerald-400 font-mono text-[11px]">
+                  Meta: {activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
+                </span>
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                value={finishProducedQty}
+                onChange={e => {
+                  const val = e.target.value;
+                  setFinishProducedQty(val);
+                  if (activeOp && val) {
+                    const num = parseInt(val, 10);
+                    if (!isNaN(num)) {
+                      if (num >= activeOp.plannedQuantity) {
+                        setFinishProductionType('total');
+                      } else {
+                        setFinishProductionType('parcial');
+                      }
+                    }
+                  }
+                }}
+                placeholder={`Quantidade produzida em ${displayUnit}`}
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono text-white"
+              />
+            </div>
+
             <p className="text-xs text-[#a1a1aa]">
-              Ao confirmar a finalização, a OP será marcada como <strong>Concluída</strong> e a linha ficará livre para a próxima ordem da fila.
+              Ao confirmar a finalização, a OP será encerrada com a quantidade indicada e a linha ficará liberada.
             </p>
           </div>
 
@@ -1561,6 +1678,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               onClick={() => {
                 setIsFinishOpen(false);
                 setFinishShift(null);
+                setFinishProducedQty('');
+                setFinishProductionType('total');
               }}
               className="border-[#27272a] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
             >
@@ -1568,6 +1687,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             </Button>
             <Button
               onClick={handleFinish}
+              disabled={!finishProducedQty || isNaN(parseInt(finishProducedQty, 10)) || parseInt(finishProducedQty, 10) < 0}
               className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
             >
               Confirmar Conclusão

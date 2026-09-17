@@ -400,14 +400,14 @@ const DEFAULT_OPS: ProductionOrder[] = [];
 
 // Default pause reasons
 export const DEFAULT_PAUSE_REASONS: PauseReason[] = [
-  { id: 'pr-1', name: 'Falta de Matéria-Prima / Granel', category: 'Suprimentos' },
-  { id: 'pr-2', name: 'Falta de Embalagem / Rótulo / Tampa / Sleeve', category: 'Suprimentos' },
-  { id: 'pr-3', name: 'Manutenção Mecânica / Elétrica', category: 'Manutenção' },
-  { id: 'pr-4', name: 'Setup / Troca de Formato de Linha', category: 'Operação' },
-  { id: 'pr-5', name: 'Limpeza e Sanitização Periódica', category: 'Qualidade' },
-  { id: 'pr-6', name: 'Inspeção / Liberação de Qualidade', category: 'Qualidade' },
-  { id: 'pr-7', name: 'Almoço / Intervalo Operacional', category: 'Operação' },
-  { id: 'pr-8', name: 'Aguardando Aprovação da Coordenação', category: 'Gestão' },
+  { id: 'pr-1', name: 'Aguardando laboratório' },
+  { id: 'pr-2', name: 'Falta de insumo' },
+  { id: 'pr-3', name: 'Limpeza' },
+  { id: 'pr-4', name: 'Manutenção' },
+  { id: 'pr-5', name: 'Problema na envasadora' },
+  { id: 'pr-6', name: 'Problema operacional' },
+  { id: 'pr-7', name: 'Intervalo' },
+  { id: 'pr-8', name: 'Outro' },
 ];
 
 // Default recent events (Vazio por padrão)
@@ -2323,11 +2323,27 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
   }
 };
 
-export const pauseOP = async (opId: string, lineId: string, leaderId: string, reason: string, observation: string) => {
+export const pauseOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  reason: string,
+  observation: string,
+  producedQuantity?: number
+) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
 
-  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'paused' } : op);
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId
+      ? {
+          ...op,
+          status: 'paused',
+          producedQuantity: updatedProducedQty !== undefined ? updatedProducedQty : op.producedQuantity,
+        }
+      : op
+  );
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'paused' } : l);
 
   persistOps();
@@ -2343,15 +2359,21 @@ export const pauseOP = async (opId: string, lineId: string, leaderId: string, re
     type: 'PAUSED',
     reason,
     observation,
+    quantity: updatedProducedQty,
     createdAt: new Date().toISOString(),
   };
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  const updateOpPayload: any = { status: 'paused' };
+  if (updatedProducedQty !== undefined) {
+    updateOpPayload.produced_quantity = updatedProducedQty;
+  }
+
   try {
     await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'paused' }).eq('id', opId),
-      supabase.from('ops').update({ status: 'paused' }).eq('id', opId),
+      supabase.from('production_orders').update(updateOpPayload).eq('id', opId),
+      supabase.from('ops').update(updateOpPayload).eq('id', opId),
       supabase.from('production_lines').update({ status: 'paused' }).eq('id', lineId),
       supabase.from('lines').update({ status: 'paused' }).eq('id', lineId),
       supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'PAUSED', reason, observation, created_at: newEvent.createdAt }),
