@@ -49,15 +49,24 @@ export function AssignStockOpToLineModal({
     return true;
   });
 
-  const filteredOps = availableOps.filter(op => {
-    const term = searchTerm.toLowerCase();
-    return (
-      op.number.toLowerCase().includes(term) ||
-      op.product.toLowerCase().includes(term) ||
-      (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
-      (op.granel ? op.granel.toLowerCase().includes(term) : false)
-    );
-  });
+  const filteredOps = availableOps
+    .filter(op => {
+      const term = searchTerm.toLowerCase();
+      return (
+        op.number.toLowerCase().includes(term) ||
+        op.product.toLowerCase().includes(term) ||
+        (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
+        (op.granel ? op.granel.toLowerCase().includes(term) : false)
+      );
+    })
+    .sort((a, b) => {
+      // Se a linha destino for Sleev, prioriza as OPs que vieram com acabamento Sleev
+      if (targetLine.id === 'line-sleeve') {
+        if (a.isSleeve && !b.isSleeve) return -1;
+        if (!a.isSleeve && b.isSleeve) return 1;
+      }
+      return 0;
+    });
 
   const selectedOp = ops.find(o => o.id === selectedOpId);
 
@@ -184,6 +193,12 @@ export function AssignStockOpToLineModal({
                         <span className="font-bold text-xs text-[#f4f4f5] truncate">
                           {op.product}
                         </span>
+                        {op.isSleeve && (
+                          <span className="text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-wider bg-purple-950/90 text-purple-300 border border-purple-500/60 flex items-center gap-1 shadow-sm shadow-purple-950/40">
+                            <Sparkles className="w-3 h-3 text-purple-400" />
+                            Sleev ({op.plannedQuantity.toLocaleString('pt-BR')} un)
+                          </span>
+                        )}
                         <span className={`text-[10px] font-bold px-2 py-0.2 rounded uppercase ${
                           op.status === 'in_progress' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
                           op.status === 'paused' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :

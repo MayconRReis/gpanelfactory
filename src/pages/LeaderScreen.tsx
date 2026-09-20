@@ -27,6 +27,8 @@ import {
   Zap,
   ArrowUpRight,
   ShieldCheck,
+  Sparkles,
+  Plus,
 } from 'lucide-react';
 import {
   getLines,
@@ -40,8 +42,10 @@ import {
   saveLeaderRotation,
   getRecentEvents,
   getPauseReasons,
+  updateOP,
   DEFAULT_PAUSE_REASONS,
 } from '../services/db';
+import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
@@ -59,6 +63,7 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts';
+import { calculateProductionRatePerHour } from '../lib/productionTime';
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
 
@@ -114,12 +119,17 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [quantity, setQuantity] = useState('');
+  const [reportRejectedQty, setReportRejectedQty] = useState('');
 
   const [isFinishOpen, setIsFinishOpen] = useState(false);
   const [finishShift, setFinishShift] = useState<'Manhã' | 'Tarde' | null>(null);
   const [finishProducedQty, setFinishProducedQty] = useState('');
+  const [finishRejectedQty, setFinishRejectedQty] = useState('');
   const [finishProductionType, setFinishProductionType] = useState<'total' | 'parcial'>('total');
+  const [finishSendToSleeve, setFinishSendToSleeve] = useState(false);
+  const [isCancelFinishConfirmOpen, setIsCancelFinishConfirmOpen] = useState(false);
   const [isLineSelectOpen, setIsLineSelectOpen] = useState(false);
+  const [isAssignStockOpen, setIsAssignStockOpen] = useState(false);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -324,8 +334,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const handleReport = async (qtyToReport?: number) => {
     const finalQty = qtyToReport !== undefined ? qtyToReport : parseInt(quantity);
     if (!currentLine || !activeOp || !profile || isNaN(finalQty) || finalQty <= 0) return;
-    await reportQuantity(activeOp.id, currentLine.id, profile.uid, finalQty);
+    // Rejeito só se aplica ao apontamento manual (os botões de incremento
+    // rápido não passam por aqui com qtyToReport, então ficam sem rejeito).
+    const parsedRejected = qtyToReport === undefined && reportRejectedQty.trim() !== ''
+      ? parseInt(reportRejectedQty, 10)
+      : undefined;
+    await reportQuantity(activeOp.id, currentLine.id, profile.uid, finalQty, parsedRejected);
     setQuantity('');
+    setReportRejectedQty('');
     setIsReportOpen(false);
     await fetchData(true);
   };
@@ -333,18 +349,23 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
     const parsedQty = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : undefined;
+    const parsedRejectedQty = finishRejectedQty.trim() !== '' ? parseInt(finishRejectedQty, 10) : undefined;
 
     await finishOP(
       activeOp.id,
       currentLine.id,
       profile.uid,
       finishShift || undefined,
-      parsedQty
+      parsedQty,
+      finishSendToSleeve,
+      parsedRejectedQty
     );
     setIsFinishOpen(false);
     setFinishShift(null);
     setFinishProducedQty('');
+    setFinishRejectedQty('');
     setFinishProductionType('total');
+    setFinishSendToSleeve(false);
     await fetchData(true);
   };
 
@@ -492,12 +513,61 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     );
   }
 
-  // Progresso da OP ativa
+  // Progresso da OP ativa — pode passar de 100% quando o rendimento supera a meta prevista
   const opProgress = activeOp && activeOp.plannedQuantity > 0
-    ? Math.min(Math.round((activeOp.producedQuantity / activeOp.plannedQuantity) * 100), 100)
+    ? Math.round((activeOp.producedQuantity / activeOp.plannedQuantity) * 100)
     : 0;
 
   const missingQty = activeOp ? Math.max(activeOp.plannedQuantity - activeOp.producedQuantity, 0) : 0;
+
+  // Identificação da Linha Sleev ou OP destinada ao Sleev
+  const isSleeve = Boolean(
+    currentLine?.id === 'line-sleeve' ||
+    (currentLine?.name && /sleeve/i.test(currentLine.name)) ||
+    activeOp?.isSleeve
+  );
+
+  // Tempo trabalhado da OP ativa em milissegundos (baseado no histórico cronológico de eventos reais)
+  const activeOpWorkingMs = useMemo(() => {
+    if (!activeOp) return 0;
+    const opEvents = recentEvents.filter(e => e.opId === activeOp.id);
+    if (!opEvents.length) {
+      if (activeOp.status === 'in_progress' && activeOp.startedAt) {
+        const s = new Date(activeOp.startedAt).getTime();
+        return isNaN(s) ? 0 : Math.max(0, Date.now() - s);
+      }
+      return 0;
+    }
+
+    const sorted = [...opEvents].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    let workingMs = 0;
+    let currentStart: number | null = null;
+
+    for (const ev of sorted) {
+      const t = new Date(ev.createdAt).getTime();
+      if (isNaN(t)) continue;
+      if (ev.type === 'STARTED' || ev.type === 'RESUMED') {
+        currentStart = t;
+      } else if ((ev.type === 'PAUSED' || ev.type === 'FINISHED') && currentStart !== null) {
+        workingMs += Math.max(0, t - currentStart);
+        currentStart = null;
+      }
+    }
+
+    if (currentStart !== null && activeOp.status === 'in_progress') {
+      workingMs += Math.max(0, Date.now() - currentStart);
+    }
+
+    return workingMs;
+  }, [activeOp, recentEvents, currentTime]);
+
+  // Rendimento de Produção por Hora no Sleev: Quantidade produzida ÷ Horas trabalhadas
+  const sleeveRate = useMemo(() => {
+    if (!activeOp) return { producedPerHour: 0, workingHours: 0, formatted: '0 un/h' };
+    return calculateProductionRatePerHour(activeOp.producedQuantity, activeOpWorkingMs);
+  }, [activeOp, activeOpWorkingMs]);
 
   // Variáveis contextuais do Chão de Fábrica (Envase)
   // Como esta tela é o posto operacional de Envase, o tipo de documento é sempre OP (Ordem de Produção)
@@ -741,6 +811,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                        activeOp.status === 'paused' ? 'Pausada' : 'Aguardando'}
                     </span>
 
+                    {/* Badge Sleev se a OP veio do envase com acabamento para Sleev */}
+                    {activeOp.isSleeve && (
+                      <span className="px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 border bg-purple-950 text-purple-300 border-purple-600/60 shadow-sm shadow-purple-950/40">
+                        <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                        Sleev
+                      </span>
+                    )}
+
                     {/* OP programada para uma data que já passou e ainda nem
                         foi iniciada — alerta em vermelho para o líder. */}
                     {isOpOverdue(activeOp, todayDateStr) && (
@@ -779,30 +857,71 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
                 {/* Barra de Progresso e Métricas Numéricas */}
                 <div className="bg-[#171720] border border-[#262634] rounded-2xl p-4 sm:p-5 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
-                    <div>
-                      <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
-                        {qtyProducedLabel}
-                      </span>
-                      <div className="flex items-baseline gap-2 mt-0.5">
-                        <span className="text-3xl sm:text-4xl font-black text-white font-mono">
-                          {activeOp.producedQuantity.toLocaleString('pt-BR')}
+                  {isSleeve ? (
+                    /* MOSTRADOR DE QUANTIDADE PRÓPRIO DO SLEEV (Apenas quantidade produzida por hora) */
+                    <div className="p-4 rounded-2xl bg-purple-950/25 border border-purple-800/40 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-black text-purple-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <Sparkles className="w-4 h-4 text-purple-400" />
+                          Mostrador de Quantidade (Sleev)
                         </span>
-                        <span className="text-sm font-semibold text-[#71717a] font-mono">
-                          / {activeOp.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-900/80 text-purple-200 border border-purple-700/60 uppercase">
+                          Apenas Produção por Hora
+                        </span>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pt-1">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-4xl sm:text-5xl font-black text-white font-mono tracking-tight">
+                            {sleeveRate.producedPerHour.toLocaleString('pt-BR')}
+                          </span>
+                          <span className="text-base sm:text-lg font-bold text-purple-400 font-mono">
+                            un/h
+                          </span>
+                        </div>
+
+                        <div className="text-left sm:text-right">
+                          <span className="text-[11px] font-mono text-[#a1a1aa]">
+                            Total acumulado: <strong className="text-white font-bold">{activeOp.producedQuantity.toLocaleString('pt-BR')} un</strong>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-purple-800/30 flex flex-wrap items-center justify-between text-xs text-[#a1a1aa] font-mono gap-2">
+                        <span>
+                          Métrica: {activeOp.producedQuantity.toLocaleString('pt-BR')} un ÷ {sleeveRate.workingHours > 0 ? `${sleeveRate.workingHours.toFixed(1)}h trabalhadas` : 'tempo trabalhado'}
+                        </span>
+                        <span className="text-purple-300">
+                          Progresso: {opProgress}% ({missingQty.toLocaleString('pt-BR')} un restantes)
                         </span>
                       </div>
                     </div>
+                  ) : (
+                    <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                      <div>
+                        <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
+                          {qtyProducedLabel}
+                        </span>
+                        <div className="flex items-baseline gap-2 mt-0.5">
+                          <span className="text-3xl sm:text-4xl font-black text-white font-mono">
+                            {activeOp.producedQuantity.toLocaleString('pt-BR')}
+                          </span>
+                          <span className="text-sm font-semibold text-[#71717a] font-mono">
+                            / {activeOp.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
+                          </span>
+                        </div>
+                      </div>
 
-                    <div className="text-left sm:text-right">
-                      <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
-                        Faltam para Concluir
-                      </span>
-                      <span className="text-lg font-bold text-blue-400 font-mono">
-                        {missingQty.toLocaleString('pt-BR')} {displayUnit} ({opProgress}%)
-                      </span>
+                      <div className="text-left sm:text-right">
+                        <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
+                          Faltam para Concluir
+                        </span>
+                        <span className="text-lg font-bold text-blue-400 font-mono">
+                          {missingQty.toLocaleString('pt-BR')} {displayUnit} ({opProgress}%)
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Barra visual de progresso com gradiente de vermelho (0%) a verde (90%+) */}
                   <div
@@ -814,7 +933,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       className="h-full rounded-full transition-all duration-500 shadow-sm"
                       style={{
                         width: `${Math.min(opProgress, 100)}%`,
-                        background: 'linear-gradient(90deg, #ef4444 0%, #f97316 45%, #eab308 75%, #10b981 90%, #059669 100%)',
+                        background: isSleeve
+                          ? 'linear-gradient(90deg, #7e22ce 0%, #a855f7 50%, #c084fc 100%)'
+                          : 'linear-gradient(90deg, #ef4444 0%, #f97316 45%, #eab308 75%, #10b981 90%, #059669 100%)',
                       }}
                     />
                   </div>
@@ -866,6 +987,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                           setFinishShift(null);
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
+                          setFinishSendToSleeve(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
@@ -892,6 +1014,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                           setFinishShift(null);
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
+                          setFinishSendToSleeve(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 border border-emerald-500/30 font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2"
@@ -906,16 +1029,29 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
               </div>
             ) : (
-              <div className="bg-[#121217] border border-[#22222b] rounded-3xl p-10 text-center space-y-3">
+              <div className="bg-[#121217] border border-[#22222b] rounded-3xl p-10 text-center space-y-4">
                 <div className="w-14 h-14 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-400 mx-auto flex items-center justify-center">
                   <Package className="w-7 h-7" />
                 </div>
-                <h3 className="text-base font-bold text-white">
-                  Nenhuma {docTypeLabel} em andamento nesta linha
-                </h3>
-                <p className="text-xs text-[#71717a] max-w-md mx-auto">
-                  Aguardando programação da coordenação ou selecione outra linha para operar.
-                </p>
+                <div className="space-y-1">
+                  <h3 className="text-base font-bold text-white">
+                    Nenhuma {docTypeLabel} em andamento nesta linha
+                  </h3>
+                  <p className="text-xs text-[#71717a] max-w-md mx-auto">
+                    {currentLine?.id === 'line-sleeve'
+                      ? 'Vincule uma OP disponível do estoque para iniciar a produção no Sleev ou aguarde o sequenciamento.'
+                      : 'Aguardando programação da coordenação ou vincule uma OP do estoque para operar.'}
+                  </p>
+                </div>
+                <div className="pt-2 flex justify-center">
+                  <Button
+                    onClick={() => setIsAssignStockOpen(true)}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs uppercase tracking-wider rounded-xl px-5 py-2.5 flex items-center gap-2 shadow-lg shadow-blue-950/40"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Vincular OP do Estoque para {currentLine?.name || 'esta Linha'}
+                  </Button>
+                </div>
               </div>
             )}
 
@@ -952,6 +1088,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                             #{idx + 1} • {docTypeLabel} {op.number}
                           </span>
                           <div className="flex items-center gap-1">
+                            {op.isSleeve && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-700/60 flex items-center gap-1 shadow-sm">
+                                <Sparkles className="w-2.5 h-2.5 text-purple-400" />
+                                Sleev
+                              </span>
+                            )}
                             {overdue && (
                               <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-950 text-red-400 border border-red-800/60 flex items-center gap-1">
                                 <AlertTriangle className="w-2.5 h-2.5" />
@@ -1025,20 +1167,28 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             {/* 4 CARDS DE KPI DIÁRIO */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
               
-              {/* Total Produzido Hoje */}
+              {/* Total Produzido Hoje ou Taxa Horária no Sleev */}
               <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
                 <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Produzido Hoje
+                  {isSleeve ? 'Produção por Hora (Sleev)' : 'Produzido Hoje'}
                 </span>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-2xl sm:text-3xl font-black text-white font-mono">
-                    {dailyMetrics.producedToday.toLocaleString('pt-BR')}
+                    {isSleeve
+                      ? sleeveRate.producedPerHour.toLocaleString('pt-BR')
+                      : dailyMetrics.producedToday.toLocaleString('pt-BR')}
                   </span>
-                  <span className="text-xs text-[#71717a] font-mono">un</span>
+                  <span className="text-xs text-[#71717a] font-mono">
+                    {isSleeve ? 'un/h' : 'un'}
+                  </span>
                 </div>
-                <div className="text-[11px] text-emerald-400 flex items-center gap-1 font-semibold">
+                <div className={`text-[11px] flex items-center gap-1 font-semibold ${isSleeve ? 'text-purple-400' : 'text-emerald-400'}`}>
                   <TrendingUp className="w-3 h-3" />
-                  <span>Em ritmo normal</span>
+                  <span>
+                    {isSleeve
+                      ? `${sleeveRate.workingHours > 0 ? sleeveRate.workingHours.toFixed(1) : '0'}h trabalhadas`
+                      : 'Em ritmo normal'}
+                  </span>
                 </div>
               </div>
 
@@ -1442,7 +1592,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 Incremento Rápido de Unidades
               </Label>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {[50, 100, 250, 500].map(amt => (
+                {[48, 96, 192, 768].map(amt => (
                   <button
                     key={amt}
                     type="button"
@@ -1469,12 +1619,33 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 autoFocus
               />
             </div>
+
+            {/* Quantidade Rejeitada (opcional) — vale apenas para o apontamento manual acima */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-red-400 font-bold tracking-wider">
+                Quantidade Rejeitada Neste Apontamento (Opcional)
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                value={reportRejectedQty}
+                onChange={e => setReportRejectedQty(e.target.value)}
+                className="bg-[#181822] border-red-900/50 text-sm font-mono text-red-400 font-bold h-10 rounded-xl"
+                placeholder="Ex: 5"
+              />
+              <p className="text-[10px] text-[#71717a]">
+                Perda/refugo identificado neste lote — usado no cálculo de Qualidade do OEE.
+              </p>
+            </div>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               variant="outline"
-              onClick={() => setIsReportOpen(false)}
+              onClick={() => {
+                setIsReportOpen(false);
+                setReportRejectedQty('');
+              }}
               className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
             >
               Cancelar
@@ -1572,12 +1743,19 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       </Dialog>
 
       {/* MODAL 3: FINALIZAR OP / OSM */}
-      <Dialog open={isFinishOpen} onOpenChange={setIsFinishOpen}>
+      <Dialog
+        open={isFinishOpen}
+        onOpenChange={open => {
+          if (!open) {
+            setIsCancelFinishConfirmOpen(true);
+          }
+        }}
+      >
         <DialogContent className="bg-[#121214] border-[#27272a] text-[#f4f4f5] max-w-md rounded-3xl p-6">
           <DialogHeader>
             <DialogTitle className="uppercase tracking-wider text-sm font-black text-emerald-400 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5" />
-              Finalizar Ordem de Produção (OP)
+              Concluir {docTypeLabel} {activeOp?.number}
             </DialogTitle>
           </DialogHeader>
 
@@ -1592,7 +1770,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </div>
             </div>
 
-            {/* Tipo de Produção: Total ou Parcial */}
+            {/* Tipo de Conclusão: Total ou Parcial (apenas os nomes sem descrição) */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
                 Tipo de Conclusão *
@@ -1600,38 +1778,28 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    setFinishProductionType('total');
-                    if (activeOp && (!finishProducedQty || parseInt(finishProducedQty) < activeOp.plannedQuantity)) {
-                      setFinishProducedQty(String(activeOp.plannedQuantity));
-                    }
-                  }}
-                  className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1 ${
+                  id="btn-finish-total"
+                  onClick={() => setFinishProductionType('total')}
+                  className={`h-11 rounded-xl border text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center select-none ${
                     finishProductionType === 'total'
-                      ? 'bg-emerald-500/15 border-emerald-500 text-emerald-400 shadow-md shadow-emerald-950/40'
+                      ? 'bg-emerald-500/15 border-emerald-500 text-emerald-400 shadow-md shadow-emerald-950/40 ring-1 ring-emerald-500/30'
                       : 'bg-[#181822] border-[#2c2c3c] text-[#a1a1aa] hover:border-[#3f3f50] hover:text-white'
                   }`}
                 >
-                  <span className="uppercase tracking-wider">Produção Total</span>
-                  <span className="text-[10px] opacity-80 font-normal">Meta atingida (100%)</span>
+                  <span>Total</span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setFinishProductionType('parcial');
-                    if (activeOp && (!finishProducedQty || parseInt(finishProducedQty) >= activeOp.plannedQuantity)) {
-                      setFinishProducedQty(String(activeOp.producedQuantity));
-                    }
-                  }}
-                  className={`p-3 rounded-xl border text-xs font-bold transition-all flex flex-col items-center gap-1 ${
+                  id="btn-finish-parcial"
+                  onClick={() => setFinishProductionType('parcial')}
+                  className={`h-11 rounded-xl border text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center select-none ${
                     finishProductionType === 'parcial'
-                      ? 'bg-amber-500/15 border-amber-500 text-amber-400 shadow-md shadow-amber-950/40'
+                      ? 'bg-amber-500/15 border-amber-500 text-amber-400 shadow-md shadow-amber-950/40 ring-1 ring-amber-500/30'
                       : 'bg-[#181822] border-[#2c2c3c] text-[#a1a1aa] hover:border-[#3f3f50] hover:text-white'
                   }`}
                 >
-                  <span className="uppercase tracking-wider">Produção Parcial</span>
-                  <span className="text-[10px] opacity-80 font-normal">Encerrar com saldo</span>
+                  <span>Parcial</span>
                 </button>
               </div>
             </div>
@@ -1640,47 +1808,91 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider flex items-center justify-between">
                 <span>Quantidade Produzida Final ({displayUnit}) *</span>
-                <span className="text-emerald-400 font-mono text-[11px]">
-                  Meta: {activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
+                <span className="text-[#71717a] font-mono text-[11px]">
+                  Estimativa: {activeOp?.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
                 </span>
               </Label>
               <Input
                 type="number"
                 min="0"
                 value={finishProducedQty}
-                onChange={e => {
-                  const val = e.target.value;
-                  setFinishProducedQty(val);
-                  if (activeOp && val) {
-                    const num = parseInt(val, 10);
-                    if (!isNaN(num)) {
-                      if (num >= activeOp.plannedQuantity) {
-                        setFinishProductionType('total');
-                      } else {
-                        setFinishProductionType('parcial');
-                      }
-                    }
-                  }
-                }}
+                onChange={e => setFinishProducedQty(e.target.value)}
                 placeholder={`Quantidade produzida em ${displayUnit}`}
-                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono text-white"
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono text-white focus:border-emerald-500"
               />
             </div>
 
+            {/* Quantidade Rejeitada (opcional) — enquanto o laboratório não entra no fluxo,
+                é o próprio líder que registra a perda ao concluir a OP */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-red-400 font-bold tracking-wider">
+                Quantidade Rejeitada ({displayUnit}) — Opcional
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                value={finishRejectedQty}
+                onChange={e => setFinishRejectedQty(e.target.value)}
+                placeholder="Ex: 20"
+                className="bg-[#181822] border-red-900/50 rounded-xl text-sm font-mono text-red-400 font-bold focus:border-red-500"
+              />
+              <p className="text-[10px] text-[#71717a]">
+                Perda/refugo total identificado nesta OP — usado no cálculo de Qualidade do OEE.
+              </p>
+            </div>
+
+            {/* Checkbox Sleev */}
+            <div
+              id="card-sleeve-option"
+              onClick={() => setFinishSendToSleeve(!finishSendToSleeve)}
+              className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-start gap-3 select-none ${
+                finishSendToSleeve
+                  ? 'bg-purple-950/25 border-purple-500/60 text-white shadow-md shadow-purple-950/30 ring-1 ring-purple-500/30'
+                  : 'bg-[#181822] border-[#27272a] text-[#a1a1aa] hover:border-[#383848]'
+              }`}
+            >
+              <input
+                type="checkbox"
+                id="checkbox-sleeve"
+                checked={finishSendToSleeve}
+                onChange={e => setFinishSendToSleeve(e.target.checked)}
+                onClick={e => e.stopPropagation()}
+                className="mt-0.5 w-4 h-4 rounded border-[#383848] text-purple-600 focus:ring-purple-500 focus:ring-offset-0 bg-[#121218] cursor-pointer"
+              />
+              <div className="space-y-1 flex-1">
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="checkbox-sleeve"
+                    className="text-xs font-bold text-white cursor-pointer uppercase tracking-wider flex items-center gap-1.5"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                    Sleev
+                  </label>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 font-semibold border border-purple-500/30">
+                    Retorna ao Estoque
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+                  Se marcado, a OP retorna para o estoque e fica livre para ser produzida no <strong>Sleev</strong>, com a nova quantidade planejada de{' '}
+                  <strong className="text-purple-300 font-mono">
+                    {finishProducedQty ? parseInt(finishProducedQty, 10).toLocaleString('pt-BR') : activeOp?.producedQuantity.toLocaleString('pt-BR') || '0'} {displayUnit}
+                  </strong>{' '}
+                  (quantidade apontada).
+                </p>
+              </div>
+            </div>
+
             <p className="text-xs text-[#a1a1aa]">
-              Ao confirmar a finalização, a OP será encerrada com a quantidade indicada e a linha ficará liberada.
+              {finishSendToSleeve
+                ? 'Ao concluir, o envase nesta linha será finalizado com a quantidade apontada acima, liberando a linha. A OP voltará ao estoque com o saldo apontado, livre para produção no Sleev.'
+                : 'Este será o valor total final produzido da OP (não soma com apontamentos anteriores). Ao concluir, a OP será encerrada com esta quantidade total e a linha ficará liberada.'}
             </p>
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               variant="outline"
-              onClick={() => {
-                setIsFinishOpen(false);
-                setFinishShift(null);
-                setFinishProducedQty('');
-                setFinishProductionType('total');
-              }}
+              onClick={() => setIsCancelFinishConfirmOpen(true)}
               className="border-[#27272a] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
             >
               Cancelar
@@ -1688,9 +1900,51 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             <Button
               onClick={handleFinish}
               disabled={!finishProducedQty || isNaN(parseInt(finishProducedQty, 10)) || parseInt(finishProducedQty, 10) < 0}
-              className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+              className={
+                finishSendToSleeve
+                  ? 'bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-lg shadow-purple-950/50'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider'
+              }
             >
-              Confirmar Conclusão
+              Concluir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL DE CONFIRMAÇÃO DE CANCELAMENTO DA CONCLUSÃO */}
+      <Dialog open={isCancelFinishConfirmOpen} onOpenChange={setIsCancelFinishConfirmOpen}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-sm rounded-3xl p-6 shadow-2xl">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-white flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              Cancelar Conclusão?
+            </DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-[#a1a1aa] leading-relaxed py-2">
+            Tem certeza de que deseja cancelar a conclusão da OP? Os dados informados nesta tela não serão salvos.
+          </p>
+          <DialogFooter className="gap-2 sm:gap-0 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => setIsCancelFinishConfirmOpen(false)}
+              className="border-[#27272a] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Continuar Editando
+            </Button>
+            <Button
+              onClick={() => {
+                setIsCancelFinishConfirmOpen(false);
+                setIsFinishOpen(false);
+                setFinishShift(null);
+                setFinishProducedQty('');
+                setFinishRejectedQty('');
+                setFinishProductionType('total');
+                setFinishSendToSleeve(false);
+              }}
+              className="bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              Sim, Cancelar
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1751,6 +2005,41 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* MODAL 5: VINCULAR OP DO ESTOQUE À LINHA */}
+      {isAssignStockOpen && currentLine && (
+        <AssignStockOpToLineModal
+          isOpen={isAssignStockOpen}
+          onClose={() => setIsAssignStockOpen(false)}
+          targetLine={currentLine}
+          ops={allOps}
+          onAssignAndStart={async (opId, lineId) => {
+            const today = getLocalDateStr();
+            await updateOP(opId, {
+              lineId,
+              scheduledDate: today,
+              scheduledEndDate: today,
+              scheduledDays: 1,
+            });
+            if (profile) {
+              await startOP(opId, lineId, profile.uid);
+            }
+            setIsAssignStockOpen(false);
+            await fetchData(true);
+          }}
+          onAssignToQueue={async (opId, lineId) => {
+            const today = getLocalDateStr();
+            await updateOP(opId, {
+              lineId,
+              scheduledDate: today,
+              scheduledEndDate: today,
+              scheduledDays: 1,
+            });
+            setIsAssignStockOpen(false);
+            await fetchData(true);
+          }}
+        />
+      )}
 
     </div>
   );

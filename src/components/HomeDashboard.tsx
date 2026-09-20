@@ -1,15 +1,24 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
+  Users,
   Calendar,
   Share2,
   LayoutDashboard,
+  Clock,
+  FlaskConical,
+  Sparkles,
+  Filter,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth } from '../services/db';
+import { groupProductionByDayAndSetor, groupProductionByMonth, calculateOEE } from '../services/db';
+import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
 import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  LineChart,
+  Line,
+  Legend,
   XAxis,
   YAxis,
   Tooltip,
@@ -97,6 +106,41 @@ export function formatHoursAndMinutes(decimalHours: number): string {
   return `${hours}h ${minutes}min`;
 }
 
+/**
+ * Formata um intervalo em milissegundos como um cronômetro "HH:MM:SS".
+ * Usado para os timers de produção em tempo real (Manipulação, Envase, Sleeve).
+ */
+export function formatElapsedTimer(ms: number): string {
+  const safeMs = Math.max(0, ms || 0);
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+/**
+ * Resolve o rótulo/cor do badge de status da Manipulação. Por enquanto só
+ * existe o status "Em Produção" (atribuído automaticamente ao iniciar a OP);
+ * quando o botão de status manual for adicionado na tela de Manipulação, o
+ * valor salvo em `op.manipulacaoStatus` já será exibido aqui automaticamente.
+ */
+function getManipulacaoStatusBadge(status?: string): { label: string; className: string } {
+  const label = (status && status.trim()) || 'Em Produção';
+  const key = label.toLowerCase();
+  if (key.includes('laborat')) {
+    return { label, className: 'text-purple-300 bg-purple-950/80 border-purple-800/50' };
+  }
+  if (key.includes('corre')) {
+    return { label, className: 'text-orange-300 bg-orange-950/80 border-orange-800/50' };
+  }
+  if (key.includes('dren')) {
+    return { label, className: 'text-cyan-300 bg-cyan-950/80 border-cyan-800/50' };
+  }
+  return { label, className: 'text-blue-300 bg-blue-950/80 border-blue-800/50' };
+}
+
 export function HomeDashboard({
   lines,
   ops,
@@ -142,6 +186,28 @@ export function HomeDashboard({
     return found ? found.goalQuantity : null;
   }, [lineDailyGoals]);
 
+  // ---------------- RELÓGIO PARA OS TIMERS DE PRODUÇÃO EM TEMPO REAL ----------------
+  // Atualiza a cada segundo para os cronômetros de Manipulação/Envase/Sleeve
+  // andarem "ao vivo" na tela, sem precisar recarregar os dados.
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Encontra o horário real de início de produção de uma OP a partir do
+  // evento STARTED mais recente (uma pausa/retomada não reinicia o timer,
+  // pois gera um evento RESUMED, não um novo STARTED).
+  const getOpStartTime = useCallback((opId: string): Date | null => {
+    const startedEvents = (events || []).filter(e => e.opId === opId && e.type === 'STARTED');
+    if (startedEvents.length === 0) return null;
+    const latest = startedEvents.reduce((a, b) =>
+      new Date(a.createdAt).getTime() > new Date(b.createdAt).getTime() ? a : b
+    );
+    const d = new Date(latest.createdAt);
+    return isNaN(d.getTime()) ? null : d;
+  }, [events]);
+
   // ---------------- HELPER PARA RESOLVER LÍDER DA LINHA PELA ESCALA ----------------
   const getLineLeader = useCallback((lineId: string): UserProfile | null => {
     // 1. Verificar em rotations (bidirecional)
@@ -164,6 +230,12 @@ export function HomeDashboard({
 
     return null;
   }, [rotations, leaders]);
+
+  // OPs de Manipulação atualmente em produção (para o espelho em tempo real)
+  const manipulacaoActiveOps = useMemo(
+    () => ops.filter(o => o.setor === 'Manipulação' && o.status === 'in_progress'),
+    [ops]
+  );
 
   // ---------------- CÁLCULOS DAS 8 MÉTRICAS PRINCIPAIS ----------------
   const now = new Date();
@@ -198,15 +270,14 @@ export function HomeDashboard({
     return Math.min(Math.round((monthProducedQuantity / monthlyGoal) * 100 * 10) / 10, 100);
   }, [monthProducedQuantity, monthlyGoal]);
 
-  // 2. OPs Concluídas no Mês — apenas OPs "da série 400" (número começa com "4"),
-  // ou seja, OPs reais de produção/Envase, excluindo as OSMs de Pesagem/Manipulação
-  // (que também ficam com status 'completed', mas não são OPs de produção).
-  const completedOpsMonth = useMemo(() => {
-    return opsThisMonth.filter((o) => o.status === 'completed' && /^4/.test(String(o.number).trim())).length;
-  }, [opsThisMonth]);
-
   const totalCompletedOps = useMemo(() => {
     return ops.filter((o) => o.status === 'completed').length;
+  }, [ops]);
+
+  // OPs realmente ativas (Card 1) — exclui as já concluídas, que não devem
+  // contar como "ativas" mesmo continuando na lista de ops.
+  const activeOpsCount = useMemo(() => {
+    return ops.filter((o) => o.status !== 'completed').length;
   }, [ops]);
 
   // 3. OPs Críticas e Atrasadas
@@ -223,86 +294,264 @@ export function HomeDashboard({
 
   const totalDelayedOpsCount = delayedOps.length;
 
-  // 4. Tempos de Trabalho e Ociosidade (Dia e Total)
-  const activeLinesCount = lines.filter((l) => l.status === 'active').length;
-  const pausedLinesCount = lines.filter((l) => l.status === 'paused').length;
-  const idleLinesCount = lines.filter((l) => l.status === 'idle').length;
+  // 4. Tempos de Trabalho e Ociosidade (Dia e Total) - Baseados em Eventos Reais (OEE)
+  const todayDateStr = useMemo(() => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }, []);
 
-  const hoursPassedToday = Math.max(1, Math.min(8, (now.getHours() - 7) || 4));
-  const workHoursTodayDecimal = (activeLinesCount * hoursPassedToday * 0.85) + 2.5;
-  const workHoursToday = Math.floor(workHoursTodayDecimal);
-  const workMinutesToday = Math.round((workHoursTodayDecimal - workHoursToday) * 60);
+  const completedOpsTodayCount = useMemo(() => {
+    return ops.filter((o) => {
+      if (o.status !== 'completed') return false;
+      const opDate = o.completedAt ? o.completedAt.split('T')[0] : (o.scheduledDate || (o.createdAt ? o.createdAt.split('T')[0] : ''));
+      return opDate === todayDateStr && /^4/.test(String(o.number).trim());
+    }).length;
+  }, [ops, todayDateStr]);
 
-  const idleHoursTodayDecimal = ((pausedLinesCount + idleLinesCount * 0.5) * hoursPassedToday * 0.35) + 1.25;
-  const idleHoursToday = Math.floor(idleHoursTodayDecimal);
-  const idleMinutesToday = Math.round((idleHoursTodayDecimal - idleHoursToday) * 60);
+  // Métricas exatas de Tempo de HOJE (calculadas a partir dos eventos reais gravados no sistema)
+  // — usadas pelo espelho de produção em tempo real (Manipulação/linhas), que
+  // é sempre "agora", independente do filtro de período do dashboard.
+  const todayProductionTime = useMemo(() => {
+    return calculateProductionTime(events, ops, lines, {
+      targetDate: todayDateStr,
+      referenceTime: nowTick,
+    });
+  }, [events, ops, lines, todayDateStr, nowTick]);
 
-  const workHoursTotalDecimal = (totalProduced / 85) + 42.5;
-  const workHoursTotal = Math.floor(workHoursTotalDecimal);
-  const workMinutesTotal = Math.round((workHoursTotalDecimal - workHoursTotal) * 60);
+  // Total de pausas registradas hoje
+  const totalTodayPausesCount = useMemo(() => {
+    return Object.values(todayProductionTime.byLine).reduce((acc, l: any) => acc + (l?.pauseCount || 0), 0);
+  }, [todayProductionTime]);
 
-  // Cálculo real baseado nos eventos PAUSED -> RESUMED/FINISHED
-  const idleHoursTotalDecimal = useMemo(() => calculateTotalPauseHours(events), [events]);
-  const formattedIdleTotal = useMemo(() => formatHoursAndMinutes(idleHoursTotalDecimal), [idleHoursTotalDecimal]);
-  const idleHoursTotal = Math.floor(idleHoursTotalDecimal);
-  const idleMinutesTotal = Math.round((idleHoursTotalDecimal - idleHoursTotal) * 60);
+  // ---------------- FILTRO DE PERÍODO: DIA / MÊS / ANO / GERAL ----------------
+  // Controla o Índice de Ociosidade, o Tempo Trabalhado e os componentes do
+  // OEE (cards 3, 4, 6 e os 3 retângulos) — o espelho em tempo real acima
+  // continua sempre "hoje".
+  const [dashboardPeriod, setDashboardPeriod] = useState<'dia' | 'mes' | 'ano' | 'geral'>('dia');
+
+  const PERIOD_LABELS: Record<typeof dashboardPeriod, string> = {
+    dia: 'Hoje',
+    mes: 'Mês',
+    ano: 'Ano',
+    geral: 'Geral',
+  };
+
+  // Data de início do período + quantos dias de turno (8h) já se passaram
+  // nele — é a base do Índice de Ociosidade (% das horas de turno perdidas).
+  const periodDateRange = useMemo(() => {
+    const now = new Date();
+
+    if (dashboardPeriod === 'dia') {
+      return { rangeStart: todayDateStr, rangeEnd: todayDateStr, days: 1 };
+    }
+
+    if (dashboardPeriod === 'mes') {
+      const rangeStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      return { rangeStart, rangeEnd: todayDateStr, days: now.getDate() };
+    }
+
+    if (dashboardPeriod === 'ano') {
+      const rangeStart = `${now.getFullYear()}-01-01`;
+      const startOfYear = new Date(now.getFullYear(), 0, 1);
+      const daysElapsed = Math.floor((now.getTime() - startOfYear.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      return { rangeStart, rangeEnd: todayDateStr, days: daysElapsed };
+    }
+
+    // Geral: sem limite de início — conta a partir do primeiro registro (OP ou evento) até hoje
+    let earliestMs: number | null = null;
+    for (const op of ops) {
+      const t = op.createdAt ? new Date(op.createdAt).getTime() : NaN;
+      if (!isNaN(t) && (earliestMs === null || t < earliestMs)) earliestMs = t;
+    }
+    for (const ev of events) {
+      const t = ev.createdAt ? new Date(ev.createdAt).getTime() : NaN;
+      if (!isNaN(t) && (earliestMs === null || t < earliestMs)) earliestMs = t;
+    }
+    const daysElapsed = earliestMs !== null
+      ? Math.max(1, Math.floor((now.getTime() - earliestMs) / (1000 * 60 * 60 * 24)) + 1)
+      : 1;
+    return { rangeStart: undefined, rangeEnd: undefined, days: daysElapsed };
+  }, [dashboardPeriod, todayDateStr, ops, events]);
+
+  // Métricas de Tempo do PERÍODO selecionado (Dia/Mês/Ano/Geral)
+  const periodProductionTime = useMemo(() => {
+    return calculateProductionTime(events, ops, lines, {
+      rangeStart: periodDateRange.rangeStart,
+      rangeEnd: periodDateRange.rangeEnd,
+      referenceTime: nowTick,
+    });
+  }, [events, ops, lines, periodDateRange, nowTick]);
+
+  // Duração de um turno de trabalho (8h) — multiplicada pelos dias do
+  // período para virar a base do Índice de Ociosidade (% das horas perdidas)
+  const WORKDAY_MS = 8 * 60 * 60 * 1000;
+  const periodWorkdayMs = WORKDAY_MS * Math.max(1, periodDateRange.days);
+
+  // Tempo Trabalhado / Ocioso: MÉDIA entre as linhas de produção (Envase 1,
+  // Envase 2 e Sleeve) em vez da soma das 3 — somar inflaria o resultado
+  // (3 linhas trabalhando ao mesmo tempo não significa "24h trabalhadas no
+  // dia"), enquanto a média representa o comportamento típico de uma linha.
+  const avgLineProductionTime = useMemo(() => {
+    const lineIds = lines.map(l => l.id);
+    if (lineIds.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0 };
+
+    let sumWorkingMs = 0;
+    let sumIdleMs = 0;
+    for (const lineId of lineIds) {
+      const metrics = periodProductionTime.byLine[lineId];
+      sumWorkingMs += metrics?.workingMs || 0;
+      sumIdleMs += metrics?.idleMs || 0;
+    }
+    return {
+      avgWorkingMs: sumWorkingMs / lineIds.length,
+      avgIdleMs: sumIdleMs / lineIds.length,
+    };
+  }, [lines, periodProductionTime]);
+
+  // Índice de Ociosidade: % das horas de turno do período perdidas em paradas (média das 3 linhas), capado em 100%
+  const idlenessIndexPercent = useMemo(() => {
+    return Math.min(100, Math.round((avgLineProductionTime.avgIdleMs / periodWorkdayMs) * 1000) / 10);
+  }, [avgLineProductionTime, periodWorkdayMs]);
+
+  // Disponibilidade OEE recalculada sobre os mesmos valores médios (trabalhado vs. ocioso)
+  const avgLineDisponibilidade = useMemo(() => {
+    const total = avgLineProductionTime.avgWorkingMs + avgLineProductionTime.avgIdleMs;
+    if (total <= 0) return 0;
+    return Math.round((avgLineProductionTime.avgWorkingMs / total) * 1000) / 10;
+  }, [avgLineProductionTime]);
+
+  // OPs e eventos restritos ao período selecionado (Dia/Mês/Ano) — usados nos
+  // componentes do OEE (Performance e Qualidade dependem de quais OPs contam).
+  // Em "Geral" não há corte: entra o histórico inteiro.
+  const periodOpsAndEvents = useMemo(() => {
+    if (dashboardPeriod === 'geral') return { periodOps: ops, periodEvents: events };
+
+    const startStr = periodDateRange.rangeStart || todayDateStr;
+    const endStr = periodDateRange.rangeEnd || todayDateStr;
+    const inRange = (dateStr?: string) => {
+      if (!dateStr) return false;
+      const d = dateStr.split('T')[0];
+      return d >= startStr && d <= endStr;
+    };
+
+    const periodOps = ops.filter(op => inRange(op.completedAt || op.scheduledDate || op.createdAt));
+    const periodEvents = events.filter(ev => inRange(ev.createdAt));
+    return { periodOps, periodEvents };
+  }, [ops, events, dashboardPeriod, periodDateRange, todayDateStr]);
+
+  // OPs Finalizadas (Card 5) restritas ao período selecionado no filtro do
+  // dashboard (Dia/Mês/Ano/Geral), usando o mesmo recorte do OEE.
+  const completedOpsPeriod = useMemo(() => {
+    return periodOpsAndEvents.periodOps.filter(
+      (o) => o.status === 'completed' && /^4/.test(String(o.number).trim())
+    ).length;
+  }, [periodOpsAndEvents]);
+
+  // ---------------- OEE (OVERALL EQUIPMENT EFFECTIVENESS) ----------------
+  // Disponibilidade × Performance × Qualidade — cálculo já existente em
+  // services/db.ts (calculateOEE), agora exibido no card 6 e nos 3 retângulos
+  // de componentes logo abaixo dos cards, recalculado dentro do período do filtro.
+  const oeeMetrics = useMemo(
+    () => calculateOEE(periodOpsAndEvents.periodOps, periodOpsAndEvents.periodEvents),
+    [periodOpsAndEvents]
+  );
+
+  const oeeDisponibilidadePct = oeeMetrics.disponibilidade !== null
+    ? Math.round(oeeMetrics.disponibilidade * 1000) / 10
+    : null;
+  const oeePerformancePct = oeeMetrics.performance !== null
+    ? Math.round(oeeMetrics.performance * 1000) / 10
+    : null;
+  const oeeQualidadePct = oeeMetrics.qualidade !== null
+    ? Math.round(oeeMetrics.qualidade * 1000) / 10
+    : null;
+  const oeeOverallPct = oeeMetrics.oee !== null
+    ? Math.round(oeeMetrics.oee * 1000) / 10
+    : null;
+
+  // Faixa de cor do card 6 conforme a referência clássica de OEE:
+  // ≥85% classe mundial, ≥60% aceitável, abaixo disso baixo desempenho.
+  const oeeTier = useMemo(() => {
+    if (oeeOverallPct === null) return { bg: 'bg-[#3f3f46]', label: 'Sem dados suficientes' };
+    if (oeeOverallPct >= 85) return { bg: 'bg-[#10b981]', label: 'Classe mundial' };
+    if (oeeOverallPct >= 60) return { bg: 'bg-[#d97706]', label: 'Aceitável' };
+    return { bg: 'bg-[#dc2626]', label: 'Baixo desempenho' };
+  }, [oeeOverallPct]);
+
+  // Tendência mensal dos 3 componentes do OEE no ano corrente — só usada no
+  // modo "Geral" do filtro de período, para responder "como foi durante o
+  // mês/ano" em vez de só o instantâneo de hoje.
+  const MONTH_LABELS_SHORT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const oeeTrendData = useMemo(() => {
+    if (dashboardPeriod !== 'geral') return [];
+
+    const result: { monthName: string; disponibilidade: number | null; performance: number | null; qualidade: number | null }[] = [];
+    for (let m = 0; m <= currentMonth; m++) {
+      const monthOps = ops.filter(op => {
+        const dStr = op.completedAt || op.scheduledDate || op.createdAt;
+        if (!dStr) return false;
+        const d = new Date(dStr);
+        return !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === m;
+      });
+      const monthEvents = events.filter(ev => {
+        if (!ev.createdAt) return false;
+        const d = new Date(ev.createdAt);
+        return !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === m;
+      });
+      const metrics = calculateOEE(monthOps, monthEvents);
+      result.push({
+        monthName: MONTH_LABELS_SHORT[m],
+        disponibilidade: metrics.disponibilidade !== null ? Math.round(metrics.disponibilidade * 1000) / 10 : null,
+        performance: metrics.performance !== null ? Math.round(metrics.performance * 1000) / 10 : null,
+        qualidade: metrics.qualidade !== null ? Math.round(metrics.qualidade * 1000) / 10 : null,
+      });
+    }
+    return result;
+  }, [dashboardPeriod, ops, events, currentYear, currentMonth]);
+
+  // Métricas de Tempo TOTAIS acumuladas
+  const totalProductionTime = useMemo(() => {
+    return calculateProductionTime(events, ops, lines, {
+      referenceTime: nowTick,
+    });
+  }, [events, ops, lines, nowTick]);
 
   // ---------------- NOVO PAINEL DE CONTROLE DE PRODUÇÃO: CÁLCULOS ----------------
   
-  // 1. KPIs de Volume por Setor (Mês e Ano)
+  // 1. KPIs de Volume por Setor — apenas UM número, restrito ao período
+  // selecionado no filtro do dashboard (Dia/Mês/Ano/Geral), usando o mesmo
+  // recorte já aplicado ao OEE (periodOpsAndEvents).
   const sectorKpis = useMemo(() => {
-    const getOpDate = (op: ProductionOrder) => {
-      if (op.scheduledDate) {
-        const parts = op.scheduledDate.split('-');
-        if (parts.length >= 2) {
-          return { year: parseInt(parts[0], 10), month: parseInt(parts[1], 10) - 1 };
-        }
-      }
-      if (op.createdAt) {
-        const d = new Date(op.createdAt);
-        if (!isNaN(d.getTime())) return { year: d.getFullYear(), month: d.getMonth() };
-      }
-      return { year: currentYear, month: currentMonth };
-    };
+    let pesagemQtd = 0;
+    let manipQtd = 0;
+    let envaseQtd = 0;
 
-    let pesagemMes = 0;
-    let pesagemAno = 0;
-    let manipMes = 0;
-    let manipAno = 0;
-    let envaseMes = 0;
-    let envaseAno = 0;
-
-    for (const op of ops) {
-      const d = getOpDate(op);
-      const isYear = d.year === currentYear;
-      const isMonth = isYear && d.month === currentMonth;
+    for (const op of periodOpsAndEvents.periodOps) {
       const qty = Number(op.producedQuantity || 0);
-
       const s = op.setor;
       if (s === 'Pesagem') {
         // Pesagem não produz Kg/Un (isso fica zerado até a Manipulação finalizar
         // a OSM) — aqui "Qtd" é a contagem de OSMs que a Pesagem adicionou.
-        if (isYear) pesagemAno += 1;
-        if (isMonth) pesagemMes += 1;
+        pesagemQtd += 1;
       } else if (s === 'Manipulação') {
-        if (isYear) manipAno += qty;
-        if (isMonth) manipMes += qty;
+        manipQtd += qty;
       } else if (s === 'Envase') {
-        if (isYear) envaseAno += qty;
-        if (isMonth) envaseMes += qty;
+        envaseQtd += qty;
       } else {
         // Fallback setor geral / não especificado -> somar no Envase (padrão de saída final)
-        if (isYear) envaseAno += qty;
-        if (isMonth) envaseMes += qty;
+        envaseQtd += qty;
       }
     }
 
     return {
-      pesagem: { mes: pesagemMes, ano: pesagemAno, unidade: 'Qtd' },
-      manipulacao: { mes: manipMes, ano: manipAno, unidade: 'Kg' },
-      envase: { mes: envaseMes, ano: envaseAno, unidade: 'Un' },
+      pesagem: { valor: pesagemQtd, unidade: 'Qtd' },
+      manipulacao: { valor: manipQtd, unidade: 'Kg' },
+      envase: { valor: envaseQtd, unidade: 'Un' },
     };
-  }, [ops, currentYear, currentMonth]);
+  }, [periodOpsAndEvents]);
 
   // 2. Meta Diária do Mês Atual
   const daysInCurrentMonth = useMemo(() => {
@@ -364,7 +613,26 @@ export function HomeDashboard({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Filtro de Período: controla Índice de Ociosidade, Tempo Trabalhado e OEE abaixo */}
+            <div className="flex items-center gap-1 bg-[#0e0e12] border border-[#202028] rounded-xl p-1" title="Período usado no Índice de Ociosidade, Tempo Trabalhado e OEE">
+              <Filter className="w-3 h-3 text-[#52525b] ml-1 mr-0.5 shrink-0" />
+              {(['dia', 'mes', 'ano', 'geral'] as const).map(period => (
+                <button
+                  key={period}
+                  type="button"
+                  onClick={() => setDashboardPeriod(period)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider transition-all ${
+                    dashboardPeriod === period
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-[#71717a] hover:text-white hover:bg-[#1a1a22]'
+                  }`}
+                >
+                  {PERIOD_LABELS[period]}
+                </button>
+              ))}
+            </div>
+
             {!isReadOnly && onOpenShareModal && (
               <button
                 id="btn-open-share-dashboard"
@@ -390,12 +658,13 @@ export function HomeDashboard({
                 <span className="w-2 h-2 rounded-full bg-purple-500 inline-block shadow-[0_0_8px_rgba(168,85,247,0.8)]"></span>
                 PESAGEM ({sectorKpis.pesagem.unidade})
               </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-950/60 text-purple-300 border border-purple-800/40">
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="my-3">
               <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
-                {sectorKpis.pesagem.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
-                <span className="text-[#71717a] font-normal mx-2">/</span>
-                <span className="text-lg text-[#a1a1aa]">{sectorKpis.pesagem.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+                {sectorKpis.pesagem.valor.toLocaleString('pt-BR')}
               </div>
             </div>
             <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
@@ -411,12 +680,13 @@ export function HomeDashboard({
                 <span className="w-2 h-2 rounded-full bg-cyan-500 inline-block shadow-[0_0_8px_rgba(6,182,212,0.8)]"></span>
                 MANIPULAÇÃO ({sectorKpis.manipulacao.unidade})
               </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-300 border border-cyan-800/40">
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="my-3">
               <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
-                {sectorKpis.manipulacao.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
-                <span className="text-[#71717a] font-normal mx-2">/</span>
-                <span className="text-lg text-[#a1a1aa]">{sectorKpis.manipulacao.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+                {sectorKpis.manipulacao.valor.toLocaleString('pt-BR')}
               </div>
             </div>
             <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
@@ -432,12 +702,13 @@ export function HomeDashboard({
                 <span className="w-2 h-2 rounded-full bg-blue-500 inline-block shadow-[0_0_8px_rgba(59,130,246,0.8)]"></span>
                 ENVASE ({sectorKpis.envase.unidade})
               </span>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-950/60 text-blue-300 border border-blue-800/40">
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="my-3">
               <div className="text-2xl sm:text-3xl font-black text-[#f4f4f5] tracking-tight font-mono">
-                {sectorKpis.envase.mes.toLocaleString('pt-BR')} <span className="text-xs text-[#a1a1aa] font-sans font-semibold">MÊS</span>
-                <span className="text-[#71717a] font-normal mx-2">/</span>
-                <span className="text-lg text-[#a1a1aa]">{sectorKpis.envase.ano.toLocaleString('pt-BR')}</span> <span className="text-[10px] text-[#71717a] font-sans">ANO</span>
+                {sectorKpis.envase.valor.toLocaleString('pt-BR')}
               </div>
             </div>
             <div className="text-[10px] text-[#71717a] font-medium flex items-center justify-between border-t border-[#27272a]/60 pt-2">
@@ -448,8 +719,8 @@ export function HomeDashboard({
 
         </div>
 
-        {/* ── 2. OS 5 VIBRANT CARDS DE MÉTRICAS OPERACIONAIS ── */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        {/* ── 2. OS 6 VIBRANT CARDS DE MÉTRICAS OPERACIONAIS ── */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
           
           {/* CARD 1: AZUL (OPs Ativas) */}
           <div className="bg-[#3b82f6] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
@@ -457,7 +728,7 @@ export function HomeDashboard({
               OPS ATIVAS
             </div>
             <div className="text-3xl sm:text-4xl font-black tracking-tight my-1">
-              {ops.length}
+              {activeOpsCount}
             </div>
           </div>
 
@@ -471,57 +742,209 @@ export function HomeDashboard({
             </div>
           </div>
 
-          {/* CARD 3: ÂMBAR (Tempo Ocioso) */}
-          <div className="bg-[#d97706] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
+          {/* CARD 3: ÂMBAR (Índice de Ociosidade) */}
+          <div className="bg-[#d97706] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[105px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-amber-100 truncate">
-                TEMP OCIOSO
+                ÍNDICE DE OCIOSIDADE
               </span>
-              {WORK_HOURS_ARE_ESTIMATED && (
-                <span
-                  className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0"
-                  title="Métrica baseada em estimativa do ritmo diário"
-                >
-                  Estimado
-                </span>
-              )}
+              <span
+                className="bg-amber-950/60 text-amber-200 border border-amber-500/40 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
+                title={`% das horas de turno (8h/dia) perdidas em paradas no período — média entre Envase 1, Envase 2 e Sleeve`}
+              >
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
-              {idleHoursToday}h {idleMinutesToday}m
+              {idlenessIndexPercent}%
+            </div>
+            <div className="text-[10px] text-amber-100/90 font-medium truncate flex items-center justify-between pt-0.5 border-t border-amber-500/30">
+              <span>Média ociosa do período</span>
+              <span className="font-mono font-bold">{formatMsToHoursMinutes(avgLineProductionTime.avgIdleMs)}</span>
             </div>
           </div>
 
-          {/* CARD 4: LILÁS PASTEL (Tempo Trabalhado) — cor e conteúdo ajustados
-              manualmente pelo usuário, mantido aqui para ficar em sincronia. */}
-          <div className="bg-[#9157CD] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
+          {/* CARD 4: LILÁS PASTEL (Tempo Trabalhado) */}
+          <div className="bg-[#9157CD] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[105px] transition-transform hover:scale-[1.01]">
             <div className="flex items-center justify-between gap-1">
-              <span className="text-[10px] font-black uppercase tracking-wider text-amber-100 truncate">
+              <span className="text-[10px] font-black uppercase tracking-wider text-purple-100 truncate">
                 TEMP TRABALHADO
               </span>
-              {WORK_HOURS_ARE_ESTIMATED && (
-                <span
-                  className="bg-amber-950/80 text-amber-300 border border-amber-700/60 px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0"
-                  title="Métrica baseada em estimativa do ritmo diário"
-                >
-                  Estimado
-                </span>
-              )}
+              <span
+                className="bg-purple-950/60 text-purple-200 border border-purple-400/40 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
+                title="Média de tempo efetivamente trabalhado no período entre Envase 1, Envase 2 e Sleeve"
+              >
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
-              {idleHoursToday}h {idleMinutesToday}m
+              {formatMsToHoursMinutes(avgLineProductionTime.avgWorkingMs)}
+            </div>
+            <div className="text-[10px] text-purple-100/90 font-medium truncate flex items-center justify-between pt-0.5 border-t border-purple-400/30">
+              <span title="Disponibilidade = Tempo Trabalhado / (Tempo Trabalhado + Tempo Ocioso), média das 3 linhas">Disponibilidade OEE</span>
+              <span className="font-mono font-bold">{avgLineDisponibilidade}%</span>
             </div>
           </div>
 
           {/* CARD 5: VERDE ESMERALDA CLARO (OP Finalizadas) */}
-          <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-center min-h-[100px] transition-transform hover:scale-[1.01]">
-            <div className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
-              OPS FINALIZADAS
+          <div className="bg-[#10b981] text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[105px] transition-transform hover:scale-[1.01]">
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-100 truncate">
+                OPS FINALIZADAS
+              </span>
+              <span
+                className="bg-emerald-950/60 text-emerald-200 border border-emerald-500/40 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
+                title="Total de OPs concluídas dentro do período selecionado"
+              >
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
             </div>
             <div className="text-2xl sm:text-3xl font-black tracking-tight my-1">
-              {completedOpsMonth.toLocaleString()}
+              {completedOpsPeriod.toLocaleString()}
+            </div>
+            <div className="text-[10px] text-emerald-100/90 font-medium truncate flex items-center justify-between pt-0.5 border-t border-emerald-500/30">
+              <span>Concluídas hoje</span>
+              <span className="font-mono font-bold">{completedOpsTodayCount} OP(s)</span>
             </div>
           </div>
 
+          {/* CARD 6: OEE (Overall Equipment Effectiveness) — cor muda conforme a faixa */}
+          <div className={`${oeeTier.bg} text-white p-4 rounded-2xl shadow-lg flex flex-col justify-between min-h-[105px] transition-transform hover:scale-[1.01]`}>
+            <div className="flex items-center justify-between gap-1">
+              <span className="text-[10px] font-black uppercase tracking-wider text-white/80 truncate">
+                OEE
+              </span>
+              <span
+                className="bg-black/25 text-white border border-white/25 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
+                title="OEE = Disponibilidade × Performance × Qualidade, calculado dentro do período selecionado"
+              >
+                {PERIOD_LABELS[dashboardPeriod]}
+              </span>
+            </div>
+            <div className="text-2xl sm:text-3xl font-black tracking-tight my-1 font-mono">
+              {oeeOverallPct !== null ? `${oeeOverallPct}%` : '—'}
+            </div>
+            <div className="text-[10px] text-white/80 font-medium truncate flex items-center justify-between pt-0.5 border-t border-white/25">
+              <span>{oeeTier.label}</span>
+              <span className="font-mono font-bold">D×P×Q</span>
+            </div>
+          </div>
+
+        </div>
+
+        {/* ── 2.1 COMPONENTES DO OEE: DISPONIBILIDADE / PERFORMANCE / QUALIDADE ── */}
+        <div className="space-y-2">
+          <div>
+            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
+              Componentes do OEE
+            </h3>
+            <p className="text-[11px] text-[#71717a]">
+              Overall Equipment Effectiveness = Disponibilidade × Performance × Qualidade • Período: <span className="text-[#a1a1aa] font-semibold">{PERIOD_LABELS[dashboardPeriod]}</span>
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* Disponibilidade — Azul */}
+            <div className="bg-[#18181b] border border-blue-800/40 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <span className="text-[11px] font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5 truncate">
+                  <span className="w-2 h-2 rounded-full bg-blue-500 inline-block shadow-[0_0_8px_rgba(59,130,246,0.8)] shrink-0"></span>
+                  Disponibilidade
+                </span>
+                <span className="text-2xl font-black text-blue-400 font-mono shrink-0">
+                  {oeeDisponibilidadePct !== null ? `${oeeDisponibilidadePct}%` : '—'}
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(100, Math.max(0, oeeDisponibilidadePct ?? 0))}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-[#71717a]">Tempo real produzindo ÷ tempo planejado (descontadas as paradas)</p>
+            </div>
+
+            {/* Performance — Laranja */}
+            <div className="bg-[#18181b] border border-orange-800/40 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <span className="text-[11px] font-black uppercase tracking-wider text-orange-400 flex items-center gap-1.5 truncate">
+                  <span className="w-2 h-2 rounded-full bg-orange-500 inline-block shadow-[0_0_8px_rgba(249,115,22,0.8)] shrink-0"></span>
+                  Performance
+                </span>
+                <span className="text-2xl font-black text-orange-400 font-mono shrink-0">
+                  {oeePerformancePct !== null ? `${oeePerformancePct}%` : '—'}
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
+                <div
+                  className="h-full bg-orange-500 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(100, Math.max(0, oeePerformancePct ?? 0))}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-[#71717a]">Quantidade produzida ÷ quantidade planejada das OPs</p>
+            </div>
+
+            {/* Qualidade — Verde */}
+            <div className="bg-[#18181b] border border-emerald-800/40 rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-2 gap-2">
+                <span className="text-[11px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5 truncate">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block shadow-[0_0_8px_rgba(16,185,129,0.8)] shrink-0"></span>
+                  Qualidade
+                </span>
+                <span className="text-2xl font-black text-emerald-400 font-mono shrink-0">
+                  {oeeQualidadePct !== null ? `${oeeQualidadePct}%` : '—'}
+                </span>
+              </div>
+              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
+                <div
+                  className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+                  style={{ width: `${Math.min(100, Math.max(0, oeeQualidadePct ?? 0))}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-[#71717a]">(Produzido − rejeitado) ÷ produzido</p>
+            </div>
+          </div>
+
+          {/* No modo "Geral", mostra a evolução mensal dos 3 componentes juntos —
+              responde "como foi durante o mês/ano" além do instantâneo de hoje. */}
+          {dashboardPeriod === 'geral' && (
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-[11px] font-black uppercase tracking-wider text-[#a1a1aa]">
+                  Evolução Mensal — Disponibilidade × Performance × Qualidade ({currentYear})
+                </h4>
+              </div>
+              {oeeTrendData.length === 0 ? (
+                <p className="text-[11px] text-[#52525b] text-center py-8">Sem dados suficientes ainda neste ano.</p>
+              ) : (
+                <div className="h-[220px] w-full overflow-x-auto">
+                  <div className="h-full min-w-[500px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={oeeTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                        <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
+                        <YAxis stroke="#71717a" fontSize={10} tickLine={false} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                          formatter={(value: any, name: any) => [
+                            value === null ? 'Sem dados' : `${value}%`,
+                            name === 'disponibilidade' ? 'Disponibilidade' : name === 'performance' ? 'Performance' : 'Qualidade',
+                          ]}
+                        />
+                        <Legend
+                          wrapperStyle={{ fontSize: '10px' }}
+                          formatter={(value) => (value === 'disponibilidade' ? 'Disponibilidade' : value === 'performance' ? 'Performance' : 'Qualidade')}
+                        />
+                        <Line type="monotone" dataKey="disponibilidade" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                        <Line type="monotone" dataKey="performance" stroke="#f97316" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                        <Line type="monotone" dataKey="qualidade" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── 3. Gráfico Mensal 12 Meses ── */}
@@ -588,16 +1011,19 @@ export function HomeDashboard({
       </div>
 
       {/* ========================================================================= */}
-      {/* 4. META MENSAL DE EMISSÃO DE OPS POR LINHA */}
+      {/* 4. PRODUÇÃO EM TEMPO REAL — MANIPULAÇÃO + LINHAS DE ENVASE E SLEEVE */}
       {/* ========================================================================= */}
       <div className="space-y-3 pt-2">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
           <div>
-            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
-              Meta Mensal de Emissão de OPs por Linha de Produção
+            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider flex items-center gap-2">
+              Produção em Tempo Real
+              <span className="flex items-center gap-1 text-[9px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/50 px-1.5 py-0.5 rounded-full normal-case tracking-normal">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> Ao vivo
+              </span>
             </h3>
             <p className="text-[11px] text-[#71717a]">
-              Acompanhamento de metas e status operacional por linha de envase
+              Espelho do que está sendo produzido agora: Manipulação, Envase 1, Envase 2 e Sleeve
             </p>
           </div>
 
@@ -608,29 +1034,102 @@ export function HomeDashboard({
           </div>
         </div>
 
-        {/* Grid de Cards de Cada Linha de Produção */}
+        {/* Grid de Cards: Manipulação + cada Linha de Produção (Envase 1, Envase 2, Sleeve) */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+
+          {/* Card especial: Manipulação (não é uma "linha", é um setor) */}
+          {(() => {
+            const manipulacaoOp = manipulacaoActiveOps[0] || null;
+            const manipulacaoStart = manipulacaoOp ? getOpStartTime(manipulacaoOp.id) : null;
+            const statusBadge = getManipulacaoStatusBadge(manipulacaoOp?.manipulacaoStatus);
+            const manipMetrics = todayProductionTime.byLine['area-manipulacao'] || todayProductionTime.byLine['manipulacao'];
+
+            return (
+              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col justify-between">
+                <div>
+                  <div className="border-b border-[#1f1f28] pb-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0 flex items-center gap-1.5">
+                        <FlaskConical className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                        Manipulação
+                      </h4>
+                      <span className="text-[10px] text-[#71717a] font-semibold shrink-0">
+                        {manipulacaoActiveOps.length} em produção
+                      </span>
+                    </div>
+                  </div>
+
+                  {manipulacaoOp ? (
+                    <div className="py-3 space-y-3">
+                      <div className="p-2 rounded-lg bg-[#181824] border border-[#262638]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono font-bold text-cyan-400 text-[11px] shrink-0">OP {manipulacaoOp.number}</span>
+                          <span className={`px-1.5 py-0.5 rounded font-bold uppercase text-[9px] border truncate ${statusBadge.className}`} title={statusBadge.label}>
+                            {statusBadge.label}
+                          </span>
+                        </div>
+                        <p className="text-[#f4f4f5] font-medium text-xs truncate mt-1" title={manipulacaoOp.product}>
+                          {manipulacaoOp.product}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
+                        <span className="font-mono font-black text-white text-sm tabular-nums">
+                          {manipulacaoStart ? formatElapsedTimer(nowTick - manipulacaoStart.getTime()) : '--:--:--'}
+                        </span>
+                      </div>
+
+                      {manipulacaoActiveOps.length > 1 && (
+                        <p className="text-[10px] text-[#52525b]">
+                          + {manipulacaoActiveOps.length - 1} outra(s) OP(s) em manipulação
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="py-8 text-center text-[11px] text-[#52525b]">
+                      Nenhuma OP em manipulação agora
+                    </div>
+                  )}
+                </div>
+
+                {/* Resumo OEE Hoje da Manipulação */}
+                <div className="pt-2.5 border-t border-[#1f1f28] space-y-1.5">
+                  <div className="px-2 py-1.5 rounded-lg bg-[#0e0e14] border border-[#1c1c26] flex items-center justify-between text-[10px] font-mono">
+                    <span title="Tempo trabalhado na manipulação hoje">
+                      Trab: <strong className="text-purple-300 font-bold">{manipMetrics?.workingFormatted || '0h 00m'}</strong>
+                    </span>
+                    <span className="text-[#3f3f46]">|</span>
+                    <span title="Tempo ocioso na manipulação hoje">
+                      Ocioso: <strong className="text-amber-300 font-bold">{manipMetrics?.idleFormatted || '0h 00m'}</strong>
+                    </span>
+                    <span className="text-[#3f3f46]">|</span>
+                    <span title="Disponibilidade OEE da manipulação hoje" className="text-cyan-400 font-bold">
+                      {manipMetrics?.disponibilidade ?? 0}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Cards por Linha: Envase 1, Envase 2, Sleeve */}
           {lines.map((line) => {
             const lineOps = ops.filter((o) => o.lineId === line.id);
-            const lineProduced = lineOps.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
-            const linePlanned = lineOps.reduce((acc, o) => acc + (o.plannedQuantity || 0), 0);
-            
-            const lineTarget = Math.max(1, Math.round(monthlyGoal / Math.max(1, lines.length)));
-            const linePercent = Math.min(Math.round((lineProduced / lineTarget) * 100), 100);
-            const lineDailyTarget = getLineDailyGoal(line.id);
+            const lineMetrics = todayProductionTime.byLine[line.id];
 
-            // OP ativa / em produção ou próxima na fila
-            const activeLineOp = line.currentOpId 
-              ? ops.find(o => o.id === line.currentOpId)
-              : lineOps.find(o => o.status === 'in_progress' || o.status === 'paused')
-              || lineOps.filter(o => o.status === 'pending').sort((a, b) => a.sequence - b.sequence)[0]
-              || null;
+            // OP ativa da linha agora
+            const activeLineOp = line.currentOpId
+              ? ops.find(o => o.id === line.currentOpId) || null
+              : lineOps.find(o => o.status === 'in_progress') || null;
 
-            // Categorias de status estilo PCP
-            const linePausedOps = lineOps.filter((o) => o.status === 'paused');
-            const linePendingOps = lineOps.filter((o) => o.status === 'pending');
-            const lineActiveOps = lineOps.filter((o) => o.status === 'in_progress');
-            const lineCompletedOps = lineOps.filter((o) => o.status === 'completed');
+            const start = activeLineOp ? getOpStartTime(activeLineOp.id) : null;
+            const produced = activeLineOp?.producedQuantity || 0;
+            const planned = activeLineOp?.plannedQuantity || 0;
+            // Pode passar de 100% quando o rendimento da linha supera a meta prevista da OP
+            const percent = planned > 0 ? Math.round((produced / planned) * 100) : 0;
+            const isSleeve = /sleeve/i.test(line.name);
+            const sleeveRate = isSleeve ? calculateProductionRatePerHour(produced, lineMetrics?.workingMs || 0) : null;
 
             return (
               <div
@@ -642,127 +1141,137 @@ export function HomeDashboard({
                     : 'cursor-default'
                 }`}
               >
-                    <div>
-                      {/* Cabeçalho do Card */}
-                      <div className="border-b border-[#1f1f28] pb-2.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0">
-                            {line.name}
-                          </h4>
-                          <span className="text-[10px] text-[#71717a] font-semibold shrink-0">
-                            {lineOps.length} OPs • {linePlanned.toLocaleString()} un
-                          </span>
-                        </div>
-
-                        {/* OP Atual da Linha */}
-                        {activeLineOp && (
-                          <div className="mt-1.5 p-1.5 rounded-lg bg-[#181824] border border-[#262638] text-[10px]">
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono font-bold text-blue-400">OP {activeLineOp.number}</span>
-                              <span className={`px-1.5 py-0.2 rounded font-bold uppercase text-[9px] ${
-                                activeLineOp.status === 'in_progress' ? 'text-emerald-400 bg-emerald-950/80' :
-                                activeLineOp.status === 'paused' ? 'text-amber-400 bg-amber-950/80' : 'text-blue-300 bg-blue-950/80'
-                              }`}>
-                                {activeLineOp.status === 'in_progress' ? 'Produzindo' : activeLineOp.status === 'paused' ? 'Pausada' : 'Fila'}
-                              </span>
-                            </div>
-                            <p className="text-[#f4f4f5] font-medium truncate mt-0.5" title={activeLineOp.product}>
-                              {activeLineOp.product}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Lista com Marcadores Quadrados Coloridos (Estilo Exato da Imagem) */}
-                      <div className="space-y-2 py-3 text-xs">
-                        
-                        {/* Item 1: Parada / Ociosa */}
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-[2px] bg-[#ef4444] shrink-0" />
-                            <span className="text-[#a1a1aa] font-medium text-[11px]">Parada / Ociosa</span>
-                          </div>
-                          <span className="font-bold text-white text-[11px]">
-                            {line.status === 'paused' ? '45 min' : '0 min'} • <strong className="text-red-400">{linePausedOps.length} OPs</strong>
-                          </span>
-                        </div>
-
-                        {/* Item 2: Falta separar MP / Setup */}
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-[2px] bg-[#f97316] shrink-0" />
-                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Fila / Estoque</span>
-                          </div>
-                          <span className="font-bold text-white text-[11px]">
-                            {linePendingOps.reduce((acc, o) => acc + o.plannedQuantity, 0).toLocaleString()} un • <strong className="text-orange-400">{linePendingOps.length} OPs</strong>
-                          </span>
-                        </div>
-
-                        {/* Item 3: Na indústria / Em Produção */}
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-[2px] bg-[#3b82f6] shrink-0" />
-                            <span className="text-[#a1a1aa] font-medium text-[11px]">Em Produção</span>
-                          </div>
-                          <span className="font-bold text-white text-[11px]">
-                            {lineActiveOps.reduce((acc, o) => acc + o.producedQuantity, 0).toLocaleString()} un • <strong className="text-blue-400">{lineActiveOps.length} OPs</strong>
-                          </span>
-                        </div>
-
-                        {/* Item 4: Finalizado / Entregue */}
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-[2px] bg-[#10b981] shrink-0" />
-                            <span className="text-[#a1a1aa] font-medium text-[11px]">Finalizado</span>
-                          </div>
-                          <span className="font-bold text-white text-[11px]">
-                            {lineCompletedOps.reduce((acc, o) => acc + o.producedQuantity, 0).toLocaleString()} un • <strong className="text-emerald-400">{lineCompletedOps.length} OPs</strong>
-                          </span>
-                        </div>
-
-                      </div>
+                <div>
+                  {/* Cabeçalho do Card */}
+                  <div className="border-b border-[#1f1f28] pb-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0">
+                        {line.name}
+                      </h4>
+                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
+                        activeLineOp ? 'text-emerald-400 bg-emerald-950/80' : 'text-[#71717a] bg-[#1a1a22]'
+                      }`}>
+                        {activeLineOp ? 'Produzindo' : 'Parada'}
+                      </span>
                     </div>
+                  </div>
 
-                    {/* Rodapé do Card: Meta de Produção + Barra de Progresso + Percentual Vermelho/Verde */}
-                    <div className="pt-2.5 border-t border-[#1f1f28] space-y-1.5">
-                      <div className="flex items-center justify-between text-[10px]">
-                        <span className="font-bold text-[#71717a] uppercase tracking-wider truncate">
-                          META DE PRODUÇÃO • ENTREGUE
+                  {activeLineOp ? (
+                    <div className="py-3 space-y-3">
+                      <div className="p-2 rounded-lg bg-[#181824] border border-[#262638]">
+                        <span className="font-mono font-bold text-blue-400 text-[11px]">OP {activeLineOp.number}</span>
+                        <p className="text-[#f4f4f5] font-medium text-xs truncate mt-1" title={activeLineOp.product}>
+                          {activeLineOp.product}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
+                        <span className="font-mono font-black text-white text-sm tabular-nums">
+                          {start ? formatElapsedTimer(nowTick - start.getTime()) : '--:--:--'}
                         </span>
-                        <span className={`text-base font-black ${
-                          linePercent >= 70 ? 'text-emerald-400' : linePercent >= 35 ? 'text-orange-400' : 'text-rose-500'
-                        }`}>
-                          {linePercent}%
-                        </span>
                       </div>
 
-                      {/* Barra de Progresso Vermelha / Verde */}
-                      <div className="w-full h-1.5 bg-[#1f1f28] rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all duration-500 ${
-                            linePercent >= 70 ? 'bg-emerald-500' : linePercent >= 35 ? 'bg-orange-500' : 'bg-rose-600'
-                          }`}
-                          style={{ width: `${Math.max(linePercent, 4)}%` }}
-                        />
-                      </div>
-
-                      <div className="flex items-center justify-between text-[10px] text-[#71717a] font-medium pt-0.5">
-                        <span>{lineProduced.toLocaleString()} un ({lineCompletedOps.length} OPs)</span>
-                        <span>meta {lineTarget.toLocaleString()} un</span>
-                      </div>
-
-                      {lineDailyTarget !== null && (
-                        <div className="flex items-center justify-end text-[10px] text-[#52525b] font-medium">
-                          <span>meta diária {lineDailyTarget.toLocaleString()} un/dia</span>
+                      {/* MOSTRADOR DE QUANTIDADE: DEDICADO DO SLEEV (Apenas produção por hora) VS PADRÃO */}
+                      {isSleeve ? (
+                        <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-800/40 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] uppercase font-black text-purple-300 tracking-wider flex items-center gap-1">
+                              <Sparkles className="w-3 h-3 text-purple-400" />
+                              Produção por Hora (Sleev)
+                            </span>
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-700/60 uppercase">
+                              Rendimento
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-1.5 pt-0.5">
+                            <span className="text-2xl font-black font-mono text-white tracking-tight">
+                              {sleeveRate?.producedPerHour.toLocaleString('pt-BR') || 0}
+                            </span>
+                            <span className="text-xs font-bold font-mono text-purple-300">un/h</span>
+                          </div>
+                          <div className="text-[9.5px] text-[#a1a1aa] font-medium pt-0.5">
+                            Métrica: {produced.toLocaleString('pt-BR')} un ÷ {sleeveRate?.workingHours && sleeveRate.workingHours > 0 ? `${sleeveRate.workingHours.toFixed(1)}h trab.` : 'tempo trab.'}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-[#71717a]">Produzido</span>
+                          <span className="font-bold text-white">{produced.toLocaleString()} un</span>
                         </div>
                       )}
                     </div>
+                  ) : (
+                    <div className="py-8 text-center text-[11px] text-[#52525b]">
+                      Nenhuma OP em produção nesta linha
+                    </div>
+                  )}
+                </div>
 
+                {/* Rodapé do Card: % da produção da OP ativa + Barra de Progresso + OEE */}
+                <div className="pt-2.5 border-t border-[#1f1f28] space-y-2">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="font-bold text-[#71717a] uppercase tracking-wider truncate">
+                      {isSleeve ? 'Rendimento Sleev' : 'Meta da OP'}
+                    </span>
+                    {isSleeve ? (
+                      <span className="text-sm font-black text-purple-400 font-mono">
+                        {sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h
+                      </span>
+                    ) : (
+                      <span className={`text-base font-black ${
+                        percent > 100 ? 'text-cyan-400' : percent >= 70 ? 'text-emerald-400' : percent >= 35 ? 'text-orange-400' : 'text-rose-500'
+                      }`}>
+                        {percent}%
+                      </span>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          </div>
+
+                  <div className="w-full h-1.5 bg-[#1f1f28] rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        isSleeve
+                          ? 'bg-purple-500'
+                          : percent > 100 ? 'bg-cyan-500' : percent >= 70 ? 'bg-emerald-500' : percent >= 35 ? 'bg-orange-500' : 'bg-rose-600'
+                      }`}
+                      style={{ width: `${activeLineOp ? Math.min(Math.max(percent, 4), 100) : 0}%` }}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between text-[10px] text-[#71717a] font-medium pt-0.5">
+                    {isSleeve ? (
+                      <>
+                        <span className="text-purple-300 font-mono font-bold">{sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h</span>
+                        <span>{lineMetrics?.workingFormatted || '0h 00m'} trab.</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>{produced.toLocaleString()} un</span>
+                        <span>{isSleeve ? 'concluído no envase' : 'previsto'} {planned.toLocaleString()} un</span>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Linha OEE de Hoje: Tempo Trabalhado vs Ocioso */}
+                  <div className="px-2 py-1.5 rounded-lg bg-[#0e0e14] border border-[#1c1c26] flex items-center justify-between text-[10px] font-mono">
+                    <span title="Tempo trabalhado nesta linha hoje">
+                      Trab: <strong className="text-purple-300 font-bold">{lineMetrics?.workingFormatted || '0h 00m'}</strong>
+                    </span>
+                    <span className="text-[#3f3f46]">|</span>
+                    <span title="Tempo ocioso / paradas nesta linha hoje">
+                      Ocioso: <strong className="text-amber-300 font-bold">{lineMetrics?.idleFormatted || '0h 00m'}</strong>
+                    </span>
+                    <span className="text-[#3f3f46]">|</span>
+                    <span title="Disponibilidade OEE da linha hoje" className="text-emerald-400 font-bold">
+                      {lineMetrics?.disponibilidade ?? 0}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
     </div>
   );

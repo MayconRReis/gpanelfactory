@@ -1494,6 +1494,11 @@ WHERE email IN (
                               <td className="py-3.5 px-4 font-bold text-[#f4f4f5] max-w-xs">
                                 <div className="truncate flex items-center gap-1.5">
                                   <span>{op.product}</span>
+                                  {op.isSleeve && (
+                                    <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-purple-950/80 text-purple-300 border-purple-600/60 shadow-sm">
+                                      Sleev
+                                    </span>
+                                  )}
                                   {op.setor && (
                                     <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border ${
                                       op.setor === 'Pesagem' ? 'bg-purple-950/60 text-purple-300 border-purple-800/40' :

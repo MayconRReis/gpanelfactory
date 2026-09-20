@@ -68,10 +68,15 @@ export interface ProductionOrder {
   tipoDocumento?: 'OP' | 'OSM';
   industria?: 'Ybera' | 'Carvalho' | 'Macpaul' | string;
   finishedShift?: 'Manhã' | 'Tarde';
+  /**
+   * Status operacional atual de uma OP em Manipulação (ex.: "Em Produção",
+   * "Análise no Laboratório", "Aguardando Correção", "Drenando"). Hoje só é
+   * definido implicitamente ao iniciar a OP; será editável pelo líder via um
+   * botão na tela de Manipulação em uma próxima etapa.
+   */
+  manipulacaoStatus?: string;
   completedAt?: string;
   observation?: string;
-  isSleeve?: boolean;
-  manipulacaoStatus?: string;
   createdAt: string;
 }
 

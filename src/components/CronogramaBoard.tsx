@@ -199,16 +199,23 @@ export function CronogramaBoard({
             <GripVertical className="w-3 h-3 text-[#52525b] shrink-0" />
             <span className="font-mono font-bold text-white text-[11px]">OP {op.number}</span>
           </div>
-          {op.status === 'in_progress' ? (
-            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-500 text-black uppercase shrink-0">
-              Produzindo
-            </span>
-          ) : isCritical ? (
-            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-red-900/80 text-red-300 border border-red-700/50 shrink-0 flex items-center gap-0.5">
-              <AlertTriangle className="w-2.5 h-2.5" />
-              {op.priority}
-            </span>
-          ) : null}
+          <div className="flex items-center gap-1 shrink-0">
+            {op.isSleeve && (
+              <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-600/60 uppercase">
+                Sleev
+              </span>
+            )}
+            {op.status === 'in_progress' ? (
+              <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-500 text-black uppercase">
+                Produzindo
+              </span>
+            ) : isCritical ? (
+              <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-red-900/80 text-red-300 border border-red-700/50 flex items-center gap-0.5">
+                <AlertTriangle className="w-2.5 h-2.5" />
+                {op.priority}
+              </span>
+            ) : null}
+          </div>
         </div>
         <p className="text-[11px] text-[#d4d4d8] font-medium line-clamp-1 leading-tight" title={op.product}>
           {op.product}

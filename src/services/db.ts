@@ -43,6 +43,12 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
           pauseStartTime = null;
         }
       }
+
+      // Se a OP está atualmente em pausa (sem RESUMED ainda), contabiliza até agora
+      if (pauseStartTime !== null) {
+        const diff = Date.now() - pauseStartTime;
+        if (diff > 0) totalMs += diff;
+      }
     }
     return totalMs / (1000 * 60 * 60);
   } catch (err) {
@@ -98,6 +104,39 @@ export function calculateOEE(
         
         const tempoRealProduzindo = Math.max(0, tempoPlanejadoTotal - pauseHours);
         disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
+      }
+    } else if (events && events.length > 0) {
+      // Fallback exato OEE baseado no histórico real de eventos:
+      // Disponibilidade = Tempo Trabalhado / (Tempo Trabalhado + Tempo de Pausas)
+      const pauseHours = calculateTotalPauseHours(events);
+      const opIds = new Set(ops.map(o => o.id));
+      const opEvents = events.filter(e => e.opId && opIds.has(e.opId));
+      let totalElapsedHours = 0;
+
+      const eventsByOp: Record<string, ProductionEvent[]> = {};
+      for (const ev of opEvents) {
+        if (!ev.opId) continue;
+        if (!eventsByOp[ev.opId]) eventsByOp[ev.opId] = [];
+        eventsByOp[ev.opId].push(ev);
+      }
+
+      for (const opId of Object.keys(eventsByOp)) {
+        const list = eventsByOp[opId];
+        const started = list.filter(e => e.type === 'STARTED');
+        if (started.length === 0) continue;
+        const firstStart = Math.min(...started.map(e => new Date(e.createdAt).getTime()).filter(t => !isNaN(t)));
+        const finished = list.filter(e => e.type === 'FINISHED');
+        const lastEnd = finished.length > 0
+          ? Math.max(...finished.map(e => new Date(e.createdAt).getTime()).filter(t => !isNaN(t)))
+          : Date.now();
+        if (lastEnd > firstStart) {
+          totalElapsedHours += (lastEnd - firstStart) / (1000 * 60 * 60);
+        }
+      }
+
+      if (totalElapsedHours > 0) {
+        const tempoRealProduzindo = Math.max(0, totalElapsedHours - pauseHours);
+        disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / totalElapsedHours));
       }
     }
 
@@ -477,6 +516,35 @@ function saveDeletedOpIds() {
     try {
       window.localStorage.setItem(DELETED_OPS_KEY, JSON.stringify(Array.from(deletedOpIds)));
       window.localStorage.setItem(RESET_TIMESTAMP_KEY, String(lastResetTimestamp));
+    } catch {}
+  }
+}
+
+const SLEEVE_OPS_KEY = 'gpanel_sleeve_op_ids';
+
+export function getSleeveOpIds(): Set<string> {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const raw = window.localStorage.getItem(SLEEVE_OPS_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        return new Set(Array.isArray(arr) ? arr : []);
+      }
+    } catch {}
+  }
+  return new Set();
+}
+
+export function markOpAsSleeve(opId: string, isSleeve: boolean) {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const set = getSleeveOpIds();
+      if (isSleeve) {
+        set.add(opId);
+      } else {
+        set.delete(opId);
+      }
+      window.localStorage.setItem(SLEEVE_OPS_KEY, JSON.stringify(Array.from(set)));
     } catch {}
   }
 }
@@ -1384,6 +1452,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
     }
 
     if (data && data.length > 0 && !error) {
+      const sleeveIds = getSleeveOpIds();
       const remoteOps: ProductionOrder[] = data
         .map((d: any) => ({
           id: String(d.id),
@@ -1410,6 +1479,7 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           tipoDocumento: d.tipo_documento || 'OP',
           industria: d.industria || undefined,
           finishedShift: d.finished_shift || undefined,
+          isSleeve: sleeveIds.has(String(d.id)) || Boolean(d.is_sleeve || d.isSleeve),
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
         }))
         .filter((op) => {
@@ -2239,6 +2309,115 @@ export const getPauseReasons = async (): Promise<PauseReason[]> => {
   return DEFAULT_PAUSE_REASONS;
 };
 
+// Helper para verificar se uma string é um UUID válido do PostgreSQL
+export const isUUID = (str?: string | null): boolean =>
+  Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(str).trim()));
+
+/**
+ * Atualiza o status da linha de produção de forma resiliente tanto na tabela `lines`
+ * (que aceita ids em texto como 'line-1') quanto em `production_lines` (com id do tipo UUID).
+ */
+export const updateLineStatusRemote = async (
+  lineId: string,
+  status: 'active' | 'idle' | 'paused',
+  currentOpId: string | null = null
+) => {
+  try {
+    // 1. Tabela `lines` aceita id em texto simples ("line-1", "line-2", "line-sleeve")
+    await supabase.from('lines').update({ status, current_op_id: currentOpId }).eq('id', lineId);
+  } catch (err) {
+    console.warn(`[updateLineStatusRemote] Falha em lines (${lineId}):`, err);
+  }
+
+  try {
+    // 2. Tabela `production_lines` possui coluna id tipada como UUID.
+    if (isUUID(lineId)) {
+      await supabase.from('production_lines').update({ status, current_op_id: currentOpId }).eq('id', lineId);
+    }
+  } catch (err) {
+    console.warn(`[updateLineStatusRemote] Falha em production_lines (${lineId}):`, err);
+  }
+};
+
+/**
+ * Grava eventos de produção de forma 100% segura e compatível com as duas tabelas:
+ * - `events`: schema real usa colunas `quantity_reported`, `pause_reason_name`, `comments` e line_id em texto.
+ * - `production_events`: schema real usa `quantity`, `reason`, `observation`, e line_id tipado como UUID.
+ */
+export const recordEventRemote = async (eventData: {
+  opId: string;
+  lineId: string;
+  leaderId?: string | null;
+  type: string;
+  quantity?: number;
+  reason?: string;
+  observation?: string;
+  createdAt: string;
+}) => {
+  const { opId, lineId, leaderId, type, quantity, reason, observation, createdAt } = eventData;
+
+  // 1. Tabela `events`
+  try {
+    const eventsPayload: any = {
+      op_id: opId,
+      line_id: lineId, // em events, line_id aceita text ("line-1", "line-2", etc.)
+      type,
+      created_at: createdAt,
+    };
+    if (leaderId && isUUID(leaderId)) {
+      eventsPayload.leader_id = leaderId;
+    }
+    if (quantity !== undefined && quantity !== null && !isNaN(quantity)) {
+      eventsPayload.quantity_reported = quantity; // Coluna correta em events é quantity_reported, NÃO quantity
+    }
+    if (reason) {
+      eventsPayload.pause_reason_name = reason;
+    }
+    if (observation) {
+      eventsPayload.comments = observation;
+    }
+
+    const resEvents = await supabase.from('events').insert(eventsPayload);
+    if (resEvents.error) {
+      console.warn(`[recordEventRemote] Aviso ao gravar em events (OP ${opId}):`, resEvents.error.message);
+    }
+  } catch (err) {
+    console.warn(`[recordEventRemote] Erro ao gravar em events (OP ${opId}):`, err);
+  }
+
+  // 2. Tabela `production_events`
+  try {
+    const prodEventsPayload: any = {
+      op_id: opId,
+      type,
+      created_at: createdAt,
+    };
+    // CRÍTICO: line_id em `production_events` é do tipo UUID. Não passar "line-1" para evitar erro 22P02 "invalid input syntax for type uuid".
+    if (lineId && isUUID(lineId)) {
+      prodEventsPayload.line_id = lineId;
+    }
+    if (leaderId && isUUID(leaderId)) {
+      prodEventsPayload.leader_id = leaderId;
+    }
+    if (quantity !== undefined && quantity !== null && !isNaN(quantity)) {
+      prodEventsPayload.quantity = quantity;
+    }
+    if (reason) {
+      prodEventsPayload.reason = reason;
+    }
+    if (observation) {
+      prodEventsPayload.observation = observation;
+    }
+
+    const resProdEvents = await supabase.from('production_events').insert(prodEventsPayload);
+    if (resProdEvents.error) {
+      console.warn(`[recordEventRemote] Aviso ao gravar em production_events (OP ${opId}):`, resProdEvents.error.message);
+    }
+  } catch (err) {
+    console.warn(`[recordEventRemote] Erro ao gravar em production_events (OP ${opId}):`, err);
+  }
+};
+
 export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
   try {
     let { data, error } = await supabase
@@ -2268,9 +2447,11 @@ export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
           lineName: e.line_name || e.line_id || 'Linha',
           leaderName: e.leader_name || 'Líder',
           type: e.type,
-          quantity: e.quantity ? Number(e.quantity) : undefined,
-          reason: e.reason,
-          observation: e.observation,
+          quantity: e.quantity !== undefined && e.quantity !== null
+            ? Number(e.quantity)
+            : (e.quantity_reported !== undefined && e.quantity_reported !== null ? Number(e.quantity_reported) : undefined),
+          reason: e.reason || e.pause_reason_name,
+          observation: e.observation || e.comments,
           createdAt: e.created_at || new Date().toISOString(),
         }))
         .filter(e => !isMockEvent(e));
@@ -2313,11 +2494,15 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
     await Promise.allSettled([
       supabase.from('production_orders').update({ status: 'in_progress', leader_id: leaderId, line_id: lineId }).eq('id', opId),
       supabase.from('ops').update({ status: 'in_progress', leader_id: leaderId, line_id: lineId }).eq('id', opId),
-      supabase.from('production_lines').update({ status: 'active', current_op_id: opId }).eq('id', lineId),
-      supabase.from('lines').update({ status: 'active', current_op_id: opId }).eq('id', lineId),
-      supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'STARTED', created_at: newEvent.createdAt }),
-      supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'STARTED', created_at: newEvent.createdAt }),
     ]);
+    await updateLineStatusRemote(lineId, 'active', opId);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'STARTED',
+      createdAt: newEvent.createdAt,
+    });
   } catch (error) {
     console.error('Erro ao iniciar OP:', error);
   }
@@ -2374,11 +2559,18 @@ export const pauseOP = async (
     await Promise.allSettled([
       supabase.from('production_orders').update(updateOpPayload).eq('id', opId),
       supabase.from('ops').update(updateOpPayload).eq('id', opId),
-      supabase.from('production_lines').update({ status: 'paused' }).eq('id', lineId),
-      supabase.from('lines').update({ status: 'paused' }).eq('id', lineId),
-      supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'PAUSED', reason, observation, created_at: newEvent.createdAt }),
-      supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'PAUSED', reason, observation, created_at: newEvent.createdAt }),
     ]);
+    await updateLineStatusRemote(lineId, 'paused', null);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      quantity: updatedProducedQty,
+      createdAt: newEvent.createdAt,
+    });
   } catch (error) {
     console.error('Erro ao pausar OP:', error);
   }
@@ -2411,11 +2603,15 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
     await Promise.allSettled([
       supabase.from('production_orders').update({ status: 'in_progress' }).eq('id', opId),
       supabase.from('ops').update({ status: 'in_progress' }).eq('id', opId),
-      supabase.from('production_lines').update({ status: 'active' }).eq('id', lineId),
-      supabase.from('lines').update({ status: 'active' }).eq('id', lineId),
-      supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'RESUMED', created_at: newEvent.createdAt }),
-      supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'RESUMED', created_at: newEvent.createdAt }),
     ]);
+    await updateLineStatusRemote(lineId, 'active', opId);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'RESUMED',
+      createdAt: newEvent.createdAt,
+    });
   } catch (error) {
     console.error('Erro ao retomar OP:', error);
   }
@@ -2426,28 +2622,62 @@ export const finishOP = async (
   lineId: string,
   leaderId: string,
   finishedShift?: 'Manhã' | 'Tarde',
-  producedQuantity?: number
+  producedQuantity?: number,
+  sendToSleeve?: boolean,
+  rejectedQuantity?: number
 ) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const completedAtIso = new Date().toISOString();
+  const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
+  // Quantidade rejeitada informada AGORA (na conclusão desta etapa). Sem
+  // integração com o laboratório ainda, é o próprio líder que registra isso
+  // ao concluir a OP — usado no cálculo de Qualidade do OEE.
+  const finalRejectedQty = rejectedQuantity !== undefined ? rejectedQuantity : (currentOp?.rejectedQuantity || 0);
 
-  inMemoryOps = inMemoryOps.map(op =>
-    op.id === opId
-      ? {
-          ...op,
-          status: 'completed',
-          finishedShift: finishedShift || undefined,
-          completedAt: completedAtIso,
-          producedQuantity: producedQuantity !== undefined ? producedQuantity : op.producedQuantity,
-          leaderId: leaderId || op.leaderId,
-        }
-      : op
-  );
+  if (sendToSleeve) {
+    markOpAsSleeve(opId, true);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'pending',
+            lineId: null, // volta para o estoque sem linha
+            leaderId: null,
+            plannedQuantity: finalProducedQty, // assume a quantidade apontada no envase como nova meta para o sleev
+            producedQuantity: 0, // reinicia a contagem de produção para a fase do sleev
+            rejectedQuantity: 0, // reinicia a contagem de rejeitos — a etapa do Sleev começa sua própria contagem
+            finishedShift: undefined,
+            completedAt: undefined,
+            isSleeve: true,
+          }
+        : op
+    );
+  } else {
+    markOpAsSleeve(opId, false);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'completed',
+            finishedShift: finishedShift || undefined,
+            completedAt: completedAtIso,
+            producedQuantity: finalProducedQty,
+            rejectedQuantity: finalRejectedQty,
+            leaderId: leaderId || op.leaderId,
+            isSleeve: false,
+          }
+        : op
+    );
+  }
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
 
   persistOps();
   persistLines();
+
+  const observation = sendToSleeve
+    ? `Envase finalizado (${finalProducedQty.toLocaleString('pt-BR')} un${finalRejectedQty > 0 ? `, ${finalRejectedQty.toLocaleString('pt-BR')} rejeitada(s)` : ''}). Retornou ao estoque para acabamento no Sleev.`
+    : undefined;
 
   const newEvent: ProductionEvent = {
     id: `ev-${Date.now()}`,
@@ -2457,18 +2687,30 @@ export const finishOP = async (
     lineName: currentLine?.name || lineId,
     leaderId,
     type: 'FINISHED',
+    observation,
     createdAt: new Date().toISOString(),
   };
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
-  const opPayload = {
-    status: 'completed',
-    finished_shift: finishedShift || null,
-    produced_quantity: producedQuantity !== undefined ? producedQuantity : undefined,
-    leader_id: leaderId || null,
-    completed_at: completedAtIso,
-  };
+  const opPayload: any = sendToSleeve
+    ? {
+        status: 'pending',
+        line_id: null,
+        leader_id: null,
+        planned_quantity: finalProducedQty,
+        produced_quantity: 0,
+        rejected_quantity: 0,
+        finished_shift: null,
+      }
+    : {
+        status: 'completed',
+        finished_shift: finishedShift || null,
+        produced_quantity: finalProducedQty,
+        rejected_quantity: finalRejectedQty,
+        leader_id: leaderId || null,
+        completed_at: completedAtIso,
+      };
 
   // `production_orders` não tem a coluna `completed_at` (confirmado em produção
   // — mesma causa do erro "Could not find the 'scheduled_days' column of
@@ -2503,23 +2745,37 @@ export const finishOP = async (
     }
 
     // Atualizar linha e gravar evento
-    await Promise.allSettled([
-      supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
-      supabase.from('lines').update({ status: 'idle', current_op_id: null }).eq('id', lineId),
-      supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'FINISHED', created_at: newEvent.createdAt }),
-      supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'FINISHED', created_at: newEvent.createdAt }),
-    ]);
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'FINISHED',
+      quantity: finalProducedQty,
+      observation,
+      createdAt: newEvent.createdAt,
+    });
   } catch (error) {
     console.error('[finishOP] Erro inesperado ao finalizar OP:', error);
   }
 };
 
-export const reportQuantity = async (opId: string, lineId: string, leaderId: string, quantity: number) => {
+export const reportQuantity = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  quantity: number,
+  rejectedQty?: number
+) => {
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const newQty = (currentOp?.producedQuantity || 0) + quantity;
+  // Rejeito informado pelo líder junto com este apontamento (soma ao total já
+  // registrado na OP) — enquanto o laboratório não entra no fluxo, é quem
+  // está no chão de fábrica que reporta a perda, usado na Qualidade do OEE.
+  const newRejectedQty = (currentOp?.rejectedQuantity || 0) + (rejectedQty || 0);
 
-  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, producedQuantity: newQty } : op);
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, producedQuantity: newQty, rejectedQuantity: newRejectedQty } : op);
   persistOps();
 
   const newEvent: ProductionEvent = {
@@ -2531,51 +2787,111 @@ export const reportQuantity = async (opId: string, lineId: string, leaderId: str
     leaderId,
     type: 'QUANTITY_REPORTED',
     quantity,
+    observation: rejectedQty ? `${rejectedQty.toLocaleString('pt-BR')} rejeitada(s) neste apontamento` : undefined,
     createdAt: new Date().toISOString(),
   };
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
-  // Grava sequencialmente com log de erro por tabela (NÃO usar Promise.allSettled
-  // aqui: uma falha silenciosa em `production_orders` é exatamente o motivo pelo
-  // qual o KPI de Envase ficava zerado — getAllOPs() lê primeiro de
-  // `production_orders`, então se só esse write falhar, o valor reportado nunca
-  // aparece após um refresh, mesmo a tela do líder mostrando certo na hora).
+  // Grava sequencialmente com log de aviso por tabela
   try {
-    const resProductionOrders = await supabase.from('production_orders').update({ produced_quantity: newQty }).eq('id', opId);
+    const resProductionOrders = await supabase.from('production_orders').update({ produced_quantity: newQty, rejected_quantity: newRejectedQty }).eq('id', opId);
     if (resProductionOrders.error) {
-      console.error(`[reportQuantity] Falha ao gravar produced_quantity em production_orders (OP ${opId}):`, resProductionOrders.error.message);
+      console.warn(`[reportQuantity] Falha ao gravar produced_quantity em production_orders (OP ${opId}):`, resProductionOrders.error.message);
     }
   } catch (err) {
-    console.error(`[reportQuantity] Erro inesperado ao gravar em production_orders (OP ${opId}):`, err);
+    console.warn(`[reportQuantity] Erro inesperado ao gravar em production_orders (OP ${opId}):`, err);
   }
 
   try {
-    const resOps = await supabase.from('ops').update({ produced_quantity: newQty }).eq('id', opId);
+    const resOps = await supabase.from('ops').update({ produced_quantity: newQty, rejected_quantity: newRejectedQty }).eq('id', opId);
     if (resOps.error) {
-      console.error(`[reportQuantity] Falha ao gravar produced_quantity em ops (OP ${opId}):`, resOps.error.message);
+      console.warn(`[reportQuantity] Falha ao gravar produced_quantity em ops (OP ${opId}):`, resOps.error.message);
     }
   } catch (err) {
-    console.error(`[reportQuantity] Erro inesperado ao gravar em ops (OP ${opId}):`, err);
+    console.warn(`[reportQuantity] Erro inesperado ao gravar em ops (OP ${opId}):`, err);
+  }
+
+  // Grava em events e production_events com schemas validados
+  await recordEventRemote({
+    opId,
+    lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity,
+    observation: newEvent.observation,
+    createdAt: newEvent.createdAt,
+  });
+};
+
+export const updateProducedQuantityDirect = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  totalProducedQty: number
+) => {
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const oldQty = currentOp?.producedQuantity || 0;
+  const delta = totalProducedQty - oldQty;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId ? { ...op, producedQuantity: totalProducedQty } : op
+  );
+  persistOps();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity: delta > 0 ? delta : totalProducedQty,
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  try {
+    const resProductionOrders = await supabase
+      .from('production_orders')
+      .update({ produced_quantity: totalProducedQty })
+      .eq('id', opId);
+    if (resProductionOrders.error) {
+      console.warn(
+        `[updateProducedQuantityDirect] Falha ao gravar em production_orders (OP ${opId}):`,
+        resProductionOrders.error.message
+      );
+    }
+  } catch (err) {
+    console.warn(`[updateProducedQuantityDirect] Erro em production_orders (OP ${opId}):`, err);
   }
 
   try {
-    const resProdEvents = await supabase.from('production_events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt });
-    if (resProdEvents.error) {
-      console.error(`[reportQuantity] Falha ao gravar em production_events (OP ${opId}):`, resProdEvents.error.message);
+    const resOps = await supabase
+      .from('ops')
+      .update({ produced_quantity: totalProducedQty })
+      .eq('id', opId);
+    if (resOps.error) {
+      console.warn(
+        `[updateProducedQuantityDirect] Falha ao gravar em ops (OP ${opId}):`,
+        resOps.error.message
+      );
     }
   } catch (err) {
-    console.error(`[reportQuantity] Erro inesperado ao gravar em production_events (OP ${opId}):`, err);
+    console.warn(`[updateProducedQuantityDirect] Erro em ops (OP ${opId}):`, err);
   }
 
-  try {
-    const resEvents = await supabase.from('events').insert({ op_id: opId, line_id: lineId, leader_id: leaderId, type: 'QUANTITY_REPORTED', quantity, created_at: newEvent.createdAt });
-    if (resEvents.error) {
-      console.error(`[reportQuantity] Falha ao gravar em events (OP ${opId}):`, resEvents.error.message);
-    }
-  } catch (err) {
-    console.error(`[reportQuantity] Erro inesperado ao gravar em events (OP ${opId}):`, err);
-  }
+  await recordEventRemote({
+    opId,
+    lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity: delta > 0 ? delta : totalProducedQty,
+    createdAt: newEvent.createdAt,
+  });
 };
 
 // ---------------- DATABASE RESET & CLEANUP ----------------
