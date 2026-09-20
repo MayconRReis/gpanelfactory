@@ -92,7 +92,6 @@ import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
-import { INTEGRATIONS_ARE_MOCKED } from '../integrations/mocks';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -2388,7 +2387,7 @@ WHERE email IN (
             </div>
 
             <form onSubmit={handleSaveOP} className="p-5 space-y-4 max-h-[85vh] overflow-y-auto">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
                     Número da OP *
@@ -2400,19 +2399,6 @@ WHERE email IN (
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
                     required
                   />
-                </div>
-
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Indústria</Label>
-                  <select
-                    value={newOpIndustria}
-                    onChange={(e) => setNewOpIndustria(e.target.value as any)}
-                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                  >
-                    <option value="Ybera">Ybera</option>
-                    <option value="Carvalho">Carvalho</option>
-                    <option value="Macpaul">Macpaul</option>
-                  </select>
                 </div>
 
                 <div className="space-y-1">
@@ -2441,53 +2427,6 @@ WHERE email IN (
                 />
               </div>
 
-              {/* SETOR E UNIDADE DE MEDIDA */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa] flex items-center justify-between">
-                    <span>Setor *</span>
-                    <span className="text-[9px] font-normal text-blue-400">OEE / Métricas</span>
-                  </Label>
-                  <select
-                    value={newOpSetor}
-                    onChange={(e) => {
-                      const selectedSetor = e.target.value as 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
-                      setNewOpSetor(selectedSetor);
-                      // Auto-fill unidade based on setor
-                      if (selectedSetor === 'Pesagem') {
-                        setNewOpUnidade('Qtd');
-                      } else if (selectedSetor === 'Manipulação') {
-                        setNewOpUnidade('Kg');
-                      } else if (selectedSetor === 'Envase') {
-                        setNewOpUnidade('Un');
-                      } else {
-                        setNewOpUnidade('Un');
-                      }
-                    }}
-                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                    required
-                  >
-                    <option value="Envase">Envase</option>
-                    <option value="Manipulação">Manipulação</option>
-                    <option value="Pesagem">Pesagem</option>
-                    <option value="Geral">Geral</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Unidade de Medida</Label>
-                  <select
-                    value={newOpUnidade}
-                    onChange={(e) => setNewOpUnidade(e.target.value as 'Un' | 'Kg' | 'Qtd')}
-                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                  >
-                    <option value="Un">Un (Unidades)</option>
-                    <option value="Kg">Kg (Quilogramas)</option>
-                    <option value="Qtd">Qtd (Quantidade)</option>
-                  </select>
-                </div>
-              </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Lote do Produto</Label>
@@ -2500,7 +2439,7 @@ WHERE email IN (
                 </div>
 
                 <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Código/Lote do Granel</Label>
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">OP Granel</Label>
                   <Input
                     placeholder="Ex: GR-SH-910"
                     value={newOpGranel}
@@ -2510,219 +2449,22 @@ WHERE email IN (
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
-                  <Input
-                    type="number"
-                    placeholder="Ex: 2500"
-                    value={newOpPlanned}
-                    onChange={(e) => setNewOpPlanned(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
-                    required
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Linha Alocada</Label>
-                  <select
-                    value={newOpLineId}
-                    onChange={(e) => setNewOpLineId(e.target.value)}
-                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                  >
-                    <option value="">Estoque Geral (Sem linha fixa)</option>
-                    {lines.map(line => (
-                      <option key={line.id} value={line.id}>{line.name}</option>
-                    ))}
-                  </select>
-                </div>
+              <div className="space-y-1">
+                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
+                <Input
+                  type="number"
+                  placeholder="Ex: 2500"
+                  value={newOpPlanned}
+                  onChange={(e) => setNewOpPlanned(e.target.value)}
+                  className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
+                  required
+                />
               </div>
 
-              {/* HORAS DO TURNO & QUANTIDADE REFUGADA */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Horas do Turno (para OEE)</Label>
-                  <Input
-                    type="number"
-                    step={0.5}
-                    min={1}
-                    max={12}
-                    placeholder="Ex: 8"
-                    value={newOpPlannedHours}
-                    onChange={(e) => setNewOpPlannedHours(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
-                  />
-                </div>
-
-                {editingOp && (editingOp.status === 'completed' || editingOp.status === 'in_progress') ? (
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-red-400 flex items-center justify-between">
-                      <span>Qtd Refugada</span>
-                      <span className="text-[9px] font-normal text-[#a1a1aa]">Perdas / Scrap</span>
-                    </Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      placeholder="Ex: 15"
-                      value={newOpRejectedQuantity}
-                      onChange={(e) => setNewOpRejectedQuantity(e.target.value)}
-                      className="bg-[#0b0b0e] border-red-900/50 text-xs font-mono text-red-400 font-bold"
-                    />
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
-                      {INTEGRATIONS_ARE_MOCKED && (
-                        <span
-                          className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
-                          title="Integração com EstoqueMais pendente — valor simulado/manual"
-                        >
-                          <AlertTriangle className="w-2.5 h-2.5" />
-                          Simulado
-                        </span>
-                      )}
-                    </div>
-                    <Input
-                      type="number"
-                      placeholder="Ex: 5000"
-                      value={newOpPackage}
-                      onChange={(e) => setNewOpPackage(e.target.value)}
-                      className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
-                    />
-                  </div>
-                )}
-              </div>
-
-              {editingOp && (editingOp.status === 'completed' || editingOp.status === 'in_progress') && (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Disponibilidade de Embalagens</Label>
-                    {INTEGRATIONS_ARE_MOCKED && (
-                      <span
-                        className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-400 border border-amber-800/40 px-1.5 py-0.5 rounded text-[9px] font-bold"
-                        title="Integração com EstoqueMais pendente — valor simulado/manual"
-                      >
-                        <AlertTriangle className="w-2.5 h-2.5" />
-                        Simulado
-                      </span>
-                    )}
-                  </div>
-                  <Input
-                    type="number"
-                    placeholder="Ex: 5000"
-                    value={newOpPackage}
-                    onChange={(e) => setNewOpPackage(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-[#f4f4f5]"
-                  />
-                </div>
-              )}
-
-              {/* CRONOGRAMA DE ENVASE: DATAS E DIAS PREVISTOS */}
-              <div className="p-3 bg-[#0c0c10] border border-[#202028] rounded-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
-                    <CalendarDays className="w-3.5 h-3.5" />
-                    Cronograma de Envase (Data & Duração em Dias)
-                  </span>
-                  <span className="text-[9px] text-[#71717a]">
-                    Planejamento de produção
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Data Prevista de Início</Label>
-                    <Input
-                      type="date"
-                      value={newOpScheduledDate}
-                      onChange={(e) => {
-                        const newDate = e.target.value;
-                        setNewOpScheduledDate(newDate);
-                        if (newDate && newOpScheduledDays) {
-                          const d = new Date(newDate + 'T12:00:00');
-                          d.setDate(d.getDate() + (Math.max(1, Number(newOpScheduledDays)) - 1));
-                          setNewOpScheduledEndDate(d.toISOString().split('T')[0]);
-                        }
-                      }}
-                      className="bg-[#121218] border-[#25252c] text-xs font-semibold text-[#f4f4f5]"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa] flex items-center justify-between">
-                      <span>Dias Previstos de Envase</span>
-                      <span className="text-blue-400 font-bold">{newOpScheduledDays}d</span>
-                    </Label>
-                    <div className="flex items-center gap-1.5">
-                      <Input
-                        type="number"
-                        min={1}
-                        max={30}
-                        value={newOpScheduledDays}
-                        onChange={(e) => {
-                          const days = Math.max(1, Number(e.target.value));
-                          setNewOpScheduledDays(String(days));
-                          if (newOpScheduledDate) {
-                            const d = new Date(newOpScheduledDate + 'T12:00:00');
-                            d.setDate(d.getDate() + (days - 1));
-                            setNewOpScheduledEndDate(d.toISOString().split('T')[0]);
-                          }
-                        }}
-                        className="bg-[#121218] border-[#25252c] text-xs font-bold text-[#f4f4f5] text-center"
-                      />
-                      <div className="flex items-center gap-1">
-                        {[1, 2, 3, 5].map((d) => (
-                          <button
-                            key={d}
-                            type="button"
-                            onClick={() => {
-                              setNewOpScheduledDays(String(d));
-                              if (newOpScheduledDate) {
-                                const dt = new Date(newOpScheduledDate + 'T12:00:00');
-                                dt.setDate(dt.getDate() + (d - 1));
-                                setNewOpScheduledEndDate(dt.toISOString().split('T')[0]);
-                              }
-                            }}
-                            className={`h-9 px-2 text-[10px] font-bold rounded-lg border transition-all ${
-                              newOpScheduledDays === String(d)
-                                ? 'bg-blue-600 text-white border-blue-500'
-                                : 'bg-[#181820] text-[#a1a1aa] border-[#2c2c38] hover:border-[#3f3f4e]'
-                            }`}
-                          >
-                            {d}d
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Data Prevista de Término</Label>
-                    <Input
-                      type="date"
-                      value={newOpScheduledEndDate}
-                      onChange={(e) => setNewOpScheduledEndDate(e.target.value)}
-                      className="bg-[#121218] border-[#25252c] text-xs font-semibold text-emerald-400"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Turno do Envase</Label>
-                    <select
-                      value={newOpScheduledShift}
-                      onChange={(e) => setNewOpScheduledShift(e.target.value as any)}
-                      className="w-full h-9 bg-[#121218] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                    >
-                      <option value="Integral">Integral (Geral)</option>
-                      <option value="Manhã">Manhã</option>
-                      <option value="Tarde">Tarde</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
+              {/* Setor, unidade, indústria, linha, horas de turno, embalagens e cronograma
+                  saem deste modal — ficam com os valores padrão (Envase/Un/Ybera/Estoque Geral)
+                  e são ajustados depois nas telas de Pesagem/Manipulação/Cronograma, ou nem
+                  precisam estar vinculados à OP neste momento. */}
 
               <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
                 <Button
