@@ -17,9 +17,10 @@ import {
   getRecentEvents,
   getMonthlyGoals,
   getLineDailyGoals,
-  getFactoryMonthlyGoal
+  getFactoryMonthlyGoal,
+  getFactoryMonthlyGoals
 } from '../services/db';
-import { ProductionLine, ProductionOrder, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
+import { ProductionLine, ProductionOrder, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal } from '../types';
 import { supabase } from '../lib/supabase';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { useNavigate } from 'react-router-dom';
@@ -33,6 +34,7 @@ export function PublicDashboardView() {
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
   const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
   const [factoryMonthlyGoal, setFactoryMonthlyGoal] = useState<number | null>(null);
+  const [factoryMonthlyGoals, setFactoryMonthlyGoals] = useState<FactoryMonthlyGoal[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -48,13 +50,14 @@ export function PublicDashboardView() {
       // tela é pública, sem login, e esses dados vêm de `profiles` (nome, e-mail,
       // cargo, e até a senha temporária de quem ainda não trocou a senha). O
       // Dashboard Geral só precisa de OPs/linhas/eventos/metas para exibir os KPIs.
-      const [ls, os, evts, gls, ldgs, fmg] = await Promise.all([
+      const [ls, os, evts, gls, ldgs, fmg, fmgs] = await Promise.all([
         getLines(),
         getAllOPs(),
         getRecentEvents(),
         getMonthlyGoals(currentYear),
         getLineDailyGoals(),
         getFactoryMonthlyGoal(currentYear, currentMonth),
+        getFactoryMonthlyGoals(currentYear),
       ]);
       setLines(ls || []);
       setOps(os || []);
@@ -62,6 +65,7 @@ export function PublicDashboardView() {
       setGoals(gls || []);
       setLineDailyGoals(ldgs || []);
       setFactoryMonthlyGoal(fmg);
+      setFactoryMonthlyGoals(fmgs || []);
       setLastUpdated(new Date());
     } catch (err) {
       console.warn('Erro ao carregar dados do dashboard público:', err);
@@ -226,6 +230,7 @@ export function PublicDashboardView() {
               rotations={{}}
               goals={goals}
               factoryMonthlyGoal={factoryMonthlyGoal}
+              factoryMonthlyGoals={factoryMonthlyGoals}
               lineDailyGoals={lineDailyGoals}
               isReadOnly={true}
             />

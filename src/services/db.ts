@@ -244,6 +244,53 @@ export function groupProductionByDayAndSetor(
 }
 
 /**
+ * Agrupa producedQuantity por HORA (0–23) de um dia específico — usado pelo
+ * gráfico do Dashboard quando o filtro de período é "Dia". Usa `completedAt`
+ * (o momento real em que a OP foi finalizada) como referência de hora, com
+ * fallback pra `createdAt` quando a OP ainda não tem `completedAt`. Como
+ * `ops`/`production_orders` não têm limite de linhas (getAllOPs pagina tudo),
+ * isso é confiável mesmo em dias de muita atividade — diferente de tentar
+ * montar essa mesma visão a partir de `events`, que só traz os 50 mais
+ * recentes de toda a fábrica (getRecentEvents).
+ */
+export function groupProductionByHour(
+  ops: ProductionOrder[],
+  dateStr: string
+): Array<{ hour: number; label: string; quantity: number }> {
+  const result = Array.from({ length: 24 }, (_, h) => ({
+    hour: h,
+    label: `${String(h).padStart(2, '0')}h`,
+    quantity: 0,
+  }));
+
+  if (!ops || ops.length === 0 || !dateStr) return result;
+
+  try {
+    for (const op of ops) {
+      if (!op || !op.producedQuantity) continue;
+
+      const tsStr = op.completedAt || op.createdAt;
+      if (!tsStr) continue;
+
+      const d = new Date(tsStr);
+      if (isNaN(d.getTime())) continue;
+
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      if (`${yyyy}-${mm}-${dd}` !== dateStr) continue;
+
+      const hour = d.getHours();
+      result[hour].quantity += Number(op.producedQuantity || 0);
+    }
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por hora:', err);
+  }
+
+  return result;
+}
+
+/**
  * Agrupa producedQuantity por mês (para o gráfico de barras mensal).
  * Retorna um array de 12 posições (jan=0 … dez=11) com a quantidade produzida.
  * Filtra pelo ano fornecido.

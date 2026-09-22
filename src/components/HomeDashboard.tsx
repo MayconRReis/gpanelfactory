@@ -10,7 +10,7 @@ import {
   Filter,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth, calculateOEE } from '../services/db';
+import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -624,6 +624,33 @@ export function HomeDashboard({
     });
   }, [ops, goals, factoryMonthlyGoals, currentYear, currentMonth, activeMonthGoal]);
 
+  // 4b. Gráfico "por hora" (0h–23h) — usado quando o filtro de período é
+  // "Dia", no lugar do gráfico de 12 meses (que não faz sentido pro recorte
+  // de um único dia).
+  const hourlyChartData = useMemo(() => {
+    return groupProductionByHour(ops, todayDateStr);
+  }, [ops, todayDateStr]);
+
+  // 4c. Gráfico "por dia" do mês selecionado — usado quando o filtro de
+  // período é "Mês", no lugar do gráfico de 12 meses (que também não faz
+  // sentido pro recorte de um único mês: cada barra já seria só um ponto).
+  const dailyChartData = useMemo(() => {
+    const byDaySetor = groupProductionByDayAndSetor(ops, selectedMonth + 1, currentYear);
+    const totalsByDay = new Map<number, number>();
+    for (const row of byDaySetor) {
+      totalsByDay.set(row.day, (totalsByDay.get(row.day) || 0) + row.quantity);
+    }
+    const daysInSelectedMonth = new Date(currentYear, selectedMonth + 1, 0).getDate();
+    return Array.from({ length: daysInSelectedMonth }, (_, i) => {
+      const day = i + 1;
+      return {
+        day,
+        label: String(day).padStart(2, '0'),
+        quantity: totalsByDay.get(day) || 0,
+      };
+    });
+  }, [ops, selectedMonth, currentYear]);
+
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
       
@@ -994,14 +1021,20 @@ export function HomeDashboard({
           )}
         </div>
 
-        {/* ── 3. Gráfico Mensal 12 Meses ── */}
+        {/* ── 3. Gráfico de produção — muda de acordo com o filtro de período
+              (Dia/Mês/Ano/Geral) escolhido lá em cima: em "Dia" mostra a
+              produção hora a hora de hoje; em "Mês" mostra dia a dia do mês
+              selecionado; em "Ano"/"Geral" mantém o comparativo dos 12 meses
+              de sempre. ── */}
         <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4 flex flex-col justify-between min-h-[300px]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-xs font-black uppercase tracking-wider text-[#f4f4f5] flex items-center gap-2">
                   <Calendar className="w-4 h-4 text-purple-400" />
-                  Produção Mensal ({currentYear})
+                  {dashboardPeriod === 'dia' && 'Produção por Hora (Hoje)'}
+                  {dashboardPeriod === 'mes' && `Produção por Dia (${MONTH_LABELS_SHORT[selectedMonth]}/${currentYear})`}
+                  {(dashboardPeriod === 'ano' || dashboardPeriod === 'geral') && `Produção Mensal (${currentYear})`}
                 </h3>
                 {!isReadOnly && onNavigateTab && (
                   <button
@@ -1013,82 +1046,120 @@ export function HomeDashboard({
                 )}
               </div>
               <p className="text-[10px] text-[#71717a] mt-0.5">
-                Comparativo de 12 meses: volume realizado vs média histórica e meta de cada mês
+                {dashboardPeriod === 'dia' && 'Volume realizado em cada hora do dia (00h–23h)'}
+                {dashboardPeriod === 'mes' && 'Volume realizado em cada dia do mês selecionado'}
+                {(dashboardPeriod === 'ano' || dashboardPeriod === 'geral') && 'Comparativo de 12 meses: volume realizado vs média histórica e meta de cada mês'}
               </p>
             </div>
-            <div className="flex items-center gap-3 text-[10px]">
-              <span className="flex items-center gap-1 text-[#a1a1aa] font-medium">
-                <span className="w-2.5 h-2.5 rounded-sm bg-[#52525b]"></span> Média Anterior
-              </span>
-              <span className="flex items-center gap-1 text-red-400 font-medium">
-                <span className="w-2.5 h-2.5 rounded-sm bg-red-500"></span> Realizado
-              </span>
-              <span className="flex items-center gap-1 text-blue-400 font-bold">
-                <svg width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
-                  <line x1="0" y1="5" x2="14" y2="5" stroke="#3b82f6" strokeWidth="2" strokeDasharray="3 2" />
-                  <circle cx="7" cy="5" r="2.5" fill="#3b82f6" />
-                </svg>
-                Meta (por mês)
-              </span>
-            </div>
+            {(dashboardPeriod === 'ano' || dashboardPeriod === 'geral') && (
+              <div className="flex items-center gap-3 text-[10px]">
+                <span className="flex items-center gap-1 text-[#a1a1aa] font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#52525b]"></span> Média Anterior
+                </span>
+                <span className="flex items-center gap-1 text-red-400 font-medium">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-red-500"></span> Realizado
+                </span>
+                <span className="flex items-center gap-1 text-blue-400 font-bold">
+                  <svg width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
+                    <line x1="0" y1="5" x2="14" y2="5" stroke="#3b82f6" strokeWidth="2" strokeDasharray="3 2" />
+                    <circle cx="7" cy="5" r="2.5" fill="#3b82f6" />
+                  </svg>
+                  Meta (por mês)
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* Em telas estreitas os 12 meses ficam ilegíveis se espremidos no
-              container — deixamos o gráfico com uma largura mínima e o
-              container rola horizontalmente em vez de comprimir as barras. */}
+          {/* Em telas estreitas os 12 meses (ou 24h/31 dias) ficam ilegíveis
+              se espremidos no container — deixamos o gráfico com uma largura
+              mínima e o container rola horizontalmente em vez de comprimir
+              as barras. */}
           <div className="h-[210px] w-full overflow-x-auto">
             <div className="h-full min-w-[600px]">
               <ResponsiveContainer width="100%" height="100%">
-                {/* ComposedChart (não BarChart) porque a Meta agora é uma
-                    linha com um valor DIFERENTE por mês (dataKey="meta"),
-                    não mais uma única ReferenceLine reta repetindo a meta do
-                    mês atual pro ano inteiro. */}
-                <ComposedChart
-                  data={monthlyChartData}
-                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
-                  onClick={(state: any) => {
-                    // Clicar num mês abre o filtro "Mês" já naquele mês específico
-                    const clickedMonth = state?.activePayload?.[0]?.payload?.month;
-                    if (typeof clickedMonth === 'number') {
-                      setSelectedMonth(clickedMonth);
-                      setDashboardPeriod('mes');
-                    }
-                  }}
-                  className="cursor-pointer"
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                  <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
-                  <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
-                    formatter={(value: any, name: any) => [
-                      `${Number(value || 0).toLocaleString('pt-BR')} un`,
-                      name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name === 'meta' ? 'Meta do mês' : name
-                    ]}
-                  />
-                  <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
-                  <Bar dataKey="realizado" radius={[4, 4, 0, 0]} name="Realizado">
-                    {monthlyChartData.map((entry) => (
-                      <Cell
-                        key={entry.month}
-                        fill={dashboardPeriod === 'mes' && entry.month === selectedMonth ? '#f97316' : '#ef4444'}
-                        cursor="pointer"
-                      />
-                    ))}
-                  </Bar>
-                  {/* Meta: um ponto por mês, com o valor real daquele mês
-                      (factory_monthly_goal), em vez de uma reta única. */}
-                  <Line
-                    type="monotone"
-                    dataKey="meta"
-                    name="Meta"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    strokeDasharray="5 3"
-                    dot={{ r: 3.5, fill: '#3b82f6', strokeWidth: 0 }}
-                    activeDot={{ r: 5 }}
-                  />
-                </ComposedChart>
+                {dashboardPeriod === 'dia' ? (
+                  <BarChart data={hourlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis dataKey="label" stroke="#71717a" fontSize={9} tickLine={false} interval={1} />
+                    <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                      formatter={(value: any) => [`${Number(value || 0).toLocaleString('pt-BR')} un`, 'Realizado']}
+                      labelFormatter={(label) => `Hora ${label}`}
+                    />
+                    <Bar dataKey="quantity" fill="#ef4444" radius={[4, 4, 0, 0]} name="Realizado" />
+                  </BarChart>
+                ) : dashboardPeriod === 'mes' ? (
+                  <BarChart data={dailyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis dataKey="label" stroke="#71717a" fontSize={9} tickLine={false} interval={selectedMonth === currentMonth ? 1 : 2} />
+                    <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                      formatter={(value: any) => [`${Number(value || 0).toLocaleString('pt-BR')} un`, 'Realizado']}
+                      labelFormatter={(label) => `Dia ${label}`}
+                    />
+                    <Bar dataKey="quantity" radius={[4, 4, 0, 0]} name="Realizado">
+                      {dailyChartData.map((entry) => (
+                        <Cell
+                          key={entry.day}
+                          fill={selectedMonth === currentMonth && entry.day === new Date().getDate() ? '#f97316' : '#ef4444'}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                ) : (
+                  // ComposedChart (não BarChart) porque a Meta aqui é uma
+                  // linha com um valor DIFERENTE por mês (dataKey="meta"),
+                  // não uma única reta repetindo a meta do mês atual pro ano
+                  // inteiro.
+                  <ComposedChart
+                    data={monthlyChartData}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                    onClick={(state: any) => {
+                      // Clicar num mês abre o filtro "Mês" já naquele mês específico
+                      const clickedMonth = state?.activePayload?.[0]?.payload?.month;
+                      if (typeof clickedMonth === 'number') {
+                        setSelectedMonth(clickedMonth);
+                        setDashboardPeriod('mes');
+                      }
+                    }}
+                    className="cursor-pointer"
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
+                    <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                      formatter={(value: any, name: any) => [
+                        `${Number(value || 0).toLocaleString('pt-BR')} un`,
+                        name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name === 'meta' ? 'Meta do mês' : name
+                      ]}
+                    />
+                    <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
+                    <Bar dataKey="realizado" radius={[4, 4, 0, 0]} name="Realizado">
+                      {monthlyChartData.map((entry) => (
+                        <Cell
+                          key={entry.month}
+                          fill={dashboardPeriod === 'mes' && entry.month === selectedMonth ? '#f97316' : '#ef4444'}
+                          cursor="pointer"
+                        />
+                      ))}
+                    </Bar>
+                    {/* Meta: um ponto por mês, com o valor real daquele mês
+                        (factory_monthly_goal), em vez de uma reta única. */}
+                    <Line
+                      type="monotone"
+                      dataKey="meta"
+                      name="Meta"
+                      stroke="#3b82f6"
+                      strokeWidth={2}
+                      strokeDasharray="5 3"
+                      dot={{ r: 3.5, fill: '#3b82f6', strokeWidth: 0 }}
+                      activeDot={{ r: 5 }}
+                    />
+                  </ComposedChart>
+                )}
               </ResponsiveContainer>
             </div>
           </div>
