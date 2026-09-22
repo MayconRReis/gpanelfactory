@@ -9,11 +9,12 @@ import {
   Sparkles,
   Filter,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal } from '../types';
 import { groupProductionByDayAndSetor, groupProductionByMonth, calculateOEE } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
 import {
   ResponsiveContainer,
+  ComposedChart,
   BarChart,
   Bar,
   Cell,
@@ -23,7 +24,6 @@ import {
   XAxis,
   YAxis,
   Tooltip,
-  ReferenceLine,
   CartesianGrid,
 } from 'recharts';
 
@@ -37,6 +37,10 @@ interface HomeDashboardProps {
   goals?: MonthlyGoal[];
   /** Meta mensal ÚNICA da fábrica (tabela factory_monthly_goal), editada via GoalsModal na Sidebar. */
   factoryMonthlyGoal?: number | null;
+  /** Metas mensais da fábrica de TODOS os meses do ano — usada pra mostrar a
+   * meta certa de cada mês no gráfico "Produção Mensal" (cada mês tem a sua
+   * própria meta, em vez de repetir a meta do mês atual pro ano inteiro). */
+  factoryMonthlyGoals?: FactoryMonthlyGoal[];
   /** Metas diárias fixas por linha (tabela line_daily_goals), editadas via GoalsModal na Sidebar. */
   lineDailyGoals?: LineDailyGoal[];
   onNavigateTab?: (tab: 'cronograma' | 'ops' | 'users' | 'events' | 'daily_production') => void;
@@ -151,6 +155,7 @@ export function HomeDashboard({
   rotations = {},
   goals = [],
   factoryMonthlyGoal = null,
+  factoryMonthlyGoals = [],
   lineDailyGoals = [],
   onNavigateTab,
   onOpenShareModal,
@@ -590,12 +595,23 @@ export function HomeDashboard({
     const avgHistorical = Math.round(activeMonthGoal * 0.85); // Referência de média anterior
 
     return grouped.map((item) => {
+      // Prioridade igual à do card de meta mensal atual (linha ~185): meta
+      // ÚNICA da fábrica daquele mês específico primeiro; só cai pro cálculo
+      // legado por linha (monthly_goals) enquanto aquele mês ainda não tiver
+      // meta da fábrica configurada; e só usa o valor do mês atual como
+      // último recurso, pra mês sem nenhuma meta cadastrada.
       let goalVal = activeMonthGoal;
-      if (goals && goals.length > 0) {
-        const gForMonth = goals.filter(g => g.year === currentYear && g.month === (item.month + 1));
-        if (gForMonth.length > 0) {
-          goalVal = gForMonth.reduce((sum, g) => sum + g.goalQuantity, 0);
-        }
+      const gForMonth = goals && goals.length > 0
+        ? goals.filter(g => g.year === currentYear && g.month === (item.month + 1))
+        : [];
+      if (gForMonth.length > 0) {
+        goalVal = gForMonth.reduce((sum, g) => sum + g.goalQuantity, 0);
+      }
+      const factoryGoalForMonth = factoryMonthlyGoals.find(
+        g => g.year === currentYear && g.month === (item.month + 1)
+      );
+      if (factoryGoalForMonth) {
+        goalVal = factoryGoalForMonth.goalQuantity;
       }
       return {
         monthName: item.label,
@@ -606,7 +622,7 @@ export function HomeDashboard({
         isCurrent: item.month === currentMonth,
       };
     });
-  }, [ops, goals, currentYear, currentMonth, activeMonthGoal]);
+  }, [ops, goals, factoryMonthlyGoals, currentYear, currentMonth, activeMonthGoal]);
 
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
@@ -997,7 +1013,7 @@ export function HomeDashboard({
                 )}
               </div>
               <p className="text-[10px] text-[#71717a] mt-0.5">
-                Comparativo de 12 meses: volume realizado vs média histórica e meta
+                Comparativo de 12 meses: volume realizado vs média histórica e meta de cada mês
               </p>
             </div>
             <div className="flex items-center gap-3 text-[10px]">
@@ -1007,8 +1023,12 @@ export function HomeDashboard({
               <span className="flex items-center gap-1 text-red-400 font-medium">
                 <span className="w-2.5 h-2.5 rounded-sm bg-red-500"></span> Realizado
               </span>
-              <span className="flex items-center gap-1 text-blue-400 font-medium">
-                <span className="w-3 h-0.5 bg-blue-500 border-t border-dashed"></span> Meta
+              <span className="flex items-center gap-1 text-blue-400 font-bold">
+                <svg width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
+                  <line x1="0" y1="5" x2="14" y2="5" stroke="#3b82f6" strokeWidth="2" strokeDasharray="3 2" />
+                  <circle cx="7" cy="5" r="2.5" fill="#3b82f6" />
+                </svg>
+                Meta (por mês)
               </span>
             </div>
           </div>
@@ -1019,7 +1039,11 @@ export function HomeDashboard({
           <div className="h-[210px] w-full overflow-x-auto">
             <div className="h-full min-w-[600px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart
+                {/* ComposedChart (não BarChart) porque a Meta agora é uma
+                    linha com um valor DIFERENTE por mês (dataKey="meta"),
+                    não mais uma única ReferenceLine reta repetindo a meta do
+                    mês atual pro ano inteiro. */}
+                <ComposedChart
                   data={monthlyChartData}
                   margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
                   onClick={(state: any) => {
@@ -1039,10 +1063,9 @@ export function HomeDashboard({
                     contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
                     formatter={(value: any, name: any) => [
                       `${Number(value || 0).toLocaleString('pt-BR')} un`,
-                      name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name
+                      name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name === 'meta' ? 'Meta do mês' : name
                     ]}
                   />
-                  <ReferenceLine y={activeMonthGoal} stroke="#3b82f6" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: 'Meta Mês', fill: '#3b82f6', fontSize: 9, position: 'insideTopRight' }} />
                   <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
                   <Bar dataKey="realizado" radius={[4, 4, 0, 0]} name="Realizado">
                     {monthlyChartData.map((entry) => (
@@ -1053,7 +1076,19 @@ export function HomeDashboard({
                       />
                     ))}
                   </Bar>
-                </BarChart>
+                  {/* Meta: um ponto por mês, com o valor real daquele mês
+                      (factory_monthly_goal), em vez de uma reta única. */}
+                  <Line
+                    type="monotone"
+                    dataKey="meta"
+                    name="Meta"
+                    stroke="#3b82f6"
+                    strokeWidth={2}
+                    strokeDasharray="5 3"
+                    dot={{ r: 3.5, fill: '#3b82f6', strokeWidth: 0 }}
+                    activeDot={{ r: 5 }}
+                  />
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
           </div>

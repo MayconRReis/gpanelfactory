@@ -488,12 +488,20 @@ let inMemoryEvents: ProductionEvent[] = [];
 let inMemoryRotations: Record<string, string> = {};
 let inMemoryProfiles: UserProfile[] = [];
 
-// Blacklist persistente de OPs excluídas e timestamp do último reset geral
+// Blacklist persistente de OPs excluídas (por id específico — não afeta OPs
+// futuras nem históricas, só as que o usuário realmente excluiu uma a uma).
+//
+// Havia também um "timestamp do último reset geral" (SIG_PROD_OPS_RESET_TIME_V6)
+// que escondia no Dashboard qualquer OP com created_at <= aquele momento. Como
+// o botão de resetar produção já apaga de verdade no Supabase
+// (DELETE FROM production_orders/ops abaixo), esse filtro por data no
+// navegador era redundante — e tinha o efeito colateral de esconder
+// permanentemente qualquer dado histórico importado depois com uma data de
+// produção anterior ao reset (foi a causa de um bug real: meses inteiros
+// sumindo do Dashboard). Removido.
 const DELETED_OPS_KEY = 'SIG_PROD_DELETED_OPS_V6';
-const RESET_TIMESTAMP_KEY = 'SIG_PROD_OPS_RESET_TIME_V6';
 
 let deletedOpIds = new Set<string>();
-let lastResetTimestamp = 0;
 
 if (typeof window !== 'undefined' && window.localStorage) {
   try {
@@ -504,10 +512,8 @@ if (typeof window !== 'undefined' && window.localStorage) {
         deletedOpIds = new Set(parsed);
       }
     }
-    const storedReset = window.localStorage.getItem(RESET_TIMESTAMP_KEY);
-    if (storedReset) {
-      lastResetTimestamp = Number(storedReset) || 0;
-    }
+    // Limpa a trava antiga de reset por data, caso ainda exista no navegador.
+    window.localStorage.removeItem('SIG_PROD_OPS_RESET_TIME_V6');
   } catch {}
 }
 
@@ -515,7 +521,6 @@ function saveDeletedOpIds() {
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       window.localStorage.setItem(DELETED_OPS_KEY, JSON.stringify(Array.from(deletedOpIds)));
-      window.localStorage.setItem(RESET_TIMESTAMP_KEY, String(lastResetTimestamp));
     } catch {}
   }
 }
@@ -1515,12 +1520,6 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
         .filter((op) => {
           if (isMockOp(op)) return false;
           if (deletedOpIds.has(op.id)) return false;
-          if (lastResetTimestamp > 0 && op.createdAt) {
-            const opCreated = new Date(op.createdAt).getTime();
-            if (!isNaN(opCreated) && opCreated <= lastResetTimestamp) {
-              return false;
-            }
-          }
           return true;
         });
 
@@ -2015,6 +2014,35 @@ export const getFactoryMonthlyGoal = async (year: number, month: number): Promis
     console.warn('Erro ao buscar meta mensal da fábrica no Supabase:', err);
   }
   return null;
+};
+
+/**
+ * Busca as metas mensais ÚNICAS da fábrica para TODOS os meses de um ano
+ * (uma linha por mês em que alguém já salvou uma meta — meses sem meta
+ * cadastrada simplesmente não aparecem no array). Usado pelo gráfico
+ * "Produção Mensal" do Dashboard para mostrar a meta certa de cada mês, em
+ * vez de repetir a meta do mês atual pro ano inteiro.
+ */
+export const getFactoryMonthlyGoals = async (year: number): Promise<FactoryMonthlyGoal[]> => {
+  try {
+    const { data, error } = await supabase
+      .from('factory_monthly_goal')
+      .select('*')
+      .eq('year', year)
+      .order('month', { ascending: true });
+
+    if (data && !error) {
+      return data.map((d: any) => ({
+        year: Number(d.year),
+        month: Number(d.month),
+        goalQuantity: Number(d.goal_quantity || 0),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas mensais da fábrica no Supabase:', err);
+  }
+  return [];
 };
 
 /**
@@ -2926,9 +2954,9 @@ export const updateProducedQuantityDirect = async (
 
 // ---------------- DATABASE RESET & CLEANUP ----------------
 export const clearAllOPs = async (): Promise<void> => {
-  // Registra todas as OPs atuais como excluídas e salva o timestamp do reset
+  // Registra todas as OPs atuais como excluídas (por id — o DELETE real no
+  // Supabase abaixo é quem efetivamente limpa os dados)
   inMemoryOps.forEach(op => deletedOpIds.add(op.id));
-  lastResetTimestamp = Date.now();
   saveDeletedOpIds();
 
   inMemoryOps = [];
@@ -2965,9 +2993,9 @@ export const clearAllEvents = async (): Promise<void> => {
 };
 
 export const resetProductionDatabase = async (): Promise<void> => {
-  // Registra todas as OPs atuais como excluídas e salva o timestamp do reset
+  // Registra todas as OPs atuais como excluídas (por id — o DELETE real no
+  // Supabase abaixo é quem efetivamente limpa os dados)
   inMemoryOps.forEach(op => deletedOpIds.add(op.id));
-  lastResetTimestamp = Date.now();
   saveDeletedOpIds();
 
   inMemoryOps = [];

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Target, Check, X, Loader2, CalendarClock, CalendarDays } from 'lucide-react';
+import { Target, Check, X, Loader2, CalendarClock, CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from './ui/button';
-import { ProductionLine, LineDailyGoal } from '../types';
+import { ProductionLine, LineDailyGoal, FactoryMonthlyGoal } from '../types';
 import { saveLineDailyGoal, saveFactoryMonthlyGoal } from '../services/db';
 
 interface GoalsModalProps {
@@ -9,7 +9,13 @@ interface GoalsModalProps {
   onClose: () => void;
   lines: ProductionLine[];
   factoryMonthlyGoal: number | null;
+  /** Metas mensais da fábrica de TODOS os meses do ano corrente — permite
+   * editar a meta de qualquer mês, não só o atual. */
+  factoryMonthlyGoals: FactoryMonthlyGoal[];
   lineDailyGoals: LineDailyGoal[];
+  /** Chamado depois de salvar uma meta mensal, pra quem estiver segurando o
+   * estado (CoordinatorDashboard) recarregar os dados e refletir na hora. */
+  onGoalsSaved?: () => void;
 }
 
 const MONTH_NAMES = [
@@ -25,22 +31,40 @@ const MONTH_NAMES = [
  * para o Coordenador Geral (ver Sidebar.tsx), já que só ele tem permissão de
  * escrita nessas tabelas via RLS.
  */
-export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, lineDailyGoals }: GoalsModalProps) {
+export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, factoryMonthlyGoals = [], lineDailyGoals, onGoalsSaved }: GoalsModalProps) {
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
+
+  // Mês que está sendo editado no momento, dentro do ano corrente — começa
+  // no mês atual, mas o usuário pode navegar pra qualquer outro mês do ano
+  // pra definir a meta dele especificamente (antes só dava pra editar o mês
+  // atual).
+  const selectedYear = currentYear;
+  const [selectedMonth, setSelectedMonth] = useState(currentMonth);
 
   const [monthlyInput, setMonthlyInput] = useState('0');
   const [dailyInputs, setDailyInputs] = useState<Record<string, string>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
   const [savedFlashId, setSavedFlashId] = useState<string | null>(null);
 
-  // Preenche os campos com os valores atuais só quando o modal abre — assim
-  // não perdemos o que o usuário está digitando se um refresh (realtime ou
-  // polling) acontecer com o modal já aberto.
+  // Preenche os campos com os valores atuais só quando o modal abre, ou
+  // quando o usuário troca de mês/ano — assim não perdemos o que ele está
+  // digitando se um refresh (realtime ou polling) acontecer com o modal já
+  // aberto.
   useEffect(() => {
     if (!isOpen) return;
-    setMonthlyInput(String(factoryMonthlyGoal ?? 0));
+    const isCurrentMonth = selectedYear === currentYear && selectedMonth === currentMonth;
+    const existing = factoryMonthlyGoals.find((g) => g.year === selectedYear && g.month === selectedMonth);
+    const fallback = isCurrentMonth ? factoryMonthlyGoal : null;
+    setMonthlyInput(String(existing?.goalQuantity ?? fallback ?? 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, selectedYear, selectedMonth]);
+
+  // Metas diárias por linha não são por mês — só precisam recarregar quando
+  // o modal abre.
+  useEffect(() => {
+    if (!isOpen) return;
     const dMap: Record<string, string> = {};
     lines.forEach((line) => {
       const d = lineDailyGoals.find((dg) => dg.lineId === line.id);
@@ -57,13 +81,32 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, lineDai
     setTimeout(() => setSavedFlashId((prev) => (prev === id ? null : prev)), 2000);
   };
 
+  // Navegação fica dentro do ano corrente — é o período pro qual
+  // `factoryMonthlyGoals` foi carregado e que o gráfico "Produção Mensal"
+  // exibe; sair do ano atual mostraria valores desatualizados ou vazios.
+  const canGoPrev = !(selectedYear === currentYear && selectedMonth === 1);
+  const canGoNext = !(selectedYear === currentYear && selectedMonth === 12);
+
+  const goToPrevMonth = () => {
+    if (!canGoPrev) return;
+    setSelectedMonth((m) => (m === 1 ? 12 : m - 1));
+  };
+
+  const goToNextMonth = () => {
+    if (!canGoNext) return;
+    setSelectedMonth((m) => (m === 12 ? 1 : m + 1));
+  };
+
   const handleSaveMonthly = async () => {
     const val = parseInt(monthlyInput, 10);
     if (isNaN(val) || val < 0) return;
     setSavingId('monthly');
-    const ok = await saveFactoryMonthlyGoal(currentYear, currentMonth, val);
+    const ok = await saveFactoryMonthlyGoal(selectedYear, selectedMonth, val);
     setSavingId(null);
-    if (ok) flashSaved('monthly');
+    if (ok) {
+      flashSaved('monthly');
+      onGoalsSaved?.();
+    }
   };
 
   const handleSaveDaily = async (lineId: string) => {
@@ -113,15 +156,44 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, lineDai
             <div className="flex items-center gap-2">
               <CalendarDays className="w-4 h-4 text-blue-400" />
               <h4 className="text-xs font-bold text-[#f4f4f5] uppercase tracking-wide">
-                Meta Mensal da Fábrica • {MONTH_NAMES[currentMonth - 1]}/{currentYear}
+                Meta Mensal da Fábrica
               </h4>
             </div>
             <p className="text-[11px] text-[#71717a] -mt-1.5">
-              Um único total para a fábrica inteira no mês (ex: 450.000 un). Fica fixo até você editar.
+              Um total para a fábrica inteira em cada mês (ex: 450.000 un). Cada mês tem a sua própria meta —
+              navegue pelos meses abaixo pra definir a de qualquer um deles, inclusive meses futuros.
             </p>
 
+            {/* Navegador de mês/ano — antes só dava pra editar o mês atual */}
+            <div className="flex items-center justify-between bg-[#13131a] border border-[#232330] rounded-xl px-2 py-1.5">
+              <button
+                type="button"
+                onClick={goToPrevMonth}
+                className="p-1.5 rounded-lg text-[#a1a1aa] hover:text-white hover:bg-[#1e1e28] transition-colors"
+                title="Mês anterior"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="text-xs font-bold text-[#f4f4f5]">
+                {MONTH_NAMES[selectedMonth - 1]}/{selectedYear}
+                {selectedYear === currentYear && selectedMonth === currentMonth && (
+                  <span className="ml-1.5 text-[9px] font-semibold text-blue-400 uppercase">atual</span>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={goToNextMonth}
+                className="p-1.5 rounded-lg text-[#a1a1aa] hover:text-white hover:bg-[#1e1e28] transition-colors"
+                title="Próximo mês"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+
             <div className="flex items-center gap-2 bg-[#171720] border border-[#232330] rounded-xl px-3 py-2.5">
-              <span className="text-xs font-semibold text-[#f4f4f5] flex-1">Meta do mês</span>
+              <span className="text-xs font-semibold text-[#f4f4f5] flex-1">
+                Meta de {MONTH_NAMES[selectedMonth - 1]}
+              </span>
               <input
                 type="number"
                 min={0}

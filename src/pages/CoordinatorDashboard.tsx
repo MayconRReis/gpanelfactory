@@ -72,11 +72,12 @@ import {
   getMonthlyGoals,
   getLineDailyGoals,
   getFactoryMonthlyGoal,
+  getFactoryMonthlyGoals,
   getTipoDocumento,
   resetLeaderPassword,
   updateUserRule
 } from '../services/db';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, AccessRule } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule } from '../types';
 import { supabase } from '../lib/supabase';
 import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
@@ -150,6 +151,11 @@ export function CoordinatorDashboard() {
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
   const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
   const [factoryMonthlyGoal, setFactoryMonthlyGoal] = useState<number | null>(null);
+  // Metas mensais da fábrica de TODOS os meses do ano — usado pelo gráfico
+  // "Produção Mensal" pra mostrar a meta certa de cada mês (em vez de repetir
+  // a meta do mês atual pro ano inteiro) e pelo GoalsModal pra editar a meta
+  // de qualquer mês, não só o atual.
+  const [factoryMonthlyGoals, setFactoryMonthlyGoals] = useState<FactoryMonthlyGoal[]>([]);
 
   // UI state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -266,7 +272,7 @@ export function CoordinatorDashboard() {
     try {
       const currentYear = new Date().getFullYear();
       const currentMonth = new Date().getMonth() + 1;
-      const [ls, os, lds, usrs, rots, evts, prs, gls, ldgs, fmg] = await Promise.all([
+      const [ls, os, lds, usrs, rots, evts, prs, gls, ldgs, fmg, fmgs] = await Promise.all([
         getLines(),
         getAllOPs(),
         getLeaders(),
@@ -277,6 +283,7 @@ export function CoordinatorDashboard() {
         getMonthlyGoals(currentYear),
         getLineDailyGoals(),
         getFactoryMonthlyGoal(currentYear, currentMonth),
+        getFactoryMonthlyGoals(currentYear),
       ]);
       setLines(ls);
       setOps(os);
@@ -288,6 +295,7 @@ export function CoordinatorDashboard() {
       setGoals(gls || []);
       setLineDailyGoals(ldgs || []);
       setFactoryMonthlyGoal(fmg);
+      setFactoryMonthlyGoals(fmgs || []);
     } catch (e) {
       console.warn('Erro ao carregar dados do coordenador:', e);
     } finally {
@@ -1205,6 +1213,7 @@ WHERE email IN (
                 rotations={rotations}
                 goals={goals}
                 factoryMonthlyGoal={factoryMonthlyGoal}
+                factoryMonthlyGoals={factoryMonthlyGoals}
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
@@ -3254,7 +3263,9 @@ WHERE email IN (
         onClose={() => setShowGoalsModal(false)}
         lines={lines}
         factoryMonthlyGoal={factoryMonthlyGoal}
+        factoryMonthlyGoals={factoryMonthlyGoals}
         lineDailyGoals={lineDailyGoals}
+        onGoalsSaved={loadData}
       />
 
     </div>
