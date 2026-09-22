@@ -1442,11 +1442,41 @@ export function getTipoDocumento(
   return 'OP';
 }
 
+// Busca TODAS as linhas de uma tabela, paginando com .range() em vez de um
+// único select() sem limite — o Supabase/PostgREST aplica um teto de linhas
+// por requisição (Max Rows do projeto, geralmente 1000), e sem isso qualquer
+// tabela que passe desse teto tem linhas cortadas silenciosamente (sem erro).
+// Ordena por `sequence` + `id` (desempate determinístico) porque muitas OPs
+// importadas do histórico compartilham o mesmo valor de `sequence` — sem um
+// desempate único, a paginação por .range() pode pular ou repetir linhas
+// empatadas entre uma página e outra.
+async function fetchAllRows(table: 'production_orders' | 'ops'): Promise<{ data: any[] | null; error: any }> {
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('*')
+      .order('sequence', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) {
+      return { data: allRows.length > 0 ? allRows : null, error };
+    }
+    if (!data || data.length === 0) break;
+    allRows.push(...data);
+    if (data.length < PAGE_SIZE) break; // última página
+    offset += PAGE_SIZE;
+  }
+  return { data: allRows, error: null };
+}
+
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {
   try {
-    let { data, error } = await supabase.from('production_orders').select('*').order('sequence', { ascending: true });
+    let { data, error } = await fetchAllRows('production_orders');
     if (error || !data || data.length === 0) {
-      const res = await supabase.from('ops').select('*').order('sequence', { ascending: true });
+      const res = await fetchAllRows('ops');
       data = res.data;
       error = res.error;
     }
