@@ -136,19 +136,20 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
 
     fetchDataRef.current?.();
 
+    // "production_orders" é uma VIEW sobre "ops" — o Realtime só emite
+    // postgres_changes para a tabela física, então só precisamos de "ops".
     const channel = supabase
       .channel('pesagem-realtime-' + profile.uid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, () => {
-        fetchDataRef.current?.(true);
-      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => {
         fetchDataRef.current?.(true);
       })
       .subscribe();
 
+    // Fallback: o Realtime agora cobre de fato as mudanças, então isso é só
+    // uma rede de segurança caso a conexão realtime caia.
     const interval = setInterval(() => {
       fetchDataRef.current?.(true);
-    }, 5000);
+    }, 15000);
 
     return () => {
       supabase.removeChannel(channel);

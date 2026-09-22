@@ -16,6 +16,7 @@ import {
   ResponsiveContainer,
   BarChart,
   Bar,
+  Cell,
   LineChart,
   Line,
   Legend,
@@ -332,6 +333,12 @@ export function HomeDashboard({
   // continua sempre "hoje".
   const [dashboardPeriod, setDashboardPeriod] = useState<'dia' | 'mes' | 'ano' | 'geral'>('dia');
 
+  // Mês exibido quando o filtro é "Mês" (0 = Janeiro ... 11 = Dezembro, sempre
+  // do ano corrente) — por padrão o mês atual, mas pode ser trocado pelo
+  // dropdown ao lado do filtro ou clicando numa barra do gráfico "Produção
+  // Mensal" mais abaixo.
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth());
+
   const PERIOD_LABELS: Record<typeof dashboardPeriod, string> = {
     dia: 'Hoje',
     mes: 'Mês',
@@ -349,8 +356,17 @@ export function HomeDashboard({
     }
 
     if (dashboardPeriod === 'mes') {
-      const rangeStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-      return { rangeStart, rangeEnd: todayDateStr, days: now.getDate() };
+      // Usa o mês escolhido no dropdown (padrão: mês atual) em vez de sempre
+      // o mês corrente — permite ver Ago/26, Jul/26 etc. sem trocar pra "Geral".
+      const year = now.getFullYear();
+      const rangeStart = `${year}-${String(selectedMonth + 1).padStart(2, '0')}-01`;
+      const isCurrentMonth = selectedMonth === now.getMonth();
+      const lastDayOfMonth = new Date(year, selectedMonth + 1, 0).getDate();
+      const rangeEnd = isCurrentMonth
+        ? todayDateStr
+        : `${year}-${String(selectedMonth + 1).padStart(2, '0')}-${String(lastDayOfMonth).padStart(2, '0')}`;
+      const days = isCurrentMonth ? now.getDate() : lastDayOfMonth;
+      return { rangeStart, rangeEnd, days };
     }
 
     if (dashboardPeriod === 'ano') {
@@ -374,7 +390,7 @@ export function HomeDashboard({
       ? Math.max(1, Math.floor((now.getTime() - earliestMs) / (1000 * 60 * 60 * 24)) + 1)
       : 1;
     return { rangeStart: undefined, rangeEnd: undefined, days: daysElapsed };
-  }, [dashboardPeriod, todayDateStr, ops, events]);
+  }, [dashboardPeriod, selectedMonth, todayDateStr, ops, events]);
 
   // Métricas de Tempo do PERÍODO selecionado (Dia/Mês/Ano/Geral)
   const periodProductionTime = useMemo(() => {
@@ -632,6 +648,21 @@ export function HomeDashboard({
                 </button>
               ))}
             </div>
+
+            {/* Dropdown de mês — só aparece com o filtro "Mês" ativo, para
+                ver a produção de um mês específico sem precisar ir pro "Geral" */}
+            {dashboardPeriod === 'mes' && (
+              <select
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                className="bg-[#0e0e12] border border-[#202028] rounded-xl px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider text-[#a1a1aa] hover:text-white focus:text-white focus:outline-none focus:ring-1 focus:ring-blue-600 cursor-pointer"
+                title="Escolher o mês exibido no filtro &quot;Mês&quot;"
+              >
+                {MONTH_LABELS_SHORT.map((label, idx) => (
+                  <option key={idx} value={idx}>{label}/{currentYear}</option>
+                ))}
+              </select>
+            )}
 
             {!isReadOnly && onOpenShareModal && (
               <button
@@ -988,7 +1019,19 @@ export function HomeDashboard({
           <div className="h-[210px] w-full overflow-x-auto">
             <div className="h-full min-w-[600px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <BarChart
+                  data={monthlyChartData}
+                  margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  onClick={(state: any) => {
+                    // Clicar num mês abre o filtro "Mês" já naquele mês específico
+                    const clickedMonth = state?.activePayload?.[0]?.payload?.month;
+                    if (typeof clickedMonth === 'number') {
+                      setSelectedMonth(clickedMonth);
+                      setDashboardPeriod('mes');
+                    }
+                  }}
+                  className="cursor-pointer"
+                >
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
                   <YAxis stroke="#71717a" fontSize={10} tickLine={false} tickFormatter={(val) => val >= 1000 ? `${(val / 1000).toFixed(0)}k` : `${val}`} />
@@ -1001,7 +1044,15 @@ export function HomeDashboard({
                   />
                   <ReferenceLine y={activeMonthGoal} stroke="#3b82f6" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: 'Meta Mês', fill: '#3b82f6', fontSize: 9, position: 'insideTopRight' }} />
                   <Bar dataKey="mediaAnterior" fill="#3f3f46" radius={[4, 4, 0, 0]} name="Média Anterior" />
-                  <Bar dataKey="realizado" fill="#ef4444" radius={[4, 4, 0, 0]} name="Realizado" />
+                  <Bar dataKey="realizado" radius={[4, 4, 0, 0]} name="Realizado">
+                    {monthlyChartData.map((entry) => (
+                      <Cell
+                        key={entry.month}
+                        fill={dashboardPeriod === 'mes' && entry.month === selectedMonth ? '#f97316' : '#ef4444'}
+                        cursor="pointer"
+                      />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>

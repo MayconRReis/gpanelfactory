@@ -213,16 +213,19 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
     const stable = () => fetchDataRef.current?.(true);
 
+    // Nota: "production_orders" e "production_events" são VIEWS sobre "ops" e
+    // "events" — o Supabase Realtime só emite postgres_changes para tabelas
+    // físicas (com REPLICA IDENTITY), então assinar o nome da view nunca
+    // disparava nada. Mantemos só as tabelas reais.
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stable)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, stable)
       .subscribe();
 
-    // Fallback: polling a cada 5s mesmo se Realtime cair
-    const interval = setInterval(() => fetchDataRef.current?.(true), 5000);
+    // Fallback: polling a cada 15s mesmo se o Realtime cair (o Realtime agora
+    // cobre de fato as mudanças, então isso é só uma rede de segurança)
+    const interval = setInterval(() => fetchDataRef.current?.(true), 15000);
 
     return () => {
       supabase.removeChannel(channel);
@@ -499,20 +502,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     };
   }, [lineOps, lineEvents, currentMonthStr, dailyMetrics.producedToday]);
 
-  // Loading state
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] flex flex-col items-center justify-center font-sans gap-3">
-        <div className="w-10 h-10 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 animate-pulse">
-          <Factory className="w-5 h-5" />
-        </div>
-        <p className="text-xs font-bold uppercase tracking-widest text-[#a1a1aa]">
-          Carregando Portal do Líder...
-        </p>
-      </div>
-    );
-  }
-
   // Progresso da OP ativa — pode passar de 100% quando o rendimento supera a meta prevista
   const opProgress = activeOp && activeOp.plannedQuantity > 0
     ? Math.round((activeOp.producedQuantity / activeOp.plannedQuantity) * 100)
@@ -575,6 +564,20 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const displayUnit = activeOp?.unidade || 'un';
   const qtyProducedLabel = 'Volume Produzido';
   const reportButtonLabel = 'APONTAR PRODUÇÃO';
+
+  // Loading state (executado após todos os hooks para obedecer às Rules of Hooks)
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] flex flex-col items-center justify-center font-sans gap-3">
+        <div className="w-10 h-10 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 animate-pulse">
+          <Factory className="w-5 h-5" />
+        </div>
+        <p className="text-xs font-bold uppercase tracking-widest text-[#a1a1aa]">
+          Carregando Portal do Líder...
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] font-sans flex flex-col antialiased space-y-4" : "min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white"}>

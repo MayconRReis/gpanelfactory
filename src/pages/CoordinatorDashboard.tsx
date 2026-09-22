@@ -254,7 +254,15 @@ export function CoordinatorDashboard() {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  // Evita recarregas sobrepostas: uma rajada de eventos Realtime (ex.: vários
+  // apontamentos seguidos) ou o poll de segurança caindo em cima de uma
+  // requisição ainda em andamento não deve empilhar múltiplas chamadas
+  // simultâneas a todas as tabelas.
+  const isLoadingDataRef = useRef(false);
+
   const loadData = async () => {
+    if (isLoadingDataRef.current) return;
+    isLoadingDataRef.current = true;
     try {
       const currentYear = new Date().getFullYear();
       const currentMonth = new Date().getMonth() + 1;
@@ -282,6 +290,8 @@ export function CoordinatorDashboard() {
       setFactoryMonthlyGoal(fmg);
     } catch (e) {
       console.warn('Erro ao carregar dados do coordenador:', e);
+    } finally {
+      isLoadingDataRef.current = false;
     }
   };
 
@@ -289,14 +299,17 @@ export function CoordinatorDashboard() {
     loadData();
 
     // Supabase Realtime Channels
+    // Nota: "production_lines", "production_orders" e "production_events" são
+    // VIEWS sobre "lines", "ops" e "events" — o Realtime só emite
+    // postgres_changes para a tabela física (com REPLICA IDENTITY), então
+    // essas 3 assinaturas duplicadas nunca disparavam nada; cada mudança real
+    // já chegava pelas tabelas base abaixo. Removê-las corta 1/3 dos eventos
+    // mortos deste canal.
     const channel = supabase
       .channel('coordinator-realtime-dashboard')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_lines' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'lines' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => loadData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => loadData())
@@ -304,8 +317,11 @@ export function CoordinatorDashboard() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'factory_monthly_goal' }, () => loadData())
       .subscribe();
 
-    // Fallback sync every 4 seconds
-    const interval = setInterval(loadData, 4000);
+    // Fallback sync — o Realtime acima agora cobre de fato todas as tabelas,
+    // então isso é só uma rede de segurança caso a conexão realtime caia,
+    // não o mecanismo principal de atualização (antes recarregava tudo a
+    // cada 4s incondicionalmente, mesmo sem nenhuma mudança).
+    const interval = setInterval(loadData, 15000);
 
     return () => {
       supabase.removeChannel(channel);

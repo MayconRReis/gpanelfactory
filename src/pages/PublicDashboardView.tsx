@@ -80,15 +80,20 @@ export function PublicDashboardView() {
     }, 30000);
 
     // 2. Realtime listener via Supabase
+    // Nota: "production_orders"/"production_lines"/"production_events" são
+    // VIEWS sobre "ops"/"lines"/"events" — o Realtime só emite postgres_changes
+    // para a tabela física, então essas 3 assinaturas nunca disparavam nada
+    // (este painel dependia só do polling de 30s acima). Corrigido para as
+    // tabelas reais, o que deixa a atualização de fato instantânea.
     const channel = supabase
       .channel('public_dashboard_realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => {
         loadData(true);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_lines' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lines' }, () => {
         loadData(true);
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_events' }, () => {
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => {
         loadData(true);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => {
