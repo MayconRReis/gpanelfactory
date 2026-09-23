@@ -1555,6 +1555,11 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
           finishedShift: d.finished_shift || undefined,
           isSleeve: sleeveIds.has(String(d.id)) || Boolean(d.is_sleeve || d.isSleeve),
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
+          // Antes este mapeamento nunca lia completed_at — fazia a trava de
+          // segurança em calculateProductionTime() (que fecha o intervalo de
+          // uma OP concluída no horário real de término) nunca funcionar,
+          // mesmo quando o banco tinha o valor certo.
+          completedAt: d.completed_at || d.completedAt || undefined,
         }))
         .filter((op) => {
           if (isMockOp(op)) return false;

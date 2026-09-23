@@ -149,6 +149,15 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // OSMs disponíveis da Pesagem (ainda não iniciadas na Manipulação)
   const availablePesagemOps = useMemo(() => {
     return ops.filter(op => {
+      // OPs importadas do histórico (id "imp-...") nunca devem aparecer aqui:
+      // a importação leu a aba de Pesagem e a aba de Manipulação da planilha
+      // separadamente (fluxos com granularidade diferente, não 1 pra 1), então
+      // o número/lote de uma OSM de Pesagem histórica quase nunca bate com o
+      // de uma OP de Manipulação histórica — mesmo com as duas etapas já
+      // concluídas de verdade no histórico, essa tela as tratava como um
+      // backlog real "aguardando manipulação", que nunca existiu.
+      if (op.id && op.id.startsWith('imp-')) return false;
+
       const isPesagemCompleted = (op.setor === 'Pesagem' || op.tipoDocumento === 'OSM') && op.status === 'completed' && op.setor !== 'Manipulação';
       if (!isPesagemCompleted) return false;
       // Não deve ter correspondente na Manipulação
