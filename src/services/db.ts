@@ -8,6 +8,7 @@ import {
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab } from '../types';
+import { calculateProductionTime } from '../lib/productionTime';
 
 /**
  * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
@@ -106,37 +107,21 @@ export function calculateOEE(
         disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
       }
     } else if (events && events.length > 0) {
-      // Fallback exato OEE baseado no histórico real de eventos:
-      // Disponibilidade = Tempo Trabalhado / (Tempo Trabalhado + Tempo de Pausas)
-      const pauseHours = calculateTotalPauseHours(events);
+      // Fallback OEE baseado no histórico real de eventos: reaproveita o mesmo
+      // cálculo de Tempo Trabalhado/Ocioso usado nos cards de Índice de
+      // Ociosidade (lib/productionTime.ts), para que os dois nunca divirjam.
+      // Desde a correção da ociosidade real (gaps entre OPs consecutivas do
+      // mesmo setor/turno/dia, a partir dos horários reais de início/fim já
+      // registrados), isso também passou a refletir corretamente meses
+      // importados do histórico que só têm STARTED/FINISHED (sem PAUSED),
+      // em vez de assumir 100% de disponibilidade por falta de pausas
+      // registradas explicitamente.
       const opIds = new Set(ops.map(o => o.id));
       const opEvents = events.filter(e => e.opId && opIds.has(e.opId));
-      let totalElapsedHours = 0;
+      const timeMetrics = calculateProductionTime(opEvents, ops, []);
 
-      const eventsByOp: Record<string, ProductionEvent[]> = {};
-      for (const ev of opEvents) {
-        if (!ev.opId) continue;
-        if (!eventsByOp[ev.opId]) eventsByOp[ev.opId] = [];
-        eventsByOp[ev.opId].push(ev);
-      }
-
-      for (const opId of Object.keys(eventsByOp)) {
-        const list = eventsByOp[opId];
-        const started = list.filter(e => e.type === 'STARTED');
-        if (started.length === 0) continue;
-        const firstStart = Math.min(...started.map(e => new Date(e.createdAt).getTime()).filter(t => !isNaN(t)));
-        const finished = list.filter(e => e.type === 'FINISHED');
-        const lastEnd = finished.length > 0
-          ? Math.max(...finished.map(e => new Date(e.createdAt).getTime()).filter(t => !isNaN(t)))
-          : Date.now();
-        if (lastEnd > firstStart) {
-          totalElapsedHours += (lastEnd - firstStart) / (1000 * 60 * 60);
-        }
-      }
-
-      if (totalElapsedHours > 0) {
-        const tempoRealProduzindo = Math.max(0, totalElapsedHours - pauseHours);
-        disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / totalElapsedHours));
+      if (timeMetrics.totalMs > 0) {
+        disponibilidade = Math.max(0, Math.min(1, timeMetrics.workingMs / timeMetrics.totalMs));
       }
     }
 
@@ -2523,23 +2508,68 @@ export const recordEventRemote = async (eventData: {
   }
 };
 
+// Busca TODOS os eventos (paginado, sem limite) — antes este fetch tinha um
+// `.limit(50)` fixo, aplicado sobre a fábrica INTEIRA (todas as linhas juntas,
+// não por linha/dia). Na prática isso significava que, fora do "agora
+// imediato", o Dashboard só enxergava os ~50 eventos mais recentes de toda a
+// fábrica — nenhum evento STARTED/FINISHED de dias ou meses anteriores nunca
+// chegava ao cálculo de Ociosidade/Disponibilidade (nem ao OEE), fazendo esses
+// indicadores aparecerem zerados/em branco para qualquer período que não
+// fosse o instante atual. A paginação abaixo usa o mesmo padrão já validado
+// em `fetchAllRows` (loop de 1000 em 1000), ordenando por `created_at` e,
+// como desempate, por `id` (evita perder/duplicar linhas quando há vários
+// eventos importados com o mesmo timestamp).
+async function fetchAllEventRows(table: 'production_events' | 'events'): Promise<{ data: any[] | null; error: any }> {
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('*')
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) {
+      return { data: allRows.length > 0 ? allRows : null, error };
+    }
+    if (!data || data.length === 0) break;
+    allRows.push(...data);
+    if (data.length < PAGE_SIZE) break; // última página
+    offset += PAGE_SIZE;
+  }
+  return { data: allRows, error: null };
+}
+
 export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
   try {
-    let { data, error } = await supabase
-      .from('production_events')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(50);
+    // IMPORTANTE: `recordEventRemote` grava todo evento AO VIVO em duas
+    // tabelas (`events` e `production_events` — dual-write, igual ops/
+    // production_orders), mas a importação histórica só gravou em `events`.
+    // Buscar só uma tabela e "cair" pra outra apenas se a primeira vier
+    // TOTALMENTE vazia (como era antes) nunca funcionava de verdade: como
+    // `production_events` sempre tem registros do uso ao vivo, ela nunca
+    // fica vazia, então os eventos STARTED/FINISHED da importação histórica
+    // (só em `events`) nunca chegavam a ser lidos — e sem eles, toda OP
+    // concluída caía no fallback "OP inteira = 100% trabalhada, 0% ocioso"
+    // do calculateProductionTime. Por isso agora buscamos as DUAS tabelas e
+    // unimos os resultados (por id), em vez de tratar uma como fallback da
+    // outra.
+    const [prodEventsRes, eventsRes] = await Promise.all([
+      fetchAllEventRows('production_events'),
+      fetchAllEventRows('events'),
+    ]);
 
-    if (error || !data || data.length === 0) {
-      const res = await supabase
-        .from('events')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(50);
-      data = res.data;
-      error = res.error;
+    const byId = new Map<string, any>();
+    for (const row of prodEventsRes.data || []) {
+      if (row && row.id != null) byId.set(String(row.id), row);
     }
+    for (const row of eventsRes.data || []) {
+      if (row && row.id != null && !byId.has(String(row.id))) byId.set(String(row.id), row);
+    }
+
+    const data = byId.size > 0 ? Array.from(byId.values()) : null;
+    const error = (prodEventsRes.error && eventsRes.error) ? (prodEventsRes.error || eventsRes.error) : null;
 
     if (data && data.length > 0 && !error) {
       const mapped: ProductionEvent[] = data
@@ -2559,7 +2589,10 @@ export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
           observation: e.observation || e.comments,
           createdAt: e.created_at || new Date().toISOString(),
         }))
-        .filter(e => !isMockEvent(e));
+        .filter(e => !isMockEvent(e))
+        // fetchAllEventRows pagina em ordem crescente (exigido pelo .range());
+        // devolve mais recente primeiro, como este fetch sempre devolveu.
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
       inMemoryEvents = mapped;
       persistEvents();
