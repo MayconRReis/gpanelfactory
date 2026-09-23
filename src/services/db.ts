@@ -88,40 +88,47 @@ export function calculateOEE(
       return { disponibilidade: null, performance: null, qualidade: null, oee: null };
     }
 
-    // 1. Disponibilidade = tempo_real_produzindo / tempo_planejado_total
-    const opsWithPlannedHours = ops.filter(op => op.plannedHours != null && op.plannedHours > 0);
+    // 1. Disponibilidade — SEMPRE prioriza o histórico real de eventos
+    // (reaproveita o mesmo cálculo de Tempo Trabalhado/Ocioso dos cards de
+    // Índice de Ociosidade, lib/productionTime.ts, incluindo pausas
+    // explícitas E os gaps reais entre OPs consecutivas), e só cai para a
+    // estimativa por "horas planejadas" quando NÃO existe nenhum evento
+    // STARTED/FINISHED pra essas OPs no período.
+    //
+    // Antes, a ordem era invertida: bastava 1 única OP do período ter
+    // `plannedHours` preenchido (ex.: uma OP criada manualmente, no meio de
+    // centenas de OPs importadas do histórico) pra descartar TODO o cálculo
+    // real por eventos e usar só aquela OP isolada — e como
+    // `calculateTotalPauseHours` só soma pausas explícitas (PAUSED), isso
+    // quase sempre dava ~100% de Disponibilidade pro mês inteiro, mascarando
+    // a ociosidade real já calculada corretamente pelas outras OPs.
     let disponibilidade: number | null = null;
+    const opIds = new Set(ops.map(o => o.id));
+    const opEvents = events ? events.filter(e => e.opId && opIds.has(e.opId)) : [];
 
-    if (opsWithPlannedHours.length > 0) {
-      const tempoPlanejadoTotal = opsWithPlannedHours.reduce(
-        (sum, op) => sum + (op.plannedHours || 0),
-        0
-      );
-
-      if (tempoPlanejadoTotal > 0) {
-        const relevantOpIds = new Set(opsWithPlannedHours.map(op => op.id));
-        const relevantEvents = events ? events.filter(e => e.opId && relevantOpIds.has(e.opId)) : [];
-        const pauseHours = calculateTotalPauseHours(relevantEvents.length > 0 ? relevantEvents : events || []);
-        
-        const tempoRealProduzindo = Math.max(0, tempoPlanejadoTotal - pauseHours);
-        disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
-      }
-    } else if (events && events.length > 0) {
-      // Fallback OEE baseado no histórico real de eventos: reaproveita o mesmo
-      // cálculo de Tempo Trabalhado/Ocioso usado nos cards de Índice de
-      // Ociosidade (lib/productionTime.ts), para que os dois nunca divirjam.
-      // Desde a correção da ociosidade real (gaps entre OPs consecutivas do
-      // mesmo setor/turno/dia, a partir dos horários reais de início/fim já
-      // registrados), isso também passou a refletir corretamente meses
-      // importados do histórico que só têm STARTED/FINISHED (sem PAUSED),
-      // em vez de assumir 100% de disponibilidade por falta de pausas
-      // registradas explicitamente.
-      const opIds = new Set(ops.map(o => o.id));
-      const opEvents = events.filter(e => e.opId && opIds.has(e.opId));
+    if (opEvents.length > 0) {
       const timeMetrics = calculateProductionTime(opEvents, ops, []);
-
       if (timeMetrics.totalMs > 0) {
         disponibilidade = Math.max(0, Math.min(1, timeMetrics.workingMs / timeMetrics.totalMs));
+      }
+    }
+
+    if (disponibilidade === null) {
+      const opsWithPlannedHours = ops.filter(op => op.plannedHours != null && op.plannedHours > 0);
+      if (opsWithPlannedHours.length > 0) {
+        const tempoPlanejadoTotal = opsWithPlannedHours.reduce(
+          (sum, op) => sum + (op.plannedHours || 0),
+          0
+        );
+
+        if (tempoPlanejadoTotal > 0) {
+          const relevantOpIds = new Set(opsWithPlannedHours.map(op => op.id));
+          const relevantEvents = opEvents.filter(e => e.opId && relevantOpIds.has(e.opId));
+          const pauseHours = calculateTotalPauseHours(relevantEvents.length > 0 ? relevantEvents : opEvents);
+
+          const tempoRealProduzindo = Math.max(0, tempoPlanejadoTotal - pauseHours);
+          disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
+        }
       }
     }
 

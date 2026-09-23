@@ -417,18 +417,42 @@ export function HomeDashboard({
   // dia"), enquanto a média representa o comportamento típico de uma linha.
   const avgLineProductionTime = useMemo(() => {
     const lineIds = lines.map(l => l.id);
-    if (lineIds.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0 };
 
     let sumWorkingMs = 0;
     let sumIdleMs = 0;
+    let matchedLines = 0;
     for (const lineId of lineIds) {
       const metrics = periodProductionTime.byLine[lineId];
-      sumWorkingMs += metrics?.workingMs || 0;
-      sumIdleMs += metrics?.idleMs || 0;
+      if (metrics && (metrics.workingMs > 0 || metrics.idleMs > 0)) {
+        sumWorkingMs += metrics.workingMs;
+        sumIdleMs += metrics.idleMs;
+        matchedLines += 1;
+      }
     }
+
+    if (matchedLines > 0) {
+      return {
+        avgWorkingMs: sumWorkingMs / matchedLines,
+        avgIdleMs: sumIdleMs / matchedLines,
+      };
+    }
+
+    // Nenhuma OP do período foi atribuída a uma linha cadastrada (comum nos
+    // meses importados do histórico — a granularidade de "qual linha/equipe"
+    // não foi capturada na importação, só o setor). Nesse caso, em vez de
+    // mostrar 0h/0% (Índice de Ociosidade zerado enganoso), usamos a MÉDIA
+    // por recurso (setor + turno: ex. "Pesagem|Manhã", "Envase|Tarde") em vez
+    // do total bruto da fábrica — somar Pesagem + Manipulação + Envase como
+    // se fosse 1 recurso só inflava o total acima das horas de calendário do
+    // próprio período (ex.: "3226h trabalhadas" num mês de 730h).
+    const resourceEntries = Object.values(periodProductionTime.byResource || {});
+    if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0 };
+
+    const totalResourceWorkingMs = resourceEntries.reduce((sum, r) => sum + r.workingMs, 0);
+    const totalResourceIdleMs = resourceEntries.reduce((sum, r) => sum + r.idleMs, 0);
     return {
-      avgWorkingMs: sumWorkingMs / lineIds.length,
-      avgIdleMs: sumIdleMs / lineIds.length,
+      avgWorkingMs: totalResourceWorkingMs / resourceEntries.length,
+      avgIdleMs: totalResourceIdleMs / resourceEntries.length,
     };
   }, [lines, periodProductionTime]);
 

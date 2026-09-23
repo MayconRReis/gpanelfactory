@@ -3,6 +3,10 @@ import { ProductionEvent, ProductionOrder, ProductionLine } from '../types';
 export interface TimelineInterval {
   opId?: string;
   lineId?: string;
+  /** Chave de "recurso" (setor + turno) — usada para agregar tempo quando a
+   * OP não está presa a uma linha cadastrada (comum no histórico importado),
+   * sem misturar o tempo de recursos diferentes como se fosse um só. */
+  resourceKey?: string;
   type: 'WORKING' | 'IDLE';
   startMs: number;
   endMs: number;
@@ -38,6 +42,10 @@ export interface FactoryTimeMetrics {
   idleFormatted: string;
   disponibilidade: number; // 0 a 100%
   byLine: Record<string, LineTimeMetrics>;
+  /** Tempo agregado por "recurso" (setor + turno) — ex.: "Envase|Manhã". Útil
+   * pra tirar uma média por recurso quando as OPs não têm linha cadastrada
+   * (histórico), sem somar o tempo de vários recursos como se fosse 1 só. */
+  byResource: Record<string, { workingMs: number; idleMs: number }>;
   intervals: TimelineInterval[];
 }
 
@@ -196,7 +204,8 @@ export function calculateProductionTime(
     opId?: string,
     lineId?: string,
     reason?: string,
-    observation?: string
+    observation?: string,
+    resourceKey?: string
   ) => {
     let actualStart = startMs;
     let actualEnd = Math.min(endMs, refTime);
@@ -217,6 +226,7 @@ export function calculateProductionTime(
     allIntervals.push({
       opId,
       lineId,
+      resourceKey,
       type,
       startMs: actualStart,
       endMs: actualEnd,
@@ -225,6 +235,11 @@ export function calculateProductionTime(
       observation,
     });
   };
+
+  // Chave de recurso (setor + turno) de uma OP — usada só como agregação
+  // auxiliar (byResource), nunca pra decidir o que é ocioso/trabalhado.
+  const resourceKeyOf = (op?: ProductionOrder): string =>
+    `${op?.setor || 'geral'}|${op?.scheduledShift || 'turno'}`;
 
   // 3. Reconstrução para cada OP que tem eventos
   const processedOpIds = new Set<string>();
@@ -235,6 +250,7 @@ export function calculateProductionTime(
 
     const op = opMap.get(opId);
     const lineId = op?.lineId || opEvents[0]?.lineId;
+    const resourceKey = resourceKeyOf(op);
 
     let currentState: 'IDLE' | 'WORKING' | 'PAUSED' | 'FINISHED' = 'IDLE';
     let lastChangeTime: number | null = null;
@@ -247,9 +263,9 @@ export function calculateProductionTime(
 
       if (ev.type === 'STARTED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
         } else if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs);
+          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'WORKING';
         lastChangeTime = evTime;
@@ -257,7 +273,7 @@ export function calculateProductionTime(
         lastPauseObs = undefined;
       } else if (ev.type === 'PAUSED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
         }
         currentState = 'PAUSED';
         lastChangeTime = evTime;
@@ -265,7 +281,7 @@ export function calculateProductionTime(
         lastPauseObs = ev.observation;
       } else if (ev.type === 'RESUMED') {
         if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs);
+          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'WORKING';
         lastChangeTime = evTime;
@@ -273,9 +289,9 @@ export function calculateProductionTime(
         lastPauseObs = undefined;
       } else if (ev.type === 'FINISHED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
         } else if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs);
+          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'FINISHED';
         lastChangeTime = null;
@@ -296,13 +312,87 @@ export function calculateProductionTime(
             opId,
             lineId,
             lastPauseReason,
-            lastPauseObs
+            lastPauseObs,
+            resourceKey
           );
         }
       } else if (op?.status === 'paused' || currentState === 'PAUSED') {
-        pushInterval('IDLE', lastChangeTime, refTime, opId, lineId, lastPauseReason, lastPauseObs);
+        pushInterval('IDLE', lastChangeTime, refTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
       } else if (op?.status === 'in_progress' || currentState === 'WORKING') {
-        pushInterval('WORKING', lastChangeTime, refTime, opId, lineId);
+        pushInterval('WORKING', lastChangeTime, refTime, opId, lineId, undefined, undefined, resourceKey);
+      }
+    }
+  }
+
+  // 3.5. Ociosidade REAL entre OPs consecutivas do mesmo setor/turno/dia — usa
+  // só os horários reais de início (STARTED, vindo de HORA INICIO) e fim
+  // (FINISHED, vindo de HORA FIM) já registrados/importados para cada OP.
+  // Nunca inventa nenhum número: só soma o intervalo em que NENHUMA OP daquele
+  // grupo estava em andamento, e nunca antes da 1ª OP nem depois da última do
+  // dia (não presumimos hora de início/fim de turno). Quando há mais de uma
+  // equipe/linha rodando em paralelo no mesmo setor, os intervalos são
+  // mesclados antes de procurar os gaps — assim nunca conta como ociosidade um
+  // período em que ao menos uma equipe estava de fato trabalhando.
+  interface OpSpan { opId: string; startMs: number; endMs: number; lineId?: string; resourceKey: string }
+  const spansByGroup = new Map<string, OpSpan[]>();
+
+  for (const [opId, opEvents] of eventsByOp.entries()) {
+    if (opId === 'orphan') continue;
+    const started = opEvents
+      .filter(e => e.type === 'STARTED')
+      .map(e => new Date(e.createdAt).getTime())
+      .filter(t => !isNaN(t));
+    const finished = opEvents
+      .filter(e => e.type === 'FINISHED')
+      .map(e => new Date(e.createdAt).getTime())
+      .filter(t => !isNaN(t));
+    if (started.length === 0 || finished.length === 0) continue;
+
+    const startMs = Math.min(...started);
+    const endMs = Math.max(...finished);
+    if (endMs <= startMs) continue;
+
+    const op = opMap.get(opId);
+    const resourceKey = resourceKeyOf(op);
+    const dayKey = new Date(startMs).toISOString().slice(0, 10);
+    const groupKey = `${resourceKey}|${dayKey}`;
+    const list = spansByGroup.get(groupKey) || [];
+    list.push({ opId, startMs, endMs, lineId: op?.lineId || undefined, resourceKey });
+    spansByGroup.set(groupKey, list);
+  }
+
+  for (const spans of spansByGroup.values()) {
+    if (spans.length < 2) continue;
+    spans.sort((a, b) => a.startMs - b.startMs);
+
+    // Mescla intervalos sobrepostos/adjacentes em blocos únicos de "ocupado"
+    const merged: { startMs: number; endMs: number; lineId?: string; resourceKey: string }[] = [];
+    for (const s of spans) {
+      const last = merged[merged.length - 1];
+      if (last && s.startMs <= last.endMs) {
+        last.endMs = Math.max(last.endMs, s.endMs);
+        if (last.lineId && s.lineId && last.lineId !== s.lineId) last.lineId = undefined;
+      } else {
+        merged.push({ startMs: s.startMs, endMs: s.endMs, lineId: s.lineId, resourceKey: s.resourceKey });
+      }
+    }
+
+    // Soma os intervalos ENTRE blocos ocupados consecutivos como ociosidade real
+    for (let i = 1; i < merged.length; i++) {
+      const gapStart = merged[i - 1].endMs;
+      const gapEnd = merged[i].startMs;
+      if (gapEnd > gapStart) {
+        const commonLineId = merged[i - 1].lineId === merged[i].lineId ? merged[i - 1].lineId : undefined;
+        pushInterval(
+          'IDLE',
+          gapStart,
+          gapEnd,
+          undefined,
+          commonLineId,
+          'Intervalo sem OP em andamento (horários reais de início/fim)',
+          undefined,
+          merged[i].resourceKey
+        );
       }
     }
   }
@@ -313,16 +403,17 @@ export function calculateProductionTime(
 
     const opCreatedMs = op.createdAt ? new Date(op.createdAt).getTime() : NaN;
     if (isNaN(opCreatedMs)) continue;
+    const resourceKey = resourceKeyOf(op);
 
     if (op.status === 'in_progress') {
-      pushInterval('WORKING', opCreatedMs, refTime, op.id, op.lineId || undefined);
+      pushInterval('WORKING', opCreatedMs, refTime, op.id, op.lineId || undefined, undefined, undefined, resourceKey);
     } else if (op.status === 'paused') {
-      pushInterval('IDLE', opCreatedMs, refTime, op.id, op.lineId || undefined);
+      pushInterval('IDLE', opCreatedMs, refTime, op.id, op.lineId || undefined, undefined, undefined, resourceKey);
     } else if (op.status === 'completed' && op.completedAt) {
       const completedMs = new Date(op.completedAt).getTime();
       if (!isNaN(completedMs) && completedMs > opCreatedMs) {
         // Considera o tempo de execução como trabalho
-        pushInterval('WORKING', opCreatedMs, completedMs, op.id, op.lineId || undefined);
+        pushInterval('WORKING', opCreatedMs, completedMs, op.id, op.lineId || undefined, undefined, undefined, resourceKey);
       }
     }
   }
@@ -352,12 +443,21 @@ export function calculateProductionTime(
     };
   }
 
+  const byResource: Record<string, { workingMs: number; idleMs: number }> = {};
+
   // Processa intervalos
   for (const interval of allIntervals) {
     if (interval.type === 'WORKING') {
       totalWorkingMs += interval.durationMs;
     } else if (interval.type === 'IDLE') {
       totalIdleMs += interval.durationMs;
+    }
+
+    if (interval.resourceKey) {
+      const entry = byResource[interval.resourceKey] || { workingMs: 0, idleMs: 0 };
+      if (interval.type === 'WORKING') entry.workingMs += interval.durationMs;
+      else entry.idleMs += interval.durationMs;
+      byResource[interval.resourceKey] = entry;
     }
 
     const lId = interval.lineId;
@@ -431,6 +531,7 @@ export function calculateProductionTime(
     idleFormatted: formatMsToHoursMinutes(totalIdleMs),
     disponibilidade: factoryDisponibilidade,
     byLine,
+    byResource,
     intervals: allIntervals,
   };
 }
