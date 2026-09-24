@@ -445,7 +445,9 @@ export function HomeDashboard({
     // do total bruto da fábrica — somar Pesagem + Manipulação + Envase como
     // se fosse 1 recurso só inflava o total acima das horas de calendário do
     // próprio período (ex.: "3226h trabalhadas" num mês de 730h).
-    const resourceEntries = Object.values(periodProductionTime.byResource || {});
+    const resourceEntries: Array<{ workingMs: number; idleMs: number }> = Object.values(
+      periodProductionTime.byResource || {}
+    );
     if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0 };
 
     const totalResourceWorkingMs = resourceEntries.reduce((sum, r) => sum + r.workingMs, 0);

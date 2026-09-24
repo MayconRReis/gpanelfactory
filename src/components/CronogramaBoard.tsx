@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Layers, Plus, GripVertical, Package, AlertTriangle } from 'lucide-react';
+import { Layers, Plus, GripVertical, Package, AlertTriangle, Search, X } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 
 interface CronogramaBoardProps {
@@ -43,6 +43,20 @@ export function CronogramaBoard({
     () => ops.filter(o => !o.lineId && o.status !== 'completed'),
     [ops]
   );
+
+  // Termo de busca para a coluna de Estoque / Sem Linha (pesquisa por nome, lote ou OP)
+  const [backlogSearch, setBacklogSearch] = useState('');
+
+  const filteredBacklogOps = useMemo(() => {
+    const term = backlogSearch.trim().toLowerCase();
+    if (!term) return backlogOps;
+    return backlogOps.filter((op) => {
+      const matchProduct = (op.product || '').toLowerCase().includes(term);
+      const matchLote = (op.lote || '').toLowerCase().includes(term);
+      const matchNumber = (op.number || '').toLowerCase().includes(term);
+      return matchProduct || matchLote || matchNumber;
+    });
+  }, [backlogOps, backlogSearch]);
 
   const opsByLine = useMemo(() => {
     const map: Record<string, ProductionOrder[]> = {};
@@ -251,20 +265,59 @@ export function CronogramaBoard({
             dragOverColumn === BACKLOG_COLUMN_ID ? 'border-blue-500' : 'border-[#222228]'
           }`}
         >
-          <div className="p-3 border-b border-[#1f1f26] flex items-center justify-between gap-2 sticky top-0 bg-[#0e0e12] rounded-t-2xl z-10">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <Package className="w-3.5 h-3.5 text-[#71717a] shrink-0" />
-              <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">Estoque / Sem Linha</span>
+          <div className="p-3 border-b border-[#1f1f26] flex flex-col gap-2 sticky top-0 bg-[#0e0e12] rounded-t-2xl z-10">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Package className="w-3.5 h-3.5 text-[#71717a] shrink-0" />
+                <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">Estoque / Sem Linha</span>
+              </div>
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa] shrink-0">
+                {backlogSearch.trim() ? `${filteredBacklogOps.length} / ${backlogOps.length}` : backlogOps.length}
+              </span>
             </div>
-            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa] shrink-0">
-              {backlogOps.length}
-            </span>
+
+            {/* Campo de pesquisa por Nome, Lote ou OP */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-[#71717a] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={backlogSearch}
+                onChange={(e) => setBacklogSearch(e.target.value)}
+                placeholder="Pesquisar nome, lote, OP..."
+                className="w-full bg-[#16161f] border border-[#272733] focus:border-blue-500 rounded-lg pl-8 pr-7 py-1.5 text-[11px] text-[#f4f4f5] placeholder:text-[#52525b] outline-none transition-colors"
+              />
+              {backlogSearch && (
+                <button
+                  type="button"
+                  onClick={() => setBacklogSearch('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#71717a] hover:text-white p-0.5 rounded"
+                  title="Limpar pesquisa"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
           </div>
           <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
-            {backlogOps.length === 0 ? (
-              <p className="text-[11px] text-[#52525b] text-center py-6">Nenhuma OP em estoque</p>
+            {filteredBacklogOps.length === 0 ? (
+              <div className="py-6 text-center">
+                <p className="text-[11px] text-[#52525b]">
+                  {backlogSearch.trim()
+                    ? 'Nenhuma OP encontrada para a busca'
+                    : 'Nenhuma OP em estoque'}
+                </p>
+                {backlogSearch.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setBacklogSearch('')}
+                    className="text-[10px] text-blue-400 hover:underline mt-1 font-medium"
+                  >
+                    Limpar pesquisa
+                  </button>
+                )}
+              </div>
             ) : (
-              backlogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
+              filteredBacklogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
             )}
           </div>
         </div>
