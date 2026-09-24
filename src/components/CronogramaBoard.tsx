@@ -1,16 +1,25 @@
 import React, { useMemo, useState } from 'react';
-import { Layers, Plus, GripVertical, Package, AlertTriangle, Search, X } from 'lucide-react';
+import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 
 interface CronogramaBoardProps {
   lines: ProductionLine[];
   ops: ProductionOrder[];
-  /** Arrasta um card de OP para dentro de uma coluna de linha (atribui/reatribui a linha). */
-  onAssignToQueue: (opId: string, lineId: string) => Promise<void>;
+  /**
+   * Arrasta um card de OP para dentro de uma coluna de linha (atribui/reatribui
+   * a linha). `scheduledDate` é o dia (aba selecionada no Kanban) para o qual a
+   * OP deve ser agendada nessa linha.
+   */
+  onAssignToQueue: (opId: string, lineId: string, scheduledDate?: string) => Promise<void>;
   /** Arrasta um card de OP de volta para a coluna "Estoque" (remove a linha). */
   onUnassign: (opId: string) => Promise<void>;
-  /** Solta um card sobre outro DENTRO da mesma coluna — reordena a fila de produção daquela coluna. */
-  onReorderColumn: (columnId: string, orderedOpIds: string[]) => Promise<void>;
+  /**
+   * Solta um card sobre outro DENTRO da mesma coluna — reordena a fila de
+   * produção daquela coluna. `scheduledDate` (quando a coluna é uma linha)
+   * restringe a reordenação apenas às OPs daquele dia, já que o quadro agora
+   * mostra só o dia selecionado por vez.
+   */
+  onReorderColumn: (columnId: string, orderedOpIds: string[], scheduledDate?: string) => Promise<void>;
   /** Botão "+" no topo de cada coluna de linha — abre o modal de vincular OP do estoque. */
   onOpenAssignModal: (line: ProductionLine) => void;
   /** Clique em um card de OP para editar seus dados. */
@@ -18,6 +27,44 @@ interface CronogramaBoardProps {
 }
 
 export const BACKLOG_COLUMN_ID = '__estoque__';
+
+// "Hoje" em data local (YYYY-MM-DD) — nunca usar `new Date().toISOString()`
+// aqui: isso converte para UTC e erra o dia entre ~21h e 23h59 no horário de
+// Brasília (mesmo cuidado já tomado em CoordinatorDashboard/LeaderScreen).
+function getLocalDateStr(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+const WEEKDAY_LABELS = ['DOM', 'SEG', 'TER', 'QUA', 'QUI', 'SEX', 'SÁB'];
+
+interface WeekDay {
+  dateStr: string;
+  weekdayLabel: string;
+  dayOfMonth: number;
+}
+
+// Monta os 7 dias (Segunda a Domingo) da semana que contém `reference`. O
+// cronograma raramente é planejado além de uma semana, então o quadro
+// trabalha sempre em cima da semana atual.
+function buildWeekDays(reference: Date): WeekDay[] {
+  const dow = reference.getDay(); // 0=Dom..6=Sáb
+  const diffToMonday = dow === 0 ? -6 : 1 - dow;
+  const monday = new Date(reference);
+  monday.setDate(reference.getDate() + diffToMonday);
+
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return {
+      dateStr: getLocalDateStr(d),
+      weekdayLabel: WEEKDAY_LABELS[d.getDay()],
+      dayOfMonth: d.getDate(),
+    };
+  });
+}
 
 export function CronogramaBoard({
   lines,
@@ -36,37 +83,68 @@ export function CronogramaBoard({
   const [dragOverOpId, setDragOverOpId] = useState<string | null>(null);
   const [isDropping, setIsDropping] = useState(false);
 
+  // Dias (Seg a Dom) da semana em exibição, para as abas de navegação do
+  // Kanban. `weekOffset` deixa o coordenador avançar/voltar semanas — por
+  // exemplo, numa sexta-feira, avançar uma semana pra já organizar a
+  // segunda-feira seguinte.
+  const todayStr = useMemo(() => getLocalDateStr(), []);
+  const [weekOffset, setWeekOffset] = useState(0);
+  const weekDays = useMemo(() => {
+    const reference = new Date();
+    reference.setDate(reference.getDate() + weekOffset * 7);
+    return buildWeekDays(reference);
+  }, [weekOffset]);
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
+
+  const weekRangeLabel = useMemo(() => {
+    if (weekDays.length === 0) return '';
+    const first = weekDays[0];
+    const last = weekDays[6];
+    return `${String(first.dayOfMonth).padStart(2, '0')} a ${String(last.dayOfMonth).padStart(2, '0')}`;
+  }, [weekDays]);
+
+  const goToWeek = (offset: number) => {
+    setWeekOffset(offset);
+    const reference = new Date();
+    reference.setDate(reference.getDate() + offset * 7);
+    const days = buildWeekDays(reference);
+    // Ao trocar de semana, seleciona automaticamente "hoje" (se a semana
+    // exibida for a atual) ou a segunda-feira da semana escolhida.
+    setSelectedDate(offset === 0 ? todayStr : days[0].dateStr);
+  };
+
+  // Quantas OPs já estão agendadas (em alguma linha) em cada dia da semana —
+  // exibido como contador em cada aba, pra dar uma visão rápida da carga.
+  const countsByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const op of ops) {
+      if (op.lineId && op.scheduledDate && op.status !== 'completed') {
+        map[op.scheduledDate] = (map[op.scheduledDate] || 0) + 1;
+      }
+    }
+    return map;
+  }, [ops]);
+
   // OPs sem linha atribuída (ainda no estoque) e não concluídas — a ordem já
   // vem por `sequence` (a consulta ao Supabase em getAllOPs ordena por essa
-  // coluna), então também dá pra reordenar esta coluna.
+  // coluna), então também dá pra reordenar esta coluna. O Estoque mostra
+  // TODAS as OPs pendentes de linha, independente do dia selecionado nas
+  // abas — elas ainda não têm uma data de produção "travada".
   const backlogOps = useMemo(
     () => ops.filter(o => !o.lineId && o.status !== 'completed'),
     [ops]
   );
 
-  // Termo de busca para a coluna de Estoque / Sem Linha (pesquisa por nome, lote ou OP)
-  const [backlogSearch, setBacklogSearch] = useState('');
-
-  const filteredBacklogOps = useMemo(() => {
-    const term = backlogSearch.trim().toLowerCase();
-    if (!term) return backlogOps;
-    return backlogOps.filter((op) => {
-      const matchProduct = (op.product || '').toLowerCase().includes(term);
-      const matchLote = (op.lote || '').toLowerCase().includes(term);
-      const matchNumber = (op.number || '').toLowerCase().includes(term);
-      return matchProduct || matchLote || matchNumber;
-    });
-  }, [backlogOps, backlogSearch]);
-
+  // Colunas de linha mostram só as OPs agendadas para o dia selecionado.
   const opsByLine = useMemo(() => {
     const map: Record<string, ProductionOrder[]> = {};
     for (const line of lines) {
       map[line.id] = ops
-        .filter(o => o.lineId === line.id && o.status !== 'completed')
+        .filter(o => o.lineId === line.id && o.status !== 'completed' && o.scheduledDate === selectedDate)
         .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     }
     return map;
-  }, [lines, ops]);
+  }, [lines, ops, selectedDate]);
 
   const columnOps = (columnId: string): ProductionOrder[] =>
     columnId === BACKLOG_COLUMN_ID ? backlogOps : (opsByLine[columnId] || []);
@@ -125,7 +203,7 @@ export function CronogramaBoard({
         if (columnId === BACKLOG_COLUMN_ID) {
           await onUnassign(opId);
         } else {
-          await onAssignToQueue(opId, columnId);
+          await onAssignToQueue(opId, columnId, selectedDate);
         }
       }
 
@@ -137,7 +215,7 @@ export function CronogramaBoard({
       const insertAt = targetIdx === -1 ? currentIds.length : targetIdx;
       const newOrder = [...currentIds.slice(0, insertAt), opId, ...currentIds.slice(insertAt)];
 
-      await onReorderColumn(columnId, newOrder);
+      await onReorderColumn(columnId, newOrder, columnId === BACKLOG_COLUMN_ID ? undefined : selectedDate);
     } finally {
       setIsDropping(false);
     }
@@ -166,7 +244,7 @@ export function CronogramaBoard({
       if (columnId === BACKLOG_COLUMN_ID) {
         await onUnassign(opId);
       } else {
-        await onAssignToQueue(opId, columnId);
+        await onAssignToQueue(opId, columnId, selectedDate);
       }
     } finally {
       setIsDropping(false);
@@ -240,6 +318,14 @@ export function CronogramaBoard({
           </span>
           {op.lote && <span className="font-mono text-emerald-400">{op.lote}</span>}
         </div>
+        {/* No Estoque a OP ainda não está numa coluna de dia — mostra a data
+            agendada (se houver uma de uma atribuição anterior) como dica. */}
+        {columnId === BACKLOG_COLUMN_ID && op.scheduledDate && (
+          <div className="flex items-center gap-1 text-[9px] text-[#71717a] mt-1">
+            <CalendarDays className="w-2.5 h-2.5" />
+            <span>Agendada: {op.scheduledDate.split('-').reverse().slice(0, 2).join('/')}</span>
+          </div>
+        )}
         {op.status === 'in_progress' && (
           <div className="w-full bg-black/40 rounded-full h-1 mt-1.5 overflow-hidden">
             <div
@@ -256,6 +342,86 @@ export function CronogramaBoard({
 
   return (
     <div className="overflow-x-auto custom-scrollbar pb-2">
+      {/* Navegação de semana — por padrão mostra a semana atual (Seg a Dom),
+          mas dá pra avançar/voltar (ex.: numa sexta, já organizar a segunda
+          seguinte clicando em "Próxima semana"). */}
+      <div className="flex items-center gap-2 mb-2 min-w-max">
+        <button
+          type="button"
+          onClick={() => goToWeek(weekOffset - 1)}
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22] transition-colors shrink-0"
+          title="Semana anterior"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+
+        <span className="text-[11px] font-bold text-[#d4d4d8] uppercase tracking-wide shrink-0 min-w-[90px] text-center">
+          {weekOffset === 0 ? 'Semana Atual' : weekOffset > 0 ? `+${weekOffset} sem.` : `${weekOffset} sem.`}
+          <span className="block text-[10px] text-[#71717a] font-semibold normal-case">{weekRangeLabel}</span>
+        </span>
+
+        <button
+          type="button"
+          onClick={() => goToWeek(weekOffset + 1)}
+          className="w-7 h-7 flex items-center justify-center rounded-lg text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22] transition-colors shrink-0"
+          title="Próxima semana"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+
+        {weekOffset !== 0 && (
+          <button
+            type="button"
+            onClick={() => goToWeek(0)}
+            className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase text-blue-400 hover:text-blue-300 hover:bg-blue-950/40 border border-blue-800/40 transition-colors shrink-0"
+          >
+            Hoje
+          </button>
+        )}
+      </div>
+
+      {/* Abas de dia da semana em exibição — cada coluna de linha mostra só
+          as OPs agendadas para o dia selecionado aqui. */}
+      <div className="flex items-center gap-1.5 mb-3 min-w-max">
+        <CalendarDays className="w-3.5 h-3.5 text-[#71717a] shrink-0 mr-1" />
+        {weekDays.map((day) => {
+          const isSelected = day.dateStr === selectedDate;
+          const isToday = day.dateStr === todayStr;
+          const count = countsByDate[day.dateStr] || 0;
+          return (
+            <button
+              key={day.dateStr}
+              type="button"
+              onClick={() => setSelectedDate(day.dateStr)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border text-[11px] font-bold transition-colors ${
+                isSelected
+                  ? 'bg-blue-600 border-blue-500 text-white'
+                  : 'bg-[#121216] border-[#222228] text-[#a1a1aa] hover:border-blue-700/60 hover:text-[#e4e4e7]'
+              }`}
+              title={isToday ? 'Hoje' : undefined}
+            >
+              <span className="uppercase">
+                {day.weekdayLabel} {String(day.dayOfMonth).padStart(2, '0')}
+              </span>
+              {isToday && (
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${isSelected ? 'bg-white' : 'bg-emerald-400'}`}
+                />
+              )}
+              {count > 0 && (
+                <span
+                  className={`text-[9px] font-bold px-1 rounded-full ${
+                    isSelected ? 'bg-white/20 text-white' : 'bg-[#1a1a22] text-[#a1a1aa]'
+                  }`}
+                >
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="flex items-start gap-3 min-w-max">
         {/* Coluna: Estoque / Fila Geral (OPs sem linha) */}
         <div
@@ -265,59 +431,20 @@ export function CronogramaBoard({
             dragOverColumn === BACKLOG_COLUMN_ID ? 'border-blue-500' : 'border-[#222228]'
           }`}
         >
-          <div className="p-3 border-b border-[#1f1f26] flex flex-col gap-2 sticky top-0 bg-[#0e0e12] rounded-t-2xl z-10">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <Package className="w-3.5 h-3.5 text-[#71717a] shrink-0" />
-                <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">Estoque / Sem Linha</span>
-              </div>
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa] shrink-0">
-                {backlogSearch.trim() ? `${filteredBacklogOps.length} / ${backlogOps.length}` : backlogOps.length}
-              </span>
+          <div className="p-3 border-b border-[#1f1f26] flex items-center justify-between gap-2 sticky top-0 bg-[#0e0e12] rounded-t-2xl z-10">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Package className="w-3.5 h-3.5 text-[#71717a] shrink-0" />
+              <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">Estoque / Sem Linha</span>
             </div>
-
-            {/* Campo de pesquisa por Nome, Lote ou OP */}
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-[#71717a] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={backlogSearch}
-                onChange={(e) => setBacklogSearch(e.target.value)}
-                placeholder="Pesquisar nome, lote, OP..."
-                className="w-full bg-[#16161f] border border-[#272733] focus:border-blue-500 rounded-lg pl-8 pr-7 py-1.5 text-[11px] text-[#f4f4f5] placeholder:text-[#52525b] outline-none transition-colors"
-              />
-              {backlogSearch && (
-                <button
-                  type="button"
-                  onClick={() => setBacklogSearch('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#71717a] hover:text-white p-0.5 rounded"
-                  title="Limpar pesquisa"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              )}
-            </div>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa] shrink-0">
+              {backlogOps.length}
+            </span>
           </div>
           <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
-            {filteredBacklogOps.length === 0 ? (
-              <div className="py-6 text-center">
-                <p className="text-[11px] text-[#52525b]">
-                  {backlogSearch.trim()
-                    ? 'Nenhuma OP encontrada para a busca'
-                    : 'Nenhuma OP em estoque'}
-                </p>
-                {backlogSearch.trim() && (
-                  <button
-                    type="button"
-                    onClick={() => setBacklogSearch('')}
-                    className="text-[10px] text-blue-400 hover:underline mt-1 font-medium"
-                  >
-                    Limpar pesquisa
-                  </button>
-                )}
-              </div>
+            {backlogOps.length === 0 ? (
+              <p className="text-[11px] text-[#52525b] text-center py-6">Nenhuma OP em estoque</p>
             ) : (
-              filteredBacklogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
+              backlogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
             )}
           </div>
         </div>
@@ -361,7 +488,9 @@ export function CronogramaBoard({
               </div>
               <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
                 {lineOps.length === 0 ? (
-                  <p className="text-[11px] text-[#52525b] text-center py-6">Arraste uma OP aqui</p>
+                  <p className="text-[11px] text-[#52525b] text-center py-6 px-2">
+                    Nenhuma OP agendada para {weekDays.find(d => d.dateStr === selectedDate)?.weekdayLabel}. Arraste uma OP aqui.
+                  </p>
                 ) : (
                   lineOps.map((op) => renderCard(op, line.id))
                 )}

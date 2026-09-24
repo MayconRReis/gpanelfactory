@@ -208,6 +208,9 @@ export function CoordinatorDashboard() {
   const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
   const [isDeletingOp, setIsDeletingOp] = useState(false);
 
+  // Modal: "Mais informações" do card de OP no Estoque de OPs
+  const [detailsModalOp, setDetailsModalOp] = useState<ProductionOrder | null>(null);
+
   // Modal: Cadastros & Confirmações de Usuários
   const [showAuthorizeModal, setShowAuthorizeModal] = useState(false);
   const [modalUserSearch, setModalUserSearch] = useState('');
@@ -241,6 +244,12 @@ export function CoordinatorDashboard() {
   const [deleteUserModalData, setDeleteUserModalData] = useState<UserProfile | null>(null);
   const [isDeletingUser, setIsDeletingUser] = useState(false);
   const [isSyncingPending, setIsSyncingPending] = useState(false);
+
+  // Modal: "Ver detalhes" do card de colaborador na Gestão de Equipe. Guarda
+  // só o identificador (não o objeto) e reconsulta `allUsers` a cada render,
+  // assim o modal reflete na hora qualquer mudança feita nele mesmo (trocar
+  // área, regra de acesso, promover, etc.) sem precisar fechar e reabrir.
+  const [detailsModalUserId, setDetailsModalUserId] = useState<string | null>(null);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
@@ -537,12 +546,15 @@ WHERE email IN (
     await loadData();
   };
 
-  const handleAssignToQueue = async (opId: string, lineId: string) => {
-    const today = getLocalDateStr();
+  const handleAssignToQueue = async (opId: string, lineId: string, scheduledDate?: string) => {
+    // `scheduledDate` vem da aba de dia selecionada no Kanban do Cronograma
+    // (CronogramaBoard); quando o chamador não informa um dia (ex.: o modal
+    // de vincular OP do estoque), cai no comportamento antigo de agendar hoje.
+    const date = scheduledDate || getLocalDateStr();
     await updateOP(opId, {
       lineId,
-      scheduledDate: today,
-      scheduledEndDate: today,
+      scheduledDate: date,
+      scheduledEndDate: date,
       scheduledDays: 1,
     });
     showToast(`OP colocada na fila de produção da linha com sucesso.`);
@@ -555,10 +567,15 @@ WHERE email IN (
   // exatamente o MESMO conjunto de valores de `sequence` que essa coluna já
   // tinha — só redistribuídos na nova ordem — então cada OP recebe apenas
   // uma pequena atualização, sem bagunçar a sequência global entre colunas.
-  const handleReorderColumn = async (columnId: string, orderedOpIds: string[]) => {
+  const handleReorderColumn = async (columnId: string, orderedOpIds: string[], scheduledDate?: string) => {
+    // Colunas de linha agora mostram só o dia selecionado no Kanban do
+    // Cronograma, então a reordenação também precisa se restringir às OPs
+    // daquele mesmo dia — senão `sortedSequences` incluiria valores de
+    // `sequence` usados por OPs de OUTROS dias na mesma linha, e a
+    // redistribuição colidiria entre dias diferentes.
     const columnOps = columnId === CRONOGRAMA_BACKLOG_COLUMN_ID
       ? ops.filter(o => !o.lineId && o.status !== 'completed')
-      : ops.filter(o => o.lineId === columnId && o.status !== 'completed');
+      : ops.filter(o => o.lineId === columnId && o.status !== 'completed' && (!scheduledDate || o.scheduledDate === scheduledDate));
 
     const sortedSequences = columnOps
       .map(o => o.sequence || 0)
@@ -1276,7 +1293,7 @@ WHERE email IN (
                     </span>
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
-                    Arraste as OPs entre as colunas para atribuí-las às linhas de envase, ou use o "+" de cada coluna.
+                    Selecione o dia da semana nas abas abaixo e arraste as OPs entre as colunas para atribuí-las às linhas de envase naquele dia, ou use o "+" de cada coluna.
                   </p>
                 </div>
               </div>
@@ -1440,12 +1457,12 @@ WHERE email IN (
 
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
                   {[
-                    { id: 'all', label: 'Todas as OPs' },
                     { id: 'today', label: 'Hoje' },
                     { id: 'week', label: 'Esta Semana' },
-                    { id: 'unassigned', label: 'Sem Linha' },
                     { id: 'in_progress', label: 'Em Produção' },
-                    { id: 'completed', label: 'Concluídas' }
+                    { id: 'unassigned', label: 'Sem Linha' },
+                    { id: 'completed', label: 'Concluídas' },
+                    { id: 'all', label: 'Todas as OPs' }
                   ].map(tab => (
                     <button
                       key={tab.id}
@@ -1462,224 +1479,155 @@ WHERE email IN (
                 </div>
               </div>
 
-              {/* Tabela do Estoque de OPs & Cronograma */}
-              <div className="bg-[#121216] border border-[#222226] rounded-2xl overflow-hidden shadow-xl">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-[#17171c] text-[#71717a] uppercase font-bold text-[10px] tracking-wider border-b border-[#222226]">
-                      <tr>
-                        <th className="py-3 px-4">OP</th>
-                        <th className="py-3 px-4">Nome do Produto</th>
-                        <th className="py-3 px-4">Lote</th>
-                        <th className="py-3 px-4 text-right">Quantidade</th>
-                        <th className="py-3 px-4">Granel</th>
-                        <th className="py-3 px-4">Linha Destino</th>
-                        <th className="py-3 px-4">Data Cronograma</th>
-                        <th className="py-3 px-4">Status</th>
-                        <th className="py-3 px-4 text-right">Ações</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1e1e23]">
-                      {filteredOps.length === 0 ? (
-                        <tr>
-                          <td colSpan={9} className="py-12 text-center text-[#71717a]">
-                            <div className="flex flex-col items-center justify-center">
-                              <FileSpreadsheet className="w-8 h-8 text-[#52525b] mb-2 opacity-50" />
-                              <p className="text-xs font-bold text-[#f4f4f5]">Nenhuma Ordem de Produção encontrada</p>
-                              <p className="text-[11px] text-[#71717a] mt-1 max-w-sm">
-                                Importe uma planilha CSV com os lotes disponíveis ou cadastre uma nova OP no botão acima.
-                              </p>
-                              <Button
-                                size="sm"
-                                onClick={() => setShowCsvImportModal(true)}
-                                className="mt-3 h-8 px-3 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5"
-                              >
-                                <Upload className="w-3.5 h-3.5" />
-                                <span>Importar CSV Agora</span>
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredOps.map((op) => {
-                          const assignedLine = lines.find(l => l.id === op.lineId);
-                          const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
-
-                          return (
-                            <tr key={op.id} className="hover:bg-[#16161b] transition-colors">
-                              
-                              {/* OP / OSM */}
-                              <td className="py-3.5 px-4">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border ${
-                                    (op.tipoDocumento === 'OSM' || op.setor === 'Pesagem' || op.setor === 'Manipulação')
-                                      ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40'
-                                      : 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40'
-                                  }`}>
-                                    {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
-                                  </span>
-                                  <span className="font-mono font-black text-[#f4f4f5] bg-[#1a1a22] border border-[#2c2c38] px-2 py-0.5 rounded-lg text-xs">
-                                    {op.number}
-                                  </span>
-                                  {op.setor === 'Pesagem' && op.status === 'completed' && (
-                                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
-                                      Pronta p/ Manipulação
-                                    </span>
-                                  )}
-                                </div>
-                              </td>
-
-                              {/* NOME DO PRODUTO */}
-                              <td className="py-3.5 px-4 font-bold text-[#f4f4f5] max-w-xs">
-                                <div className="truncate flex items-center gap-1.5">
-                                  <span>{op.product}</span>
-                                  {op.isSleeve && (
-                                    <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-purple-950/80 text-purple-300 border-purple-600/60 shadow-sm">
-                                      Sleev
-                                    </span>
-                                  )}
-                                  {op.setor && (
-                                    <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded border ${
-                                      op.setor === 'Pesagem' ? 'bg-purple-950/60 text-purple-300 border-purple-800/40' :
-                                      op.setor === 'Manipulação' ? 'bg-cyan-950/60 text-cyan-300 border-cyan-800/40' :
-                                      op.setor === 'Envase' ? 'bg-blue-950/60 text-blue-300 border-blue-800/40' :
-                                      'bg-zinc-800 text-zinc-300 border-zinc-700'
-                                    }`}>
-                                      {op.setor}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[10px] text-[#71717a] font-normal mt-0.5">
-                                  Prioridade: <span className="font-semibold text-[#d4d4d8]">{op.priority}</span>
-                                </div>
-                              </td>
-
-                              {/* LOTE */}
-                              <td className="py-3.5 px-4">
-                                {op.lote ? (
-                                  <span className="font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded text-[11px]">
-                                    {op.lote}
-                                  </span>
-                                ) : (
-                                  <span className="text-[#52525b] text-[11px] italic">Sem Lote</span>
-                                )}
-                              </td>
-
-                              {/* QUANTIDADE */}
-                              <td className="py-3.5 px-4 text-right">
-                                <div className="font-mono font-black text-[#f4f4f5] text-xs">
-                                  {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
-                                </div>
-                                {op.producedQuantity > 0 && (
-                                  <div className="text-[10px] text-emerald-400 font-mono font-semibold">
-                                    {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} ({progress}%)
-                                  </div>
-                                )}
-                              </td>
-
-                              {/* GRANEL */}
-                              <td className="py-3.5 px-4">
-                                {op.granel ? (
-                                  <span className="font-mono font-semibold text-amber-300 bg-amber-950/60 border border-amber-800/40 px-2 py-0.5 rounded text-[11px]">
-                                    {op.granel}
-                                  </span>
-                                ) : (
-                                  <span className="text-[#52525b] text-[11px] italic">Sem Granel</span>
-                                )}
-                              </td>
-
-                              {/* LINHA DESTINO */}
-                              <td className="py-3.5 px-4">
-                                {assignedLine ? (
-                                  <span className="font-semibold text-xs text-[#d4d4d8] flex items-center gap-1.5">
-                                    <span className="w-2 h-2 rounded-full bg-blue-500" />
-                                    {assignedLine.name}
-                                  </span>
-                                ) : (
-                                  <span className="text-[#71717a] text-[11px] italic">Disponível no Estoque</span>
-                                )}
-                              </td>
-
-                              {/* DATA CRONOGRAMA */}
-                              <td className="py-3.5 px-4">
-                                {op.scheduledDate ? (
-                                  <div className="space-y-0.5">
-                                    <span className="font-semibold text-xs text-[#f4f4f5] flex items-center gap-1.5">
-                                      <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                      {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-                                    </span>
-                                    {op.scheduledShift && (
-                                      <span className="text-[10px] text-[#71717a] block font-medium">
-                                        {op.scheduledShift}
-                                      </span>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <span className="text-[#52525b] text-[11px] italic">Sem Data Prevista</span>
-                                )}
-                              </td>
-
-                              {/* STATUS */}
-                              <td className="py-3.5 px-4">
-                                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
-                                  op.status === 'in_progress' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
-                                  op.status === 'paused' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
-                                  op.status === 'completed' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
-                                  'bg-blue-950/60 text-blue-300 border border-blue-800/30'
-                                }`}>
-                                  {op.status === 'in_progress' ? 'Em Produção' :
-                                   op.status === 'paused' ? 'Pausada' :
-                                   op.status === 'completed' ? 'Concluída' : 'Em Estoque'}
-                                </span>
-                              </td>
-
-                              {/* AÇÕES */}
-                              <td className="py-3.5 px-4 text-right">
-                                <div className="flex items-center justify-end gap-1.5">
-                                  {/* Botão de Editar OP */}
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleOpenEditOPModal(op)}
-                                    className="h-9 w-9 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors"
-                                    title={`Editar OP ${op.number}`}
-                                  >
-                                    <Edit2 className="w-3.5 h-3.5" />
-                                  </Button>
-
-                                  {/* Botão de Atribuir à Linha / Cronograma */}
-                                  <Button
-                                    size="sm"
-                                    onClick={() => handleOpenAssignModal(op)}
-                                    className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1.5 shadow-sm transition-all hover:scale-[1.02]"
-                                    title="Atribuir Linha de Produção & Programar Cronograma"
-                                  >
-                                    <CalendarDays className="w-3.5 h-3.5" />
-                                    <span>Atribuir Linha</span>
-                                  </Button>
-
-                                  <button
-                                    type="button"
-                                    id={`btn-excluir-op-${op.id}`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleOpenDeleteModal(op);
-                                    }}
-                                    className="h-9 w-9 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95"
-                                    title={`Excluir OP ${op.number} do Estoque`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
+              {/* Cards do Estoque de OPs & Cronograma */}
+              {filteredOps.length === 0 ? (
+                <div className="bg-[#121216] border border-[#222226] rounded-2xl py-12 text-center text-[#71717a]">
+                  <div className="flex flex-col items-center justify-center">
+                    <FileSpreadsheet className="w-8 h-8 text-[#52525b] mb-2 opacity-50" />
+                    <p className="text-xs font-bold text-[#f4f4f5]">Nenhuma Ordem de Produção encontrada</p>
+                    <p className="text-[11px] text-[#71717a] mt-1 max-w-sm">
+                      Importe uma planilha CSV com os lotes disponíveis ou cadastre uma nova OP no botão acima.
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={() => setShowCsvImportModal(true)}
+                      className="mt-3 h-8 px-3 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Importar CSV Agora</span>
+                    </Button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {filteredOps.map((op) => {
+                    const assignedLine = lines.find(l => l.id === op.lineId);
+                    const isCritical = op.priority === 'Crítica' || op.priority === 'Alta';
+
+                    return (
+                      <div
+                        key={op.id}
+                        className={`bg-[#121216] border rounded-2xl p-3.5 flex flex-col gap-2.5 transition-colors ${
+                          op.status === 'in_progress'
+                            ? 'border-emerald-800/50'
+                            : op.priority === 'Crítica'
+                            ? 'border-red-800/50'
+                            : op.priority === 'Alta'
+                            ? 'border-orange-800/40'
+                            : 'border-[#222226]'
+                        }`}
+                      >
+                        {/* Cabeçalho: OP + Status */}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                            <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border shrink-0 ${
+                              (op.tipoDocumento === 'OSM' || op.setor === 'Pesagem' || op.setor === 'Manipulação')
+                                ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40'
+                                : 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40'
+                            }`}>
+                              {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
+                            </span>
+                            <span className="font-mono font-black text-[#f4f4f5] bg-[#1a1a22] border border-[#2c2c38] px-2 py-0.5 rounded-lg text-xs shrink-0">
+                              {op.number}
+                            </span>
+                          </div>
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 ${
+                            op.status === 'in_progress' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
+                            op.status === 'paused' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
+                            op.status === 'completed' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
+                            'bg-blue-950/60 text-blue-300 border border-blue-800/30'
+                          }`}>
+                            {op.status === 'in_progress' ? 'Em Produção' :
+                             op.status === 'paused' ? 'Pausada' :
+                             op.status === 'completed' ? 'Concluída' : 'Em Estoque'}
+                          </span>
+                        </div>
+
+                        {/* Nome do Produto */}
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-[#f4f4f5] text-xs truncate" title={op.product}>
+                              {op.product}
+                            </span>
+                            {op.isSleeve && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-purple-950/80 text-purple-300 border-purple-600/60 shadow-sm shrink-0">
+                                Sleev
+                              </span>
+                            )}
+                            {isCritical && (
+                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border bg-red-900/80 text-red-300 border-red-700/50 flex items-center gap-0.5 shrink-0">
+                                <AlertTriangle className="w-2.5 h-2.5" />
+                                {op.priority}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Lote + Linha Destino */}
+                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
+                          <div className="min-w-0">
+                            <span className="text-[10px] text-[#71717a] uppercase font-bold block">Lote</span>
+                            {op.lote ? (
+                              <span className="font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded text-[11px] inline-block mt-0.5">
+                                {op.lote}
+                              </span>
+                            ) : (
+                              <span className="text-[#52525b] text-[11px] italic">Sem Lote</span>
+                            )}
+                          </div>
+                          <div className="min-w-0 text-right">
+                            <span className="text-[10px] text-[#71717a] uppercase font-bold block">Linha</span>
+                            {assignedLine ? (
+                              <span className="font-semibold text-xs text-[#d4d4d8] flex items-center gap-1.5 justify-end mt-0.5">
+                                <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                                {assignedLine.name}
+                              </span>
+                            ) : (
+                              <span className="text-[#71717a] text-[11px] italic">Sem Linha</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Ações */}
+                        <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
+                          <button
+                            type="button"
+                            onClick={() => setDetailsModalOp(op)}
+                            className="flex-1 h-9 px-2.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-[11px] font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors"
+                            title="Ver mais informações desta OP"
+                          >
+                            <Info className="w-3.5 h-3.5" />
+                            <span>Mais informações</span>
+                          </button>
+
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleOpenEditOPModal(op)}
+                            className="h-9 w-9 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors shrink-0"
+                            title={`Editar OP ${op.number}`}
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </Button>
+
+                          <button
+                            type="button"
+                            id={`btn-excluir-op-${op.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenDeleteModal(op);
+                            }}
+                            className="h-9 w-9 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95 shrink-0"
+                            title={`Excluir OP ${op.number} do Estoque`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -1823,270 +1771,134 @@ WHERE email IN (
                 </div>
               </div>
 
-              {/* Tabela de Colaboradores & Acessos */}
-              <div className="bg-[#121216] border border-[#222226] rounded-2xl overflow-hidden shadow-xl">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-[#17171c] text-[#71717a] uppercase font-bold text-[10px] tracking-wider border-b border-[#222226]">
-                      <tr>
-                        <th className="py-3.5 px-4">Colaborador</th>
-                        <th className="py-3.5 px-4">E-mail Corporativo</th>
-                        <th className="py-3.5 px-4">Cargo / Área</th>
-                        <th className="py-3.5 px-4">Regra de Acesso (Rule)</th>
-                        <th className="py-3.5 px-4">Status de Acesso</th>
-                        <th className="py-3.5 px-4 text-right">Ações da Coordenação</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#1e1e23]">
-                      {filteredUsers.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="py-8 text-center text-[#71717a]">
-                            Nenhum colaborador encontrado com os filtros aplicados.
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredUsers.map((user) => {
-                          const isSelf = user.uid === profile?.uid;
-                          const isCoordinator = user.role === 'coordinator';
-                          const isActive = user.status !== 'inactive';
-                          const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
-                          const activeRule = (user.rule || getUserRule(user)) as AccessRule;
-                          const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
-
-                          return (
-                            <tr key={user.uid || user.email} className="hover:bg-[#16161b] transition-colors">
-                              <td className="py-3.5 px-4">
-                                <div className="flex items-center gap-2.5">
-                                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black uppercase ${
-                                    isCoordinator 
-                                      ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400' 
-                                      : 'bg-[#22222a] border border-[#2c2c36] text-[#a1a1aa]'
-                                  }`}>
-                                    {user.name.substring(0, 2)}
-                                  </div>
-                                  <div>
-                                    <p className="font-bold text-[#f4f4f5] flex items-center gap-1.5 flex-wrap">
-                                      <span>{user.name}</span>
-                                      {isSelf && (
-                                        <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold">
-                                          Você
-                                        </span>
-                                      )}
-                                      {isLocalOnly && (
-                                        <span className="text-[9px] bg-amber-950/80 border border-amber-800/40 text-amber-300 px-1.5 py-0.2 rounded font-bold" title="Salvo localmente (pendente envio ao Supabase)">
-                                          Pendente Supabase
-                                        </span>
-                                      )}
-                                    </p>
-                                  </div>
-                                </div>
-                              </td>
-
-                              <td className="py-3.5 px-4 font-mono text-[#a1a1aa]">
-                                {user.email}
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                                    isCoordinator
-                                      ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
-                                      : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
-                                  }`}>
-                                    {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
-                                    <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
-                                  </span>
-
-                                  {!isCoordinator ? (
-                                    <select
-                                      value={user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
-                                      onChange={(e) => handleUpdateUserArea(user, e.target.value as any)}
-                                      className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border bg-[#14141a] border-[#2c2c38] text-white focus:outline-none focus:border-blue-500 cursor-pointer shadow-sm"
-                                      title="Clique para alterar a área de atuação deste líder (define a tela do chão de fábrica)"
-                                    >
-                                      <option value="Envase" className="bg-[#121217] text-[#3b82f6]">Área: Envase</option>
-                                      <option value="Pesagem" className="bg-[#121217] text-[#c084fc]">Área: Pesagem</option>
-                                      <option value="Manipulação" className="bg-[#121217] text-[#22d3ee]">Área: Manipulação</option>
-                                    </select>
-                                  ) : (
-                                    <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-blue-950/70 text-blue-400 border-blue-500/40">
-                                      Coordenação Geral
-                                    </span>
-                                  )}
-                                </div>
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                <div className="space-y-1">
-                                  <select
-                                    value={activeRule}
-                                    onChange={(e) => handleUpdateUserRule(user, e.target.value as AccessRule)}
-                                    disabled={isSelf}
-                                    className={`text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-sm ${
-                                      ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
-                                    }`}
-                                    title="Selecione a regra de acesso (define quais telas aparecem no menu lateral deste colaborador)"
-                                  >
-                                    {Object.entries(ACCESS_RULES).map(([key, cfg]) => (
-                                      <option key={key} value={key} className="bg-[#121217] text-white">
-                                        {cfg.name} ({cfg.tabs.length} telas)
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <p className="text-[9px] text-[#71717a] truncate max-w-[220px]">
-                                    {ruleConfig.description}
-                                  </p>
-                                </div>
-                              </td>
-
-                              <td className="py-3.5 px-4">
-                                {(user.status === 'first_access' || user.mustChangePassword) ? (
-                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit bg-amber-950/80 text-amber-300 border border-amber-800/40">
-                                    <KeyRound className="w-3 h-3 text-amber-400" />
-                                    <span>1º Acesso</span>
-                                  </span>
-                                ) : (
-                                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                                    isActive
-                                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
-                                      : 'bg-red-950/80 text-red-400 border border-red-800/40'
-                                  }`}>
-                                    <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                                    <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
-                                  </span>
-                                )}
-                              </td>
-
-                              <td className="py-3.5 px-4 text-right">
-                                <div className="flex items-center justify-end flex-wrap gap-1.5">
-                                  {/* Botão Copiar Acesso Inicial se 1º acesso */}
-                                  {(user.status === 'first_access' || user.mustChangePassword) && (
-                                    <>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => handleCopyLeaderCredentials(user)}
-                                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
-                                        title="Copiar e-mail e senha padrão"
-                                      >
-                                        <Copy className="w-3 h-3" />
-                                        <span>Copiar Acesso</span>
-                                      </Button>
-
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => handleMarkAsActive(user)}
-                                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
-                                        title="Confirmar acesso e marcar como Ativo"
-                                      >
-                                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                                        <span>Marcar Ativo</span>
-                                      </Button>
-                                    </>
-                                  )}
-
-                                  {/* Botão Redefinir Senha */}
-                                  {!isCoordinator && (
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => handleResetLeaderPassword(user)}
-                                      className="h-9 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
-                                      title="Redefinir senha temporária"
-                                    >
-                                      <KeyRound className="w-3 h-3 text-orange-400" />
-                                      <span>Redefinir Senha</span>
-                                    </Button>
-                                  )}
-
-                                  {/* Botão Promover / Rebaixar Cargo */}
-                                  {!isCoordinator ? (
-                                    <Button
-                                      size="sm"
-                                      onClick={() => handlePromoteToCoordinator(user)}
-                                      className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm"
-                                      title="Promover a Coordenador Geral"
-                                    >
-                                      <Award className="w-3 h-3 text-white" />
-                                      <span>Promover a Coordenador</span>
-                                    </Button>
-                                  ) : (
-                                    !isSelf && (
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => handleDemoteToLeader(user)}
-                                        className="h-9 px-2 bg-[#17171d] hover:bg-[#22222a] border-[#292935] text-[#a1a1aa] hover:text-white text-[11px] font-semibold rounded-lg"
-                                        title="Alterar para Líder de Produção"
-                                      >
-                                        <span>Tornar Líder</span>
-                                      </Button>
-                                    )
-                                  )}
-
-                                  {/* Botão Alternar Status (Ativo / Bloqueado) */}
-                                  {!isSelf && (
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => handleToggleUserStatus(user)}
-                                      className={`h-9 px-2 text-[11px] font-bold rounded-lg ${
-                                        isActive
-                                          ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
-                                          : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
-                                      }`}
-                                      title={isActive ? 'Bloquear Acesso' : 'Desbloquear Acesso'}
-                                    >
-                                      {isActive ? <UserX className="w-3 h-3" /> : <UserCheck className="w-3 h-3" />}
-                                      <span>{isActive ? 'Bloquear' : 'Ativar'}</span>
-                                    </Button>
-                                  )}
-
-                                  {/* Botão Copiar SQL Confirmação E-mail */}
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleCopyConfirmEmailSql(user.email)}
-                                    className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
-                                    title="Copiar SQL para validar/confirmar e-mail no Supabase"
-                                  >
-                                    <Mail className="w-3.5 h-3.5" />
-                                  </Button>
-
-                                  {/* Botão Copiar SQL para Supabase */}
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={() => handleCopySqlForUser(user.email)}
-                                    className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
-                                    title="Copiar SQL de Coordenador para Supabase"
-                                  >
-                                    {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                                  </Button>
-
-                                  {/* Botão Excluir Colaborador */}
-                                  {!isSelf && (
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      onClick={() => handleOpenDeleteUserModal(user)}
-                                      className="h-9 w-9 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
-                                      title="Remover Colaborador"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </Button>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
+              {/* Cards de Colaboradores & Acessos */}
+              {filteredUsers.length === 0 ? (
+                <div className="bg-[#121216] border border-[#222226] rounded-2xl py-8 text-center text-[#71717a] text-xs">
+                  Nenhum colaborador encontrado com os filtros aplicados.
                 </div>
-              </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {filteredUsers.map((user) => {
+                    const isSelf = user.uid === profile?.uid;
+                    const isCoordinator = user.role === 'coordinator';
+                    const isActive = user.status !== 'inactive';
+                    const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
+                    const activeRule = (user.rule || getUserRule(user)) as AccessRule;
+                    const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
+
+                    return (
+                      <div
+                        key={user.uid || user.email}
+                        className={`bg-[#121216] border rounded-2xl p-3.5 flex flex-col gap-2.5 transition-colors ${
+                          isFirstAccess ? 'border-amber-800/40' : !isActive ? 'border-red-800/40' : 'border-[#222226]'
+                        }`}
+                      >
+                        {/* Cabeçalho: Avatar + Nome + Status */}
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black uppercase shrink-0 ${
+                              isCoordinator
+                                ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
+                                : 'bg-[#22222a] border border-[#2c2c36] text-[#a1a1aa]'
+                            }`}>
+                              {user.name.substring(0, 2)}
+                            </div>
+                            <p className="font-bold text-[#f4f4f5] text-xs flex items-center gap-1.5 flex-wrap min-w-0">
+                              <span className="truncate">{user.name}</span>
+                              {isSelf && (
+                                <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold shrink-0">
+                                  Você
+                                </span>
+                              )}
+                            </p>
+                          </div>
+                          {isFirstAccess ? (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-1 w-fit shrink-0 bg-amber-950/80 text-amber-300 border border-amber-800/40">
+                              <KeyRound className="w-2.5 h-2.5 text-amber-400" />
+                              <span>1º Acesso</span>
+                            </span>
+                          ) : (
+                            <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-1 w-fit shrink-0 ${
+                              isActive
+                                ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
+                                : 'bg-red-950/80 text-red-400 border border-red-800/40'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                              <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
+                            </span>
+                          )}
+                        </div>
+
+                        {/* E-mail */}
+                        <p className="font-mono text-[11px] text-[#a1a1aa] truncate">{user.email}</p>
+
+                        {/* Roles: Cargo/Área + Regra de Acesso */}
+                        <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1e1e24]">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
+                            isCoordinator
+                              ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
+                              : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
+                          }`}>
+                            {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
+                            <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
+                          </span>
+                          {!isCoordinator && (
+                            <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-[#14141a] border-[#2c2c38] text-[#a1a1aa]">
+                              {user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
+                            </span>
+                          )}
+                          <span className={`text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                            ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
+                          }`}>
+                            {ruleConfig.name}
+                          </span>
+                        </div>
+
+                        {/* Ações */}
+                        <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
+                          <button
+                            type="button"
+                            onClick={() => setDetailsModalUserId(user.uid || user.email)}
+                            className="flex-1 h-9 px-2.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-[11px] font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors"
+                            title="Ver mais detalhes e ações deste colaborador"
+                          >
+                            <Info className="w-3.5 h-3.5" />
+                            <span>Detalhes</span>
+                          </button>
+
+                          {!isCoordinator && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleResetLeaderPassword(user)}
+                              className="h-9 w-9 p-0 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 shrink-0"
+                              title="Redefinir senha temporária"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
+
+                          {!isSelf && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleToggleUserStatus(user)}
+                              className={`h-9 w-9 p-0 text-[11px] font-bold rounded-lg shrink-0 ${
+                                isActive
+                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
+                                  : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
+                              }`}
+                              title={isActive ? 'Bloquear Acesso' : 'Desbloquear Acesso'}
+                            >
+                              {isActive ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -2731,6 +2543,141 @@ WHERE email IN (
         </div>
       )}
 
+      {/* ---------------- MODAL: MAIS INFORMAÇÕES DA OP (Estoque de OPs) ---------------- */}
+      {detailsModalOp && (
+        <div
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDetailsModalOp(null);
+          }}
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+        >
+          <div className="bg-[#121216] border border-[#222228] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+
+            {/* Header */}
+            <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
+                  <Info className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
+                      Detalhes da OP
+                    </h3>
+                    <span className="text-[10px] bg-blue-950 text-blue-400 border border-blue-800/50 px-2 py-0.5 rounded-full font-mono font-bold">
+                      OP #{detailsModalOp.number}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#71717a] mt-0.5 truncate">
+                    {detailsModalOp.product}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setDetailsModalOp(null)}
+                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Conteúdo */}
+            <div className="p-5 space-y-3">
+              {(() => {
+                const op = detailsModalOp;
+                const assignedLine = lines.find(l => l.id === op.lineId);
+                const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
+                return (
+                  <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5 text-xs">
+
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Tipo / Setor</span>
+                      <span className="font-semibold text-[#f4f4f5] text-right">
+                        {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
+                        {op.setor ? ` · ${op.setor}` : ''}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
+                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Prioridade</span>
+                      <span className="font-semibold text-[#f4f4f5]">{op.priority}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1e1e24]">
+                      <div>
+                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Planejada</span>
+                        <span className="font-mono font-bold text-[#f4f4f5] text-[11px]">
+                          {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Produzida</span>
+                        <span className="font-mono font-bold text-emerald-400 text-[11px]">
+                          {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} {op.producedQuantity > 0 ? `(${progress}%)` : ''}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
+                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Granel</span>
+                      {op.granel ? (
+                        <span className="font-mono font-semibold text-amber-300 text-[11px]">{op.granel}</span>
+                      ) : (
+                        <span className="text-[#52525b] text-[11px] italic">Sem Granel</span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
+                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Linha Destino</span>
+                      {assignedLine ? (
+                        <span className="font-semibold text-[#d4d4d8] flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                          {assignedLine.name}
+                        </span>
+                      ) : (
+                        <span className="text-[#71717a] text-[11px] italic">Disponível no Estoque</span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
+                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Data Cronograma</span>
+                      {op.scheduledDate ? (
+                        <span className="font-semibold text-[#f4f4f5] flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+                          {op.scheduledShift ? ` · ${op.scheduledShift}` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-[#52525b] text-[11px] italic">Sem Data Prevista</span>
+                      )}
+                    </div>
+
+                    {op.setor === 'Pesagem' && op.status === 'completed' && (
+                      <div className="pt-2 border-t border-[#1e1e24]">
+                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
+                          Pronta p/ Manipulação
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="px-5 pb-5 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setDetailsModalOp(null)}
+                className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL CADASTRAR NOVO LÍDER */}
       {showNewLeaderModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -3172,6 +3119,281 @@ WHERE email IN (
         onAssignAndStart={handleAssignAndStart}
         onAssignToQueue={handleAssignToQueue}
       />
+
+      {/* ---------------- MODAL: DETALHES DO COLABORADOR (Gestão de Equipe) ---------------- */}
+      {detailsModalUserId && (() => {
+        const user = allUsers.find(u => (u.uid || u.email) === detailsModalUserId);
+        if (!user) return null;
+
+        const isSelf = user.uid === profile?.uid;
+        const isCoordinator = user.role === 'coordinator';
+        const isActive = user.status !== 'inactive';
+        const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
+        const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
+        const activeRule = (user.rule || getUserRule(user)) as AccessRule;
+        const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
+
+        return (
+          <div
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setDetailsModalUserId(null);
+            }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+          >
+            <div className="bg-[#121216] border border-[#222228] w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] flex flex-col">
+
+              {/* Header */}
+              <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xs font-black uppercase shrink-0 ${
+                    isCoordinator
+                      ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
+                      : 'bg-[#22222a] border border-[#2c2c36] text-[#a1a1aa]'
+                  }`}>
+                    {user.name.substring(0, 2)}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-sm font-bold text-[#f4f4f5] truncate">{user.name}</h3>
+                      {isSelf && (
+                        <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold shrink-0">
+                          Você
+                        </span>
+                      )}
+                      {isLocalOnly && (
+                        <span className="text-[9px] bg-amber-950/80 border border-amber-800/40 text-amber-300 px-1.5 py-0.2 rounded font-bold shrink-0" title="Salvo localmente (pendente envio ao Supabase)">
+                          Pendente Supabase
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-[#71717a] font-mono truncate">{user.email}</p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setDetailsModalUserId(null)}
+                  className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Conteúdo */}
+              <div className="p-5 space-y-4 overflow-y-auto">
+
+                {/* Cargo & Área */}
+                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
+                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Cargo / Área</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
+                      isCoordinator
+                        ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
+                        : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
+                    }`}>
+                      {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
+                      <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
+                    </span>
+
+                    {!isCoordinator ? (
+                      <select
+                        value={user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
+                        onChange={(e) => handleUpdateUserArea(user, e.target.value as any)}
+                        className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border bg-[#14141a] border-[#2c2c38] text-white focus:outline-none focus:border-blue-500 cursor-pointer shadow-sm"
+                        title="Clique para alterar a área de atuação deste líder (define a tela do chão de fábrica)"
+                      >
+                        <option value="Envase" className="bg-[#121217] text-[#3b82f6]">Área: Envase</option>
+                        <option value="Pesagem" className="bg-[#121217] text-[#c084fc]">Área: Pesagem</option>
+                        <option value="Manipulação" className="bg-[#121217] text-[#22d3ee]">Área: Manipulação</option>
+                      </select>
+                    ) : (
+                      <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-blue-950/70 text-blue-400 border-blue-500/40">
+                        Coordenação Geral
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Regra de Acesso */}
+                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2">
+                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Regra de Acesso (Rule)</span>
+                  <select
+                    value={activeRule}
+                    onChange={(e) => handleUpdateUserRule(user, e.target.value as AccessRule)}
+                    disabled={isSelf}
+                    className={`text-[10px] font-black uppercase tracking-wider px-2 py-1.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-sm w-full ${
+                      ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
+                    }`}
+                    title="Selecione a regra de acesso (define quais telas aparecem no menu lateral deste colaborador)"
+                  >
+                    {Object.entries(ACCESS_RULES).map(([key, cfg]) => (
+                      <option key={key} value={key} className="bg-[#121217] text-white">
+                        {cfg.name} ({cfg.tabs.length} telas)
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-[#71717a]">{ruleConfig.description}</p>
+                </div>
+
+                {/* Status de Acesso */}
+                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[#71717a] uppercase font-bold">Status de Acesso</span>
+                    {isFirstAccess ? (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit bg-amber-950/80 text-amber-300 border border-amber-800/40">
+                        <KeyRound className="w-3 h-3 text-amber-400" />
+                        <span>1º Acesso</span>
+                      </span>
+                    ) : (
+                      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
+                        isActive
+                          ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
+                          : 'bg-red-950/80 text-red-400 border border-red-800/40'
+                      }`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                        <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {isFirstAccess && (
+                    <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1e1e24]">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleCopyLeaderCredentials(user)}
+                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
+                        title="Copiar e-mail e senha padrão"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Copiar Acesso</span>
+                      </Button>
+
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleMarkAsActive(user)}
+                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
+                        title="Confirmar acesso e marcar como Ativo"
+                      >
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        <span>Marcar Ativo</span>
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Ações Administrativas */}
+                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
+                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Ações Administrativas</span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {!isCoordinator && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleResetLeaderPassword(user)}
+                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
+                        title="Redefinir senha temporária"
+                      >
+                        <KeyRound className="w-3 h-3 text-orange-400" />
+                        <span>Redefinir Senha</span>
+                      </Button>
+                    )}
+
+                    {!isSelf && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleToggleUserStatus(user)}
+                        className={`h-9 px-2 text-[11px] font-bold rounded-lg ${
+                          isActive
+                            ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
+                            : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
+                        }`}
+                        title={isActive ? 'Bloquear Acesso' : 'Desbloquear Acesso'}
+                      >
+                        {isActive ? <UserX className="w-3 h-3" /> : <UserCheck className="w-3 h-3" />}
+                        <span>{isActive ? 'Bloquear' : 'Ativar'}</span>
+                      </Button>
+                    )}
+
+                    {!isCoordinator ? (
+                      <Button
+                        size="sm"
+                        onClick={() => handlePromoteToCoordinator(user)}
+                        className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm"
+                        title="Promover a Coordenador Geral"
+                      >
+                        <Award className="w-3 h-3 text-white" />
+                        <span>Promover a Coordenador</span>
+                      </Button>
+                    ) : (
+                      !isSelf && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleDemoteToLeader(user)}
+                          className="h-9 px-2 bg-[#17171d] hover:bg-[#22222a] border-[#292935] text-[#a1a1aa] hover:text-white text-[11px] font-semibold rounded-lg"
+                          title="Alterar para Líder de Produção"
+                        >
+                          <span>Tornar Líder</span>
+                        </Button>
+                      )
+                    )}
+
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleCopyConfirmEmailSql(user.email)}
+                      className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg flex items-center gap-1"
+                      title="Copiar SQL para validar/confirmar e-mail no Supabase"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>SQL E-mail</span>
+                    </Button>
+
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleCopySqlForUser(user.email)}
+                      className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg flex items-center gap-1"
+                      title="Copiar SQL de Coordenador para Supabase"
+                    >
+                      {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>SQL Supabase</span>
+                    </Button>
+
+                    {!isSelf && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setDetailsModalUserId(null);
+                          handleOpenDeleteUserModal(user);
+                        }}
+                        className="h-9 px-2 text-red-400 hover:text-red-300 hover:bg-red-950/30 text-[11px] font-bold rounded-lg flex items-center gap-1"
+                        title="Remover Colaborador"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Excluir</span>
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-5 pb-5 flex items-center justify-end shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setDetailsModalUserId(null)}
+                  className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE COLABORADOR ---------------- */}
       {deleteUserModalData && (
