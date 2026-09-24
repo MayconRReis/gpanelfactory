@@ -29,6 +29,7 @@ import {
   ShieldCheck,
   Sparkles,
   Plus,
+  XCircle,
 } from 'lucide-react';
 import {
   getLines,
@@ -38,6 +39,7 @@ import {
   pauseOP,
   resumeOP,
   finishOP,
+  cancelOP,
   reportQuantity,
   saveLeaderRotation,
   getRecentEvents,
@@ -120,6 +122,10 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [pauseReason, setPauseReason] = useState('');
   const [pauseObs, setPauseObs] = useState('');
   const [pauseProducedQty, setPauseProducedQty] = useState('');
+
+  const [isCancelOpen, setIsCancelOpen] = useState(false);
+  const [isCancellingOp, setIsCancellingOp] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const [isReportOpen, setIsReportOpen] = useState(false);
   const [quantity, setQuantity] = useState('');
@@ -382,6 +388,23 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     setFinishProductionType('total');
     setFinishSendToSleeve(false);
     await fetchData(true);
+  };
+
+  const handleCancelOp = async () => {
+    if (!currentLine || !activeOp) return;
+    setIsCancellingOp(true);
+    setCancelError(null);
+    try {
+      const res = await cancelOP(activeOp.id, currentLine.id);
+      if (res.success) {
+        setIsCancelOpen(false);
+        await fetchData(true);
+      } else {
+        setCancelError(res.message || 'Não foi possível cancelar esta OP.');
+      }
+    } finally {
+      setIsCancellingOp(false);
+    }
   };
 
   // -------------------------------------------------------------
@@ -1054,6 +1077,22 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   )}
 
                 </div>
+
+                {/* Cancelar OP iniciada por engano — só aparece enquanto nada
+                    foi produzido/apontado nela ainda, pra nunca descartar
+                    produção real por engano. */}
+                {(activeOp.status === 'in_progress' || activeOp.status === 'paused') && activeOp.producedQuantity === 0 && (
+                  <div className="flex justify-center pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsCancelOpen(true)}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11px] font-bold text-rose-400/80 hover:text-rose-300 hover:bg-rose-950/20 transition-all"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      Cancelar (iniciada por engano)
+                    </button>
+                  </div>
+                )}
 
               </div>
             ) : (
@@ -1765,6 +1804,50 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               className="bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
             >
               Confirmar Pausa
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: CANCELAR OP INICIADA POR ENGANO */}
+      <Dialog open={isCancelOpen} onOpenChange={(open) => { setIsCancelOpen(open); if (!open) setCancelError(null); }}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-rose-400 flex items-center gap-2">
+              <XCircle className="w-5 h-5" />
+              Cancelar Início da {docTypeLabel}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-3 py-3">
+            <p className="text-sm text-[#d4d4d8]">
+              Tem certeza que deseja cancelar o início da <strong className="text-white">{docTypeLabel} {activeOp?.number}</strong>?
+            </p>
+            <p className="text-xs text-[#a1a1aa]">
+              Ela volta para "Aguardando" na fila desta linha, como se nunca tivesse sido iniciada — o horário de início registrado por engano é apagado e não entra nos indicadores de Disponibilidade/Ociosidade.
+            </p>
+            {cancelError && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-lg px-3 py-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-rose-300">{cancelError}</p>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setIsCancelOpen(false)}
+              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={handleCancelOp}
+              disabled={isCancellingOp}
+              className="bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              {isCancellingOp ? 'Cancelando...' : 'Sim, Cancelar Início'}
             </Button>
           </DialogFooter>
         </DialogContent>

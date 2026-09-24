@@ -24,9 +24,10 @@ import {
   Check,
   BarChart3,
   TrendingUp,
-  FileSpreadsheet
+  FileSpreadsheet,
+  XCircle
 } from 'lucide-react';
-import { getAllOPs, createOP, finishOP } from '../services/db';
+import { getAllOPs, createOP, finishOP, deleteOP } from '../services/db';
 import { ProductionOrder } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
@@ -62,6 +63,8 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
 
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
+  const [cancellingOp, setCancellingOp] = useState<ProductionOrder | null>(null);
+  const [isCancellingSubmitting, setIsCancellingSubmitting] = useState(false);
   const [selectedShift, setSelectedShift] = useState<'Manhã' | 'Tarde'>('Manhã');
   const [finalKg, setFinalKg] = useState<string>('');
   const [isFinishingSubmitting, setIsFinishingSubmitting] = useState(false);
@@ -286,6 +289,27 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       showToast('Erro ao finalizar OP.', 'error');
     } finally {
       setIsFinishingSubmitting(false);
+    }
+  };
+
+  // Cancelar OSM de Manipulação iniciada por engano — como ela nasce
+  // diretamente "em andamento" a partir da OSM de Pesagem (sem nunca ter
+  // existido um estado "pendente" pra voltar), cancelar aqui significa
+  // excluir a OSM recém-criada. A OSM de Pesagem de origem não é afetada —
+  // ela volta a aparecer em "OPs Disponíveis" pra iniciar a manipulação de novo.
+  const handleConfirmCancel = async () => {
+    if (!cancellingOp) return;
+    setIsCancellingSubmitting(true);
+    try {
+      await deleteOP(cancellingOp.id);
+      showToast(`Início da OP ${cancellingOp.number} cancelado.`, 'info');
+      setCancellingOp(null);
+      await fetchData(true);
+    } catch (err) {
+      console.error('Erro ao cancelar OSM de Manipulação:', err);
+      showToast('Erro ao cancelar esta OP.', 'error');
+    } finally {
+      setIsCancellingSubmitting(false);
     }
   };
 
@@ -566,13 +590,22 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
                       </div>
                     </div>
 
-                    <Button
-                      onClick={() => handleOpenFinishModal(op)}
-                      className="h-11 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-                    >
-                      <CheckCircle2 className="w-4 h-4" />
-                      <span>Finalizar OP</span>
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        onClick={() => handleOpenFinishModal(op)}
+                        className="flex-1 h-11 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Finalizar OP</span>
+                      </Button>
+                      <Button
+                        onClick={() => setCancellingOp(op)}
+                        title="Cancelar (iniciada por engano)"
+                        className="h-11 w-11 shrink-0 rounded-xl bg-[#18181b] hover:bg-rose-950/30 text-rose-400/80 hover:text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </Button>
+                    </div>
                   </div>
                 );
               })}
@@ -880,6 +913,59 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
               </DialogFooter>
             </form>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: CANCELAR OSM DE MANIPULAÇÃO INICIADA POR ENGANO */}
+      <Dialog open={!!cancellingOp} onOpenChange={(open) => !open && setCancellingOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <DialogTitle className="text-sm font-black uppercase tracking-wider text-rose-400 flex items-center gap-2">
+              <XCircle className="w-5 h-5" />
+              Cancelar Início da Manipulação
+            </DialogTitle>
+          </DialogHeader>
+
+          {cancellingOp && (
+            <div className="space-y-3 py-2">
+              <p className="text-sm text-[#d4d4d8]">
+                Tem certeza que deseja cancelar o início da manipulação da OP <strong className="text-white">{cancellingOp.number}</strong>?
+              </p>
+              <p className="text-xs text-[#a1a1aa]">
+                Esta OSM de Manipulação é excluída e a OP volta a aparecer em "OPs Disponíveis" pra iniciar a manipulação de novo, quando for a hora certa.
+              </p>
+            </div>
+          )}
+
+          <DialogFooter className="pt-1 gap-2 flex-col sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCancellingOp(null)}
+              disabled={isCancellingSubmitting}
+              className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
+            >
+              Voltar
+            </Button>
+            <Button
+              type="button"
+              onClick={handleConfirmCancel}
+              disabled={isCancellingSubmitting}
+              className="h-10 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-950/50 flex items-center justify-center gap-1.5 w-full sm:w-auto"
+            >
+              {isCancellingSubmitting ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Cancelando...</span>
+                </>
+              ) : (
+                <>
+                  <XCircle className="w-3.5 h-3.5" />
+                  <span>Sim, Cancelar Início</span>
+                </>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

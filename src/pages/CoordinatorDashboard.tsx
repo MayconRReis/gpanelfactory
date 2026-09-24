@@ -42,7 +42,8 @@ import {
   KeyRound,
   Edit2,
   Loader2,
-  Info
+  Info,
+  XCircle
 } from 'lucide-react';
 import { 
   getLines, 
@@ -2116,6 +2117,7 @@ WHERE email IN (
                             evt.type === 'PAUSED' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
                             evt.type === 'RESUMED' ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40' :
                             evt.type === 'FINISHED' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
+                            evt.type === 'CANCELLED' ? 'bg-rose-950/80 text-rose-400 border border-rose-800/40' :
                             'bg-[#1c1c24] text-[#a1a1aa]'
                           }`}>
                             {evt.type === 'STARTED' && <Play className="w-3.5 h-3.5" />}
@@ -2123,6 +2125,7 @@ WHERE email IN (
                             {evt.type === 'RESUMED' && <Play className="w-3.5 h-3.5" />}
                             {evt.type === 'FINISHED' && <CheckCircle2 className="w-3.5 h-3.5" />}
                             {evt.type === 'QUANTITY_REPORTED' && <TrendingUp className="w-3.5 h-3.5" />}
+                            {evt.type === 'CANCELLED' && <XCircle className="w-3.5 h-3.5" />}
                           </div>
 
                           <div className="min-w-0">
@@ -2133,6 +2136,7 @@ WHERE email IN (
                                 {evt.type === 'RESUMED' && 'Retomada de Produção'}
                                 {evt.type === 'FINISHED' && 'Conclusão de Lote'}
                                 {evt.type === 'QUANTITY_REPORTED' && `Apontamento de Quantidade (+${evt.quantity} un)`}
+                                {evt.type === 'CANCELLED' && 'Início Cancelado (por engano)'}
                               </span>
                               <span className="text-[10px] text-blue-400 font-mono font-bold">
                                 {evt.opNumber ? `OP ${evt.opNumber}` : ''}

@@ -3122,6 +3122,114 @@ export const finishOP = async (
   }
 };
 
+/**
+ * Cancela uma OP iniciada por engano — devolve para "Aguardando" (pending)
+ * e remove os eventos (STARTED/PAUSED/RESUMED) desta sessão errada, pra não
+ * contaminar o cálculo real de Disponibilidade/Ociosidade com um horário de
+ * início que nunca deveria ter existido (ver calculateProductionTime).
+ *
+ * Só permite cancelar enquanto NADA foi produzido/apontado nesta OP
+ * (`producedQuantity === 0`) — se já existe quantidade real reportada, isso
+ * deixou de ser um clique errado sem consequência e precisa ser resolvido
+ * via Pausar/Finalizar (nunca descartado silenciosamente).
+ */
+export const cancelOP = async (
+  opId: string,
+  lineId: string,
+  reason?: string
+): Promise<{ success: boolean; message?: string }> => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    if (!currentOp) return { success: false, message: 'OP não encontrada.' };
+    if ((currentOp.producedQuantity || 0) > 0) {
+      return { success: false, message: 'Esta OP já tem quantidade produzida registrada — não pode ser cancelada, apenas pausada ou finalizada.' };
+    }
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'pending', leaderId: null } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+    trainingEvents = [
+      {
+        id: `sim-ev-${Date.now()}`,
+        opId,
+        opNumber: currentOp.number,
+        lineId,
+        lineName: trainingLines.find(l => l.id === lineId)?.name || lineId,
+        type: 'CANCELLED',
+        observation: reason || 'Início cancelado (iniciado por engano)',
+        createdAt: new Date().toISOString(),
+      },
+      ...trainingEvents.filter(e => e.opId !== opId),
+    ];
+    return { success: true };
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  if (!currentOp) {
+    return { success: false, message: 'OP não encontrada.' };
+  }
+  if ((currentOp.producedQuantity || 0) > 0) {
+    return { success: false, message: 'Esta OP já tem quantidade produzida registrada — não pode ser cancelada, apenas pausada ou finalizada.' };
+  }
+
+  // "Sessão errada" = tudo que aconteceu com esta OP desde o último STARTED
+  // (inclusive) — nunca eventos de sessões anteriores legítimas (ex.: uma OP
+  // que já foi para o Sleev e voltou ao estoque com producedQuantity zerado
+  // de propósito ainda carrega o histórico real da etapa anterior).
+  const opEventsDesc = inMemoryEvents
+    .filter(e => e.opId === opId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const lastStarted = opEventsDesc.find(e => e.type === 'STARTED');
+  const cutoffIso = lastStarted?.createdAt || new Date().toISOString();
+
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const cancelledEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId: currentOp.leaderId || undefined,
+    type: 'CANCELLED',
+    observation: reason || 'Início cancelado (iniciado por engano)',
+    createdAt: new Date().toISOString(),
+  };
+
+  inMemoryEvents = [
+    cancelledEvent,
+    ...inMemoryEvents.filter(e => !(e.opId === opId && e.createdAt >= cutoffIso)),
+  ];
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'pending', leaderId: null } : op);
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+
+  persistEvents();
+  persistOps();
+  persistLines();
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_orders').update({ status: 'pending', leader_id: null }).eq('id', opId),
+      supabase.from('ops').update({ status: 'pending', leader_id: null }).eq('id', opId),
+      supabase.from('events').delete().eq('op_id', opId).gte('created_at', cutoffIso),
+      supabase.from('production_events').delete().eq('op_id', opId).gte('created_at', cutoffIso),
+    ]);
+    await updateLineStatusRemote(lineId, 'idle', null);
+    // Registra um único evento de auditoria (sem horário de início/fim
+    // associado, então é inofensivo pro cálculo de tempo) — só pra deixar
+    // rastro de que isso aconteceu.
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId: currentOp.leaderId || undefined,
+      type: 'CANCELLED',
+      observation: reason || 'Início cancelado (iniciado por engano)',
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Erro ao cancelar OP:', error);
+  }
+
+  return { success: true };
+};
+
 export const reportQuantity = async (
   opId: string,
   lineId: string,

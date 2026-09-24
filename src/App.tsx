@@ -6,6 +6,7 @@ import { Login } from './pages/Login';
 import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
 import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
 import { PublicDashboardView } from './pages/PublicDashboardView';
+import { UpdateNotifier } from './components/UpdateNotifier';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, profile, isLoading } = useAuthStore();
@@ -73,6 +74,10 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
+      {/* Aviso de nova atualização disponível — fora das Routes de propósito,
+          pra ficar sempre montado (login, dashboard público ou app logado)
+          e nunca desmontar numa troca de rota. */}
+      <UpdateNotifier />
     </AuthProvider>
   );
 }

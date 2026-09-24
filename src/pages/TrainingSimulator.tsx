@@ -171,13 +171,19 @@ export function TrainingSimulator() {
 
       <div className="flex-1 min-h-0">
         {area === 'pesagem' && (
-          <PesagemScreen key={`pesagem-${resetKey}`} embedded hideDashboardTabs />
+          <div key={`pesagem-${resetKey}`} className="h-full">
+            <PesagemScreen embedded hideDashboardTabs />
+          </div>
         )}
         {area === 'manipulacao' && (
-          <ManipulacaoScreen key={`manipulacao-${resetKey}`} embedded hideDashboardTabs />
+          <div key={`manipulacao-${resetKey}`} className="h-full">
+            <ManipulacaoScreen embedded hideDashboardTabs />
+          </div>
         )}
         {area === 'envase' && (
-          <LeaderScreen key={`envase-${resetKey}`} embedded hideDashboardTabs />
+          <div key={`envase-${resetKey}`} className="h-full">
+            <LeaderScreen embedded hideDashboardTabs />
+          </div>
         )}
       </div>
 
