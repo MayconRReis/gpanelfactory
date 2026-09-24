@@ -90,8 +90,16 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   // Ref estável para fetchData
   const fetchDataRef = useRef<(showRefreshing?: boolean) => Promise<void>>();
 
+  // Um evento Realtime pode chegar enquanto o fetch anterior ainda está no
+  // ar. Sem controle, chamadas concorrentes correm em paralelo e a que
+  // resolver por último "ganha" — se for a mais antiga (azar de rede), ela
+  // sobrescreve a tela com dados já desatualizados. Este contador garante
+  // que só a resposta da chamada mais recente é aplicada.
+  const fetchRequestIdRef = useRef(0);
+
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!profile) return;
+    const requestId = ++fetchRequestIdRef.current;
     try {
       if (showRefreshing) {
         setIsRefreshing(true);
@@ -100,13 +108,19 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       }
 
       const allOps = await getAllOPs();
+
+      // Uma chamada mais nova já assumiu — descarta esta resposta desatualizada.
+      if (requestId !== fetchRequestIdRef.current) return;
+
       setOps(allOps);
     } catch (err) {
       console.error('Erro ao carregar dados de manipulação:', err);
       showToast('Erro ao carregar dados.', 'error');
     } finally {
-      setLoading(false);
-      setIsRefreshing(false);
+      if (requestId === fetchRequestIdRef.current) {
+        setLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [profile]);
 

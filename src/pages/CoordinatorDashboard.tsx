@@ -275,10 +275,28 @@ export function CoordinatorDashboard() {
   // apontamentos seguidos) ou o poll de segurança caindo em cima de uma
   // requisição ainda em andamento não deve empilhar múltiplas chamadas
   // simultâneas a todas as tabelas.
+  //
+  // IMPORTANTE: antes, um evento Realtime que chegasse durante um loadData()
+  // já em andamento era simplesmente DESCARTADO (o guard abaixo só tinha o
+  // "return", sem lembrar de tentar de novo depois) — se esse fosse o último
+  // evento antes do estado final no banco, a tela ficava visivelmente
+  // desatualizada até o próximo poll de 15s ou até sair e entrar na página de
+  // novo (o que força um loadData() novo, sem esse guard no caminho). Agora
+  // `pendingReloadRef` marca "chegou coisa nova enquanto eu carregava" e o
+  // `finally` dispara um loadData() extra assim que o atual terminar, então
+  // nenhuma atualização fica perdida — o pior caso passa a ser um pequeno
+  // atraso (esperar o fetch em andamento terminar), nunca mais um "travado".
   const isLoadingDataRef = useRef(false);
+  const pendingReloadRef = useRef(false);
 
   const loadData = async () => {
-    if (isLoadingDataRef.current) return;
+    if (isLoadingDataRef.current) {
+      // Já tem um loadData() rodando — não empilha uma segunda chamada
+      // simultânea, mas marca que precisa recarregar de novo assim que a
+      // atual terminar, pra não perder este evento.
+      pendingReloadRef.current = true;
+      return;
+    }
     isLoadingDataRef.current = true;
     try {
       const currentYear = new Date().getFullYear();
@@ -311,6 +329,10 @@ export function CoordinatorDashboard() {
       console.warn('Erro ao carregar dados do coordenador:', e);
     } finally {
       isLoadingDataRef.current = false;
+      if (pendingReloadRef.current) {
+        pendingReloadRef.current = false;
+        loadData();
+      }
     }
   };
 

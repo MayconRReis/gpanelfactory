@@ -2924,6 +2924,30 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
   }
 };
 
+// Monta os dados de uma nova OP "resto" a partir da OP original, usada tanto
+// na conclusão Parcial simples quanto na combinação Parcial + Sleev — o saldo
+// que não coube nesta conclusão (estimativa - quantidade apontada) vira uma
+// OP nova e independente, livre no estoque para um próximo envase, mantendo
+// os mesmos dados de produto/lote/granel/prioridade da OP original. O sufixo
+// "-R" no número deixa claro, no Estoque/Cronograma, que ela é o resto de
+// outra OP.
+function buildRemainderOpData(sourceOp: ProductionOrder, remainderQty: number) {
+  return {
+    number: `${sourceOp.number}-R`,
+    product: sourceOp.product,
+    lote: sourceOp.lote,
+    plannedQuantity: remainderQty,
+    granel: sourceOp.granel,
+    priority: sourceOp.priority,
+    lineId: null,
+    setor: sourceOp.setor,
+    unidade: sourceOp.unidade,
+    tipoDocumento: sourceOp.tipoDocumento,
+    industria: sourceOp.industria,
+    status: 'pending' as const,
+  };
+}
+
 export const finishOP = async (
   opId: string,
   lineId: string,
@@ -2931,16 +2955,24 @@ export const finishOP = async (
   finishedShift?: 'Manhã' | 'Tarde',
   producedQuantity?: number,
   sendToSleeve?: boolean,
-  rejectedQuantity?: number
+  lostQuantity?: number,
+  isPartial?: boolean
 ) => {
   if (trainingModeActive) {
     const currentOp = trainingOps.find(op => op.id === opId);
     const currentLine = trainingLines.find(l => l.id === lineId);
     const completedAtIso = new Date().toISOString();
     const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
-    const finalRejectedQty = rejectedQuantity !== undefined ? rejectedQuantity : (currentOp?.rejectedQuantity || 0);
+    const finalLostQty = lostQuantity !== undefined ? lostQuantity : (currentOp?.rejectedQuantity || 0);
+    const plannedQty = currentOp?.plannedQuantity || 0;
+    // Só é de fato "parcial" se sobra saldo da estimativa — se o apontamento
+    // já cobre tudo, não há resto e a conclusão se comporta como Total.
+    const remainderQty = isPartial ? Math.max(0, plannedQty - finalProducedQty) : 0;
+    const effectivePartial = Boolean(isPartial) && remainderQty > 0;
 
     if (sendToSleeve) {
+      // A quantidade apontada segue a regra do Sleev normalmente — a OP
+      // original vira a OP do Sleev com essa quantidade como novo planejado.
       trainingOps = trainingOps.map(op =>
         op.id === opId
           ? {
@@ -2957,6 +2989,29 @@ export const finishOP = async (
             }
           : op
       );
+      // Parcial + Sleev: o saldo que não foi pro Sleev fica disponível como
+      // uma OP nova, comum (sem Sleev), pronta para um novo envase.
+      if (effectivePartial && currentOp) {
+        await createOP(buildRemainderOpData(currentOp, remainderQty));
+      }
+    } else if (effectivePartial && currentOp) {
+      // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
+      // como novo planejado, pronta para ser retomada num novo envase.
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'pending',
+              lineId: null,
+              leaderId: null,
+              plannedQuantity: remainderQty,
+              producedQuantity: 0,
+              rejectedQuantity: 0,
+              finishedShift: undefined,
+              completedAt: undefined,
+            }
+          : op
+      );
     } else {
       trainingOps = trainingOps.map(op =>
         op.id === opId
@@ -2966,7 +3021,7 @@ export const finishOP = async (
               finishedShift: finishedShift || undefined,
               completedAt: completedAtIso,
               producedQuantity: finalProducedQty,
-              rejectedQuantity: finalRejectedQty,
+              rejectedQuantity: finalLostQty,
               leaderId: leaderId || op.leaderId,
               isSleeve: false,
             }
@@ -2992,10 +3047,15 @@ export const finishOP = async (
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const completedAtIso = new Date().toISOString();
   const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
-  // Quantidade rejeitada informada AGORA (na conclusão desta etapa). Sem
+  // Quantidade perdida informada AGORA (na conclusão desta etapa). Sem
   // integração com o laboratório ainda, é o próprio líder que registra isso
   // ao concluir a OP — usado no cálculo de Qualidade do OEE.
-  const finalRejectedQty = rejectedQuantity !== undefined ? rejectedQuantity : (currentOp?.rejectedQuantity || 0);
+  const finalLostQty = lostQuantity !== undefined ? lostQuantity : (currentOp?.rejectedQuantity || 0);
+  const plannedQty = currentOp?.plannedQuantity || 0;
+  // Só é de fato "parcial" se sobra saldo da estimativa — se o apontamento já
+  // cobre tudo, não há resto e a conclusão se comporta como Total.
+  const remainderQty = isPartial ? Math.max(0, plannedQty - finalProducedQty) : 0;
+  const effectivePartial = Boolean(isPartial) && remainderQty > 0;
 
   if (sendToSleeve) {
     markOpAsSleeve(opId, true);
@@ -3015,6 +3075,25 @@ export const finishOP = async (
           }
         : op
     );
+  } else if (effectivePartial && currentOp) {
+    // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
+    // como novo planejado, pronta para ser retomada num novo envase.
+    markOpAsSleeve(opId, false);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'pending',
+            lineId: null,
+            leaderId: null,
+            plannedQuantity: remainderQty,
+            producedQuantity: 0,
+            rejectedQuantity: 0,
+            finishedShift: undefined,
+            completedAt: undefined,
+          }
+        : op
+    );
   } else {
     markOpAsSleeve(opId, false);
     inMemoryOps = inMemoryOps.map(op =>
@@ -3025,7 +3104,7 @@ export const finishOP = async (
             finishedShift: finishedShift || undefined,
             completedAt: completedAtIso,
             producedQuantity: finalProducedQty,
-            rejectedQuantity: finalRejectedQty,
+            rejectedQuantity: finalLostQty,
             leaderId: leaderId || op.leaderId,
             isSleeve: false,
           }
@@ -3038,7 +3117,9 @@ export const finishOP = async (
   persistLines();
 
   const observation = sendToSleeve
-    ? `Envase finalizado (${finalProducedQty.toLocaleString('pt-BR')} un${finalRejectedQty > 0 ? `, ${finalRejectedQty.toLocaleString('pt-BR')} rejeitada(s)` : ''}). Retornou ao estoque para acabamento no Sleev.`
+    ? `Envase finalizado (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Retornou ao estoque para acabamento no Sleev${effectivePartial ? `, com ${remainderQty.toLocaleString('pt-BR')} un de saldo liberadas em uma nova OP` : ''}.`
+    : effectivePartial
+    ? `Envase parcial (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Saldo de ${remainderQty.toLocaleString('pt-BR')} un voltou ao estoque para um novo envase.`
     : undefined;
 
   const newEvent: ProductionEvent = {
@@ -3055,6 +3136,13 @@ export const finishOP = async (
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  // Parcial + Sleev: o saldo que não foi pro Sleev vira uma OP nova, comum
+  // (sem Sleev), pronta para um novo envase — feito depois de persistir o
+  // registro principal, e via createOP (que já cuida de Supabase sozinha).
+  if (sendToSleeve && effectivePartial && currentOp) {
+    await createOP(buildRemainderOpData(currentOp, remainderQty));
+  }
+
   const opPayload: any = sendToSleeve
     ? {
         status: 'pending',
@@ -3065,11 +3153,21 @@ export const finishOP = async (
         rejected_quantity: 0,
         finished_shift: null,
       }
+    : effectivePartial
+    ? {
+        status: 'pending',
+        line_id: null,
+        leader_id: null,
+        planned_quantity: remainderQty,
+        produced_quantity: 0,
+        rejected_quantity: 0,
+        finished_shift: null,
+      }
     : {
         status: 'completed',
         finished_shift: finishedShift || null,
         produced_quantity: finalProducedQty,
-        rejected_quantity: finalRejectedQty,
+        rejected_quantity: finalLostQty,
         leader_id: leaderId || null,
         completed_at: completedAtIso,
       };

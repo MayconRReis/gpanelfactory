@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 
 interface CronogramaBoardProps {
@@ -254,20 +254,30 @@ export function CronogramaBoard({
   const renderCard = (op: ProductionOrder, columnId: string) => {
     const isCritical = op.priority === 'Crítica' || op.priority === 'Alta';
     const isDragOverTarget = dragOverOpId === op.id && draggingOpId !== op.id;
+    // OP em produção ou pausada já tem horário de início real registrado —
+    // mover ou editar o card daqui pra frente bagunçaria os dados de
+    // Disponibilidade/Ociosidade (ver cancelOP/calculateProductionTime), então
+    // trava o card nesses dois status: só dá pra pausar/retomar/concluir pela
+    // tela de operação da linha.
+    const isLocked = op.status === 'in_progress' || op.status === 'paused';
     return (
       <div
         key={op.id}
-        draggable
-        onDragStart={(e) => handleDragStart(e, op.id)}
+        draggable={!isLocked}
+        onDragStart={(e) => (isLocked ? e.preventDefault() : handleDragStart(e, op.id))}
         onDragEnd={handleDragEnd}
         onDragOver={(e) => handleDragOverCard(e, columnId, op.id)}
         onDrop={(e) => handleDropOnCard(e, columnId, op.id)}
-        onClick={() => onOpenEditOpModal && onOpenEditOpModal(op)}
-        className={`p-2.5 rounded-xl border text-xs cursor-grab active:cursor-grabbing transition-all shadow-sm select-none ${
+        onClick={() => !isLocked && onOpenEditOpModal && onOpenEditOpModal(op)}
+        className={`p-2.5 rounded-xl border text-xs transition-all shadow-sm select-none ${
+          isLocked ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'
+        } ${
           draggingOpId === op.id ? 'opacity-30' : 'opacity-100'
         } ${
           op.status === 'in_progress'
-            ? 'bg-emerald-950/70 hover:border-emerald-500'
+            ? 'bg-emerald-950/70'
+            : op.status === 'paused'
+            ? 'bg-amber-950/40'
             : op.priority === 'Crítica'
             ? 'bg-red-950/60 hover:border-red-500'
             : op.priority === 'Alta'
@@ -278,17 +288,27 @@ export function CronogramaBoard({
             ? 'border-blue-400 ring-2 ring-blue-500/40'
             : op.status === 'in_progress'
             ? 'border-emerald-700/60'
+            : op.status === 'paused'
+            ? 'border-amber-700/50'
             : op.priority === 'Crítica'
             ? 'border-red-800/60'
             : op.priority === 'Alta'
             ? 'border-orange-800/50'
             : 'border-[#2c2c3c]'
         }`}
-        title="Arraste para reordenar a fila desta linha, ou solte em outra coluna para reatribuir"
+        title={
+          isLocked
+            ? `Esta OP está ${op.status === 'in_progress' ? 'em produção' : 'pausada'} — não é possível mover ou editar por aqui enquanto estiver assim. Use a tela de operação da linha.`
+            : 'Arraste para reordenar a fila desta linha, ou solte em outra coluna para reatribuir'
+        }
       >
         <div className="flex items-center justify-between gap-1.5 mb-1">
           <div className="flex items-center gap-1">
-            <GripVertical className="w-3 h-3 text-[#52525b] shrink-0" />
+            {isLocked ? (
+              <Lock className="w-3 h-3 text-[#52525b] shrink-0" />
+            ) : (
+              <GripVertical className="w-3 h-3 text-[#52525b] shrink-0" />
+            )}
             <span className="font-mono font-bold text-white text-[11px]">OP {op.number}</span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -300,6 +320,10 @@ export function CronogramaBoard({
             {op.status === 'in_progress' ? (
               <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-emerald-500 text-black uppercase">
                 Produzindo
+              </span>
+            ) : op.status === 'paused' ? (
+              <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500 text-black uppercase">
+                Pausada
               </span>
             ) : isCritical ? (
               <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-red-900/80 text-red-300 border border-red-700/50 flex items-center gap-0.5">

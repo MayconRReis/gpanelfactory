@@ -134,7 +134,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [isFinishOpen, setIsFinishOpen] = useState(false);
   const [finishShift, setFinishShift] = useState<'Manhã' | 'Tarde' | null>(null);
   const [finishProducedQty, setFinishProducedQty] = useState('');
-  const [finishRejectedQty, setFinishRejectedQty] = useState('');
+  const [finishLostQty, setFinishLostQty] = useState('');
   const [finishProductionType, setFinishProductionType] = useState<'total' | 'parcial'>('total');
   const [finishSendToSleeve, setFinishSendToSleeve] = useState(false);
   const [isCancelFinishConfirmOpen, setIsCancelFinishConfirmOpen] = useState(false);
@@ -165,9 +165,20 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   // Ref estável para fetchData — resolve stale closure no Realtime/setInterval
   const fetchDataRef = useRef<(showRefreshing?: boolean) => Promise<void>>();
 
+  // Um evento Realtime pode chegar enquanto o fetch anterior ainda está no ar
+  // (ex.: finishOP grava em várias tabelas, cada uma dispara seu próprio
+  // postgres_changes). Sem controle, essas chamadas correm em paralelo e a
+  // que resolver por último "ganha" — se por azar de rede for a mais antiga,
+  // ela sobrescreve a tela com dados já desatualizados. Este contador marca
+  // qual é a chamada mais recente; uma resposta só é aplicada se ainda for a
+  // mais nova quando chegar, então a tela sempre converge pro estado real
+  // mais atual, nunca fica "presa" numa versão anterior.
+  const fetchRequestIdRef = useRef(0);
+
   // Busca e sincronização de dados
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!profile) return;
+    const requestId = ++fetchRequestIdRef.current;
     try {
       if (showRefreshing) {
         setIsRefreshing(true);
@@ -181,6 +192,10 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         getRecentEvents(),
         getPauseReasons(),
       ]);
+
+      // Uma chamada mais nova já assumiu enquanto esperávamos — descarta esta
+      // resposta desatualizada em vez de sobrescrever dados mais recentes.
+      if (requestId !== fetchRequestIdRef.current) return;
 
       setLines(loadedLines);
       setAllOps(loadedOps);
@@ -212,8 +227,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     } catch (error) {
       console.error('Erro ao carregar dados do líder:', error);
     } finally {
-      setLoading(false);
-      setIsRefreshing(false);
+      // Idem: só desliga o indicador de carregamento se ainda formos a
+      // chamada mais recente — senão apagaríamos o "carregando" de uma
+      // chamada mais nova que ainda está em andamento.
+      if (requestId === fetchRequestIdRef.current) {
+        setLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [profile]);
 
@@ -370,7 +390,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
     const parsedQty = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : undefined;
-    const parsedRejectedQty = finishRejectedQty.trim() !== '' ? parseInt(finishRejectedQty, 10) : undefined;
+    const parsedLostQty = finishLostQty.trim() !== '' ? parseInt(finishLostQty, 10) : undefined;
 
     await finishOP(
       activeOp.id,
@@ -379,12 +399,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       finishShift || undefined,
       parsedQty,
       finishSendToSleeve,
-      parsedRejectedQty
+      parsedLostQty,
+      finishProductionType === 'parcial'
     );
     setIsFinishOpen(false);
     setFinishShift(null);
     setFinishProducedQty('');
-    setFinishRejectedQty('');
+    setFinishLostQty('');
     setFinishProductionType('total');
     setFinishSendToSleeve(false);
     await fetchData(true);
@@ -1931,19 +1952,30 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 placeholder={`Quantidade produzida em ${displayUnit}`}
                 className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono text-white focus:border-emerald-500"
               />
+              {/* Saldo restante — só faz sentido mostrar na conclusão Parcial,
+                  já que é o que sobra pra uma próxima produção desta OP. */}
+              {finishProductionType === 'parcial' && activeOp && (() => {
+                const informed = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : 0;
+                const remainder = Math.max(0, activeOp.plannedQuantity - (isNaN(informed) ? 0 : informed));
+                return (
+                  <p className="text-[10px] text-amber-300 font-mono font-semibold">
+                    Saldo que volta para o estoque: {remainder.toLocaleString('pt-BR')} {displayUnit}
+                  </p>
+                );
+              })()}
             </div>
 
-            {/* Quantidade Rejeitada (opcional) — enquanto o laboratório não entra no fluxo,
+            {/* Quantidade Perdida (opcional) — enquanto o laboratório não entra no fluxo,
                 é o próprio líder que registra a perda ao concluir a OP */}
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-red-400 font-bold tracking-wider">
-                Quantidade Rejeitada ({displayUnit}) — Opcional
+                Quantidade Perdida ({displayUnit}) — Opcional
               </Label>
               <Input
                 type="number"
                 min="0"
-                value={finishRejectedQty}
-                onChange={e => setFinishRejectedQty(e.target.value)}
+                value={finishLostQty}
+                onChange={e => setFinishLostQty(e.target.value)}
                 placeholder="Ex: 20"
                 className="bg-[#181822] border-red-900/50 rounded-xl text-sm font-mono text-red-400 font-bold focus:border-red-500"
               />
@@ -1984,19 +2016,25 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   </span>
                 </div>
                 <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
-                  Se marcado, a OP retorna para o estoque e fica livre para ser produzida no <strong>Sleev</strong>, com a nova quantidade planejada de{' '}
+                  Se marcado, a quantidade apontada de{' '}
                   <strong className="text-purple-300 font-mono">
                     {finishProducedQty ? parseInt(finishProducedQty, 10).toLocaleString('pt-BR') : activeOp?.producedQuantity.toLocaleString('pt-BR') || '0'} {displayUnit}
                   </strong>{' '}
-                  (quantidade apontada).
+                  retorna ao estoque livre para acabamento no <strong>Sleev</strong>.
                 </p>
               </div>
             </div>
 
-            <p className="text-xs text-[#a1a1aa]">
-              {finishSendToSleeve
-                ? 'Ao concluir, o envase nesta linha será finalizado com a quantidade apontada acima, liberando a linha. A OP voltará ao estoque com o saldo apontado, livre para produção no Sleev.'
-                : 'Este será o valor total final produzido da OP (não soma com apontamentos anteriores). Ao concluir, a OP será encerrada com esta quantidade total e a linha ficará liberada.'}
+            {/* Descrição do resultado — muda conforme Total/Parcial × Sleev,
+                pra deixar claro o que vai acontecer com a OP ao confirmar. */}
+            <p className="text-xs text-[#a1a1aa] leading-relaxed">
+              {finishProductionType === 'total'
+                ? finishSendToSleeve
+                  ? 'Ao concluir, o envase nesta linha é finalizado com a quantidade apontada e a linha fica livre. A OP inteira volta ao estoque já pronta para acabamento no Sleev.'
+                  : 'Esta é a quantidade final desta OP. Ao concluir, ela é encerrada definitivamente e a linha fica livre — não será mais possível envasar essa OP novamente.'
+                : finishSendToSleeve
+                ? 'Ao concluir, a quantidade apontada segue para o Sleev normalmente. Já o saldo que sobrar da estimativa volta ao estoque como uma nova OP pendente, pronta para um novo envase (sem passar pelo Sleev).'
+                : 'A quantidade apontada é descontada da estimativa e registrada como produzida agora. O saldo que sobrar volta para o estoque como pendência, pronto para ser retomado em um novo envase desta OP.'}
             </p>
           </div>
 
@@ -2049,7 +2087,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 setIsFinishOpen(false);
                 setFinishShift(null);
                 setFinishProducedQty('');
-                setFinishRejectedQty('');
+                setFinishLostQty('');
                 setFinishProductionType('total');
                 setFinishSendToSleeve(false);
               }}
