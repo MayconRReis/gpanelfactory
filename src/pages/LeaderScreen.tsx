@@ -218,11 +218,28 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         } catch {
           // localStorage pode não estar disponível (ex.: modo privado) — sem problema, cai no fallback abaixo.
         }
-        if (restoredLineId && loadedLines.some(l => l.id === restoredLineId)) {
-          setSelectedLineId(restoredLineId);
-        } else {
-          setSelectedLineId(loadedLines[0]?.id || 'line-1');
-        }
+        const chosenLineId = (restoredLineId && loadedLines.some(l => l.id === restoredLineId))
+          ? restoredLineId
+          : (loadedLines[0]?.id || 'line-1');
+        setSelectedLineId(chosenLineId);
+
+        // IMPORTANTE: no banco, a permissão do líder para atualizar uma OP
+        // (iniciar, pausar, apontar, finalizar) é concedida pela política de
+        // RLS "Coordinators or assigned leaders can update OPs", que só
+        // libera a escrita quando `line_id = get_leader_assigned_line(auth.uid())`
+        // — e essa função lê a linha atual do líder na tabela `rotations`.
+        // Antes, essa tabela só era atualizada quando o líder trocava de
+        // linha manualmente (handleSwitchLine); quando a linha era apenas
+        // restaurada do localStorage ou escolhida por padrão (like aqui),
+        // o Supabase nunca ficava sabendo em qual linha o líder estava —
+        // então toda tentativa de iniciar/pausar/finalizar uma OP era
+        // aceita apenas localmente (otimista) e depois silenciosamente
+        // rejeitada pelo banco, revertendo assim que a tela recarregasse.
+        // Por isso replicamos aqui a mesma gravação feita em handleSwitchLine.
+        // (saveLeaderRotation já ignora sozinha o modo de treinamento.)
+        saveLeaderRotation(profile.uid, chosenLineId, profile.email, profile.name).catch((err) => {
+          console.warn('Não foi possível sincronizar a linha atual do líder com o Supabase:', err);
+        });
       }
     } catch (error) {
       console.error('Erro ao carregar dados do líder:', error);
