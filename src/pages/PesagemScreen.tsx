@@ -36,12 +36,23 @@ import { getIndustriaBadgeClass, isManualExitEligible } from '../lib/industria';
 
 interface PesagemScreenProps {
   embedded?: boolean;
+  /** Usado pelo Simulador de Treinamento — esconde a aba "Histórico &
+   * Gráficos", que não faz sentido sobre dados fictícios da simulação. */
+  hideDashboardTabs?: boolean;
 }
 
-export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
+export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: PesagemScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [activeViewTab, setActiveViewTab] = useState<'registro' | 'historico'>('registro');
+
+  // Em modo treinamento (hideDashboardTabs) só existe a aba de registro —
+  // garante que nunca fique "preso" na aba de histórico escondida.
+  useEffect(() => {
+    if (hideDashboardTabs && activeViewTab !== 'registro') {
+      setActiveViewTab('registro');
+    }
+  }, [hideDashboardTabs, activeViewTab]);
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [lines, setLines] = useState<ProductionLine[]>([]);
   const [leaders, setLeaders] = useState<UserProfile[]>([]);
@@ -530,25 +541,27 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveViewTab('historico')}
-              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
-                activeViewTab === 'historico'
-                  ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
-                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 shrink-0" />
-              <span>Histórico & Gráficos</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
-                activeViewTab === 'historico'
-                  ? 'bg-purple-800 text-purple-200'
-                  : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
-              }`}>
-                diário & mensal
-              </span>
-            </button>
+            {!hideDashboardTabs && (
+              <button
+                type="button"
+                onClick={() => setActiveViewTab('historico')}
+                className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                  activeViewTab === 'historico'
+                    ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
+                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+                }`}
+              >
+                <BarChart3 className="w-4 h-4 shrink-0" />
+                <span>Histórico & Gráficos</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
+                  activeViewTab === 'historico'
+                    ? 'bg-purple-800 text-purple-200'
+                    : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
+                }`}>
+                  diário & mensal
+                </span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">

@@ -7,7 +7,7 @@ export type AccessRule =
   | 'envase'          // Líder de Envase (Home + Chão de Fábrica)
   | 'custom';         // Personalizado (Seleção manual de telas)
 
-export type DashboardTab = 
+export type DashboardTab =
   | 'home'
   | 'pesagem'
   | 'manipulacao'
@@ -16,7 +16,8 @@ export type DashboardTab =
   | 'daily_production'
   | 'ops'
   | 'users'
-  | 'events';
+  | 'events'
+  | 'training';
 
 export interface UserProfile {
   uid: string;

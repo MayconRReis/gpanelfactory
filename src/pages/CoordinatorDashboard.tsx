@@ -87,12 +87,13 @@ import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
 import { LeaderScreen } from './LeaderScreen';
+import { TrainingSimulator } from './TrainingSimulator';
 import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, GraduationCap } from 'lucide-react';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -1111,6 +1112,11 @@ WHERE email IN (
       subtitle: 'Histórico detalhado de paradas, apontamentos e eventos',
       icon: History,
     },
+    training: {
+      title: 'Treinamento (Simulação)',
+      subtitle: 'Simula as telas dos líderes com OPs fictícias para treinamento, sem afetar a produção real',
+      icon: GraduationCap,
+    },
   };
 
   const currentScreen = screenTitles[activeTab] || screenTitles.home;
@@ -1233,6 +1239,14 @@ WHERE email IN (
             {/* ---------------- TELA: ENVASE (CHÃO DE FÁBRICA / PORTAL DO LÍDER) ---------------- */}
             {activeTab === 'envase' && (
               <LeaderScreen embedded={true} />
+            )}
+
+            {/* ---------------- TELA: TREINAMENTO (SIMULAÇÃO DAS TELAS DOS LÍDERES) ----------------
+                Só aparece pra quem tem a Rule "admin" (Coordenador Geral) — ver
+                ACCESS_RULES.admin.tabs em lib/permissions.ts. 100% dados fictícios,
+                nenhuma chamada a services/db.ts ou ao Supabase. */}
+            {activeTab === 'training' && (
+              <TrainingSimulator />
             )}
 
             {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}

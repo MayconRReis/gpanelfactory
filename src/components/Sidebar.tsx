@@ -15,6 +15,7 @@ import {
   Scale,
   FlaskConical,
   Kanban,
+  GraduationCap,
 } from 'lucide-react';
 import { UserProfile, DashboardTab } from '../types';
 import { getUserAllowedTabs, getUserRule, ACCESS_RULES } from '../lib/permissions';
@@ -140,6 +141,14 @@ export function Sidebar({
       icon: History,
       badge: null,
       description: 'Log de Eventos & Paradas',
+      section: 'ADMINISTRAÇÃO',
+    },
+    {
+      id: 'training' as DashboardTab,
+      label: 'Treinamento',
+      icon: GraduationCap,
+      badge: null,
+      description: 'Simulação das telas dos líderes',
       section: 'ADMINISTRAÇÃO',
     },
   ];

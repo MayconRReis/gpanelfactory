@@ -26,6 +26,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'ops',
       'users',
       'events',
+      'training',
     ],
   },
   pesagem: {
@@ -107,6 +108,11 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     label: 'Auditoria',
     group: 'Administração',
     description: 'Registro de paradas, inícios e finalizações',
+  },
+  training: {
+    label: 'Treinamento (Simulação)',
+    group: 'Administração',
+    description: 'Simula as telas dos líderes com dados fictícios para treinamento, sem afetar a produção real',
   },
 };
 

@@ -527,6 +527,49 @@ let inMemoryEvents: ProductionEvent[] = [];
 let inMemoryRotations: Record<string, string> = {};
 let inMemoryProfiles: UserProfile[] = [];
 
+// ============================================================================
+// MODO TREINAMENTO (SIMULAÇÃO) — ver src/pages/TrainingSimulator.tsx
+// ----------------------------------------------------------------------------
+// Ativado exclusivamente pela tela de Treinamento do Coordenador Geral. Com
+// `trainingModeActive` ligado, as funções abaixo (leitura E escrita de OPs/
+// linhas/eventos/rotação) desviam para os arrays `training*` abaixo — SEM
+// tocar em `inMemoryOps`/`inMemoryLines`/`inMemoryEvents`/`inMemoryRotations`
+// (o cache real da fábrica) e SEM nenhuma chamada ao Supabase.
+//
+// Isso permite reusar as telas de produção de verdade (PesagemScreen,
+// ManipulacaoScreen, LeaderScreen) IDÊNTICAS durante o treinamento — mesmo
+// componente, mesmo visual, mesmos botões — só trocando de onde os dados
+// vêm, e garante que nenhum clique durante um treinamento (por mais errado
+// que seja de propósito) grava, altera ou apaga qualquer OP, linha ou
+// evento real da fábrica.
+// ============================================================================
+let trainingModeActive = false;
+let trainingOps: ProductionOrder[] = [];
+let trainingLines: ProductionLine[] = [];
+let trainingEvents: ProductionEvent[] = [];
+
+export function isTrainingModeActive(): boolean {
+  return trainingModeActive;
+}
+
+/**
+ * Liga (com `seed`) ou desliga o Modo Treinamento. Chamado só pela
+ * TrainingSimulator ao montar/desmontar ou trocar de área — nunca pelo
+ * restante do app.
+ */
+export function setTrainingMode(active: boolean, seed?: { ops: ProductionOrder[]; lines: ProductionLine[] }): void {
+  trainingModeActive = active;
+  if (active) {
+    trainingOps = seed?.ops ? seed.ops.map(op => ({ ...op })) : [];
+    trainingLines = seed?.lines ? seed.lines.map(l => ({ ...l })) : [];
+    trainingEvents = [];
+  } else {
+    trainingOps = [];
+    trainingLines = [];
+    trainingEvents = [];
+  }
+}
+
 // Blacklist persistente de OPs excluídas (por id específico — não afeta OPs
 // futuras nem históricas, só as que o usuário realmente excluiu uma a uma).
 //
@@ -725,6 +768,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
 };
 
 export const getLeaders = async (): Promise<UserProfile[]> => {
+  if (trainingModeActive) return [];
   try {
     const allUsers = await getAllUsers();
     // Retorna todos os usuários cujo perfil não seja coordenador (isto é, líderes cadastrados)
@@ -1393,6 +1437,7 @@ export const deleteUserProfile = async (userId: string, userEmail?: string): Pro
 
 // ---------------- PRODUCTION LINES ----------------
 export const getLines = async (): Promise<ProductionLine[]> => {
+  if (trainingModeActive) return trainingLines.map(l => ({ ...l }));
   try {
     let { data, error } = await supabase.from('production_lines').select('*').order('name', { ascending: true });
     if (error || !data || data.length === 0) {
@@ -1517,6 +1562,7 @@ async function fetchAllRows(table: 'production_orders' | 'ops'): Promise<{ data:
 }
 
 export const getAllOPs = async (): Promise<ProductionOrder[]> => {
+  if (trainingModeActive) return trainingOps.map(op => ({ ...op }));
   try {
     let { data, error } = await fetchAllRows('production_orders');
     if (error || !data || data.length === 0) {
@@ -1647,6 +1693,36 @@ export const createOP = async (newOpData: {
   leaderId?: string;
 }): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
+
+  if (trainingModeActive) {
+    const trainingOp: ProductionOrder = {
+      id: `sim-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      number: newOpData.number.trim(),
+      product: newOpData.product.trim(),
+      lote: (newOpData.lote || '').trim(),
+      plannedQuantity: Number(newOpData.plannedQuantity) || 0,
+      producedQuantity: Number(newOpData.producedQuantity ?? 0),
+      granel: (newOpData.granel || '').trim(),
+      priority: newOpData.priority || 'Normal',
+      status: newOpData.status || 'pending',
+      lineId: newOpData.lineId || null,
+      leaderId: newOpData.leaderId || null,
+      packageAvailability: Number(newOpData.packageAvailability || 0),
+      sequence: Number(newOpData.sequence || (trainingOps.length + 1)),
+      scheduledDate: newOpData.scheduledDate,
+      scheduledShift: newOpData.scheduledShift,
+      setor: newOpData.setor,
+      unidade: newOpData.unidade,
+      rejectedQuantity: Number(newOpData.rejectedQuantity || 0),
+      plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
+      tipoDocumento: tipoDoc,
+      industria: newOpData.industria || undefined,
+      completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
+      createdAt: new Date().toISOString(),
+    };
+    trainingOps = [trainingOp, ...trainingOps];
+    return trainingOp;
+  }
 
   const newOp: ProductionOrder = {
     id: `prod-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -1855,6 +1931,12 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   if (updates.status === 'completed' && updates.completedAt === undefined) {
     updates.completedAt = new Date().toISOString();
   }
+
+  if (trainingModeActive) {
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, ...updates } : op);
+    return;
+  }
+
   // 1. Update in memory and localStorage immediately
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, ...updates } : op);
   persistOps();
@@ -1927,6 +2009,7 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
  * Retorna array de MonthlyGoal ou array vazio em caso de erro.
  */
 export const getMonthlyGoals = async (year: number): Promise<MonthlyGoal[]> => {
+  if (trainingModeActive) return [];
   try {
     const { data, error } = await supabase
       .from('monthly_goals')
@@ -2124,6 +2207,11 @@ export const saveFactoryMonthlyGoal = async (
 };
 
 export const deleteOP = async (opId: string) => {
+  if (trainingModeActive) {
+    trainingOps = trainingOps.filter(op => op.id !== opId);
+    return;
+  }
+
   // 1. Marca no blacklist persistente para nunca mais ressurgir em cache ou retorno de API
   deletedOpIds.add(opId);
   saveDeletedOpIds();
@@ -2262,6 +2350,11 @@ export const saveLeaderRotation = async (
   leaderEmail?: string,
   leaderName?: string
 ): Promise<void> => {
+  // Em treinamento, a troca de linha do líder é puramente visual dentro da
+  // simulação (gerenciada pela própria TrainingSimulator) — nunca deve
+  // gravar no indicador real "quem está em qual linha agora" do coordenador.
+  if (trainingModeActive) return;
+
   inMemoryRotations[leaderId] = lineId;
   if (leaderEmail) {
     inMemoryRotations[leaderEmail] = lineId;
@@ -2389,6 +2482,7 @@ export const saveLeaderRotation = async (
 
 // ---------------- PAUSE REASONS & EVENTS ----------------
 export const getPauseReasons = async (): Promise<PauseReason[]> => {
+  if (trainingModeActive) return DEFAULT_PAUSE_REASONS;
   try {
     // pause_reasons não está no schema.sql (tabela criada manualmente no
     // Supabase). Colunas reais confirmadas: id (uuid), reason (text),
@@ -2554,6 +2648,7 @@ async function fetchAllEventRows(table: 'production_events' | 'events'): Promise
 }
 
 export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
+  if (trainingModeActive) return trainingEvents.map(e => ({ ...e }));
   try {
     // IMPORTANTE: `recordEventRemote` grava todo evento AO VIVO em duas
     // tabelas (`events` e `production_events` — dual-write, igual ops/
@@ -2618,6 +2713,24 @@ export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
 
 // ---------------- OP ACTIONS ----------------
 export const startOP = async (opId: string, lineId: string, leaderId: string) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'in_progress', leaderId, lineId } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'active', currentOpId: opId } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'STARTED',
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
 
@@ -2666,6 +2779,32 @@ export const pauseOP = async (
   observation: string,
   producedQuantity?: number
 ) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
+    trainingOps = trainingOps.map(op =>
+      op.id === opId
+        ? { ...op, status: 'paused', producedQuantity: updatedProducedQty !== undefined ? updatedProducedQty : op.producedQuantity }
+        : op
+    );
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'paused' } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      quantity: updatedProducedQty,
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
@@ -2727,6 +2866,24 @@ export const pauseOP = async (
 };
 
 export const resumeOP = async (opId: string, lineId: string, leaderId: string) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'in_progress' } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'active' } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'RESUMED',
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
 
@@ -2776,6 +2933,61 @@ export const finishOP = async (
   sendToSleeve?: boolean,
   rejectedQuantity?: number
 ) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const completedAtIso = new Date().toISOString();
+    const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
+    const finalRejectedQty = rejectedQuantity !== undefined ? rejectedQuantity : (currentOp?.rejectedQuantity || 0);
+
+    if (sendToSleeve) {
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'pending',
+              lineId: null,
+              leaderId: null,
+              plannedQuantity: finalProducedQty,
+              producedQuantity: 0,
+              rejectedQuantity: 0,
+              finishedShift: undefined,
+              completedAt: undefined,
+              isSleeve: true,
+            }
+          : op
+      );
+    } else {
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'completed',
+              finishedShift: finishedShift || undefined,
+              completedAt: completedAtIso,
+              producedQuantity: finalProducedQty,
+              rejectedQuantity: finalRejectedQty,
+              leaderId: leaderId || op.leaderId,
+              isSleeve: false,
+            }
+          : op
+      );
+    }
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'FINISHED',
+      quantity: finalProducedQty,
+      createdAt: completedAtIso,
+    }, ...trainingEvents];
+    return;
+  }
+
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const completedAtIso = new Date().toISOString();
@@ -2917,6 +3129,26 @@ export const reportQuantity = async (
   quantity: number,
   rejectedQty?: number
 ) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const newQty = (currentOp?.producedQuantity || 0) + quantity;
+    const newRejectedQty = (currentOp?.rejectedQuantity || 0) + (rejectedQty || 0);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, producedQuantity: newQty, rejectedQuantity: newRejectedQty } : op);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'QUANTITY_REPORTED',
+      quantity,
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
   const newQty = (currentOp?.producedQuantity || 0) + quantity;

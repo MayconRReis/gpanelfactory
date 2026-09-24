@@ -33,9 +33,12 @@ import { getIndustriaBadgeClass } from '../lib/industria';
 
 interface ManipulacaoScreenProps {
   embedded?: boolean;
+  /** Usado pelo Simulador de Treinamento — esconde a aba "Dashboard", que
+   * não faz sentido sobre dados fictícios da simulação. */
+  hideDashboardTabs?: boolean;
 }
 
-export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps = {}) {
+export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false }: ManipulacaoScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [ops, setOps] = useState<ProductionOrder[]>([]);
@@ -48,6 +51,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // Sub-abas de visualização: Operação em Tempo Real vs Dashboard de Produção (Diária & Semanal)
   const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('operacao');
+
+  // Em modo treinamento (hideDashboardTabs) só existe a aba de operação —
+  // garante que nunca fique "preso" na aba de dashboard escondida.
+  useEffect(() => {
+    if (hideDashboardTabs && activeViewTab !== 'operacao') {
+      setActiveViewTab('operacao');
+    }
+  }, [hideDashboardTabs, activeViewTab]);
 
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
@@ -404,25 +415,27 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveViewTab('dashboard')}
-              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
-                activeViewTab === 'dashboard'
-                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
-                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 shrink-0" />
-              <span>DASHBOARD</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
-                activeViewTab === 'dashboard'
-                  ? 'bg-cyan-800 text-cyan-200'
-                  : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
-              }`}>
-                diária & semanal
-              </span>
-            </button>
+            {!hideDashboardTabs && (
+              <button
+                type="button"
+                onClick={() => setActiveViewTab('dashboard')}
+                className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                  activeViewTab === 'dashboard'
+                    ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
+                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+                }`}
+              >
+                <BarChart3 className="w-4 h-4 shrink-0" />
+                <span>DASHBOARD</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
+                  activeViewTab === 'dashboard'
+                    ? 'bg-cyan-800 text-cyan-200'
+                    : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
+                }`}>
+                  diária & semanal
+                </span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">

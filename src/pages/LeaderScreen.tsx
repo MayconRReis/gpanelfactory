@@ -95,9 +95,13 @@ function leaderLineStorageKey(leaderUid: string): string {
 
 interface LeaderScreenProps {
   embedded?: boolean;
+  /** Usado pelo Simulador de Treinamento (ver TrainingSimulator.tsx) para
+   * mostrar só a aba operacional (Controle da Linha), sem os dashboards
+   * diário/mensal — que não fazem sentido sobre dados fictícios. */
+  hideDashboardTabs?: boolean;
 }
 
-export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
+export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: LeaderScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   // State principal
@@ -136,6 +140,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Em modo treinamento (hideDashboardTabs) só existe a aba operacional —
+  // garante que nunca fique "preso" numa aba de dashboard escondida.
+  useEffect(() => {
+    if (hideDashboardTabs && activeTab !== 'operation') {
+      setActiveTab('operation');
+    }
+  }, [hideDashboardTabs, activeTab]);
 
   // Ref para manter o selectedLineId sincronizado sem invalidar o useCallback do fetchData
   const selectedLineIdRef = useRef<string | null>(null);
@@ -502,21 +514,16 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     };
   }, [lineOps, lineEvents, currentMonthStr, dailyMetrics.producedToday]);
 
-  // Progresso da OP ativa — pode passar de 100% quando o rendimento supera a meta prevista
-  const opProgress = activeOp && activeOp.plannedQuantity > 0
-    ? Math.round((activeOp.producedQuantity / activeOp.plannedQuantity) * 100)
-    : 0;
-
-  const missingQty = activeOp ? Math.max(activeOp.plannedQuantity - activeOp.producedQuantity, 0) : 0;
-
-  // Identificação da Linha Sleev ou OP destinada ao Sleev
-  const isSleeve = Boolean(
-    currentLine?.id === 'line-sleeve' ||
-    (currentLine?.name && /sleeve/i.test(currentLine.name)) ||
-    activeOp?.isSleeve
-  );
-
   // Tempo trabalhado da OP ativa em milissegundos (baseado no histórico cronológico de eventos reais)
+  //
+  // IMPORTANTE: estes dois useMemo precisam ficar ANTES do "if (loading) return"
+  // logo abaixo — React exige que TODOS os Hooks de um componente sejam
+  // chamados na MESMA ordem em TODO render (Rules of Hooks). Como o `loading`
+  // começa `true` e vira `false` assim que os dados carregam, ter hooks
+  // DEPOIS desse early return fazia o componente chamar menos hooks no
+  // primeiro render (loading=true) e mais hooks no render seguinte
+  // (loading=false) — exatamente o erro "Rendered more hooks than during
+  // the previous render" que o React acusa nesse caso.
   const activeOpWorkingMs = useMemo(() => {
     if (!activeOp) return 0;
     const opEvents = recentEvents.filter(e => e.opId === activeOp.id);
@@ -558,14 +565,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     return calculateProductionRatePerHour(activeOp.producedQuantity, activeOpWorkingMs);
   }, [activeOp, activeOpWorkingMs]);
 
-  // Variáveis contextuais do Chão de Fábrica (Envase)
-  // Como esta tela é o posto operacional de Envase, o tipo de documento é sempre OP (Ordem de Produção)
-  const docTypeLabel = 'OP';
-  const displayUnit = activeOp?.unidade || 'un';
-  const qtyProducedLabel = 'Volume Produzido';
-  const reportButtonLabel = 'APONTAR PRODUÇÃO';
-
-  // Loading state (executado após todos os hooks para obedecer às Rules of Hooks)
+  // Loading state
   if (loading) {
     return (
       <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] flex flex-col items-center justify-center font-sans gap-3">
@@ -578,6 +578,27 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       </div>
     );
   }
+
+  // Progresso da OP ativa — pode passar de 100% quando o rendimento supera a meta prevista
+  const opProgress = activeOp && activeOp.plannedQuantity > 0
+    ? Math.round((activeOp.producedQuantity / activeOp.plannedQuantity) * 100)
+    : 0;
+
+  const missingQty = activeOp ? Math.max(activeOp.plannedQuantity - activeOp.producedQuantity, 0) : 0;
+
+  // Identificação da Linha Sleev ou OP destinada ao Sleev
+  const isSleeve = Boolean(
+    currentLine?.id === 'line-sleeve' ||
+    (currentLine?.name && /sleeve/i.test(currentLine.name)) ||
+    activeOp?.isSleeve
+  );
+
+  // Variáveis contextuais do Chão de Fábrica (Envase)
+  // Como esta tela é o posto operacional de Envase, o tipo de documento é sempre OP (Ordem de Produção)
+  const docTypeLabel = 'OP';
+  const displayUnit = activeOp?.unidade || 'un';
+  const qtyProducedLabel = 'Volume Produzido';
+  const reportButtonLabel = 'APONTAR PRODUÇÃO';
 
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] font-sans flex flex-col antialiased space-y-4" : "min-h-screen bg-[#09090b] text-[#f4f4f5] font-sans flex flex-col antialiased selection:bg-blue-600 selection:text-white"}>
@@ -686,29 +707,33 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             )}
           </button>
 
-          <button
-            onClick={() => setActiveTab('daily_dash')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-              activeTab === 'daily_dash'
-                ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5" />
-            <span>Dashboard Diário ({dailyMetrics.progressPercent}%)</span>
-          </button>
+          {!hideDashboardTabs && (
+            <>
+              <button
+                onClick={() => setActiveTab('daily_dash')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+                  activeTab === 'daily_dash'
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Dashboard Diário ({dailyMetrics.progressPercent}%)</span>
+              </button>
 
-          <button
-            onClick={() => setActiveTab('monthly_dash')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-              activeTab === 'monthly_dash'
-                ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
-            }`}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span>Dashboard Mensal ({monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')} un)</span>
-          </button>
+              <button
+                onClick={() => setActiveTab('monthly_dash')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+                  activeTab === 'monthly_dash'
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                <span>Dashboard Mensal ({monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')} un)</span>
+              </button>
+            </>
+          )}
 
         </div>
       </header>
