@@ -86,8 +86,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
   // de Pesagem encerrar a OSM diretamente, sem depender de alguém iniciar e
   // finalizar a manipulação.
   const [manualExitOp, setManualExitOp] = useState<ProductionOrder | null>(null);
-  const [manualExitKg, setManualExitKg] = useState('');
-  const [manualExitShift, setManualExitShift] = useState<'Manhã' | 'Tarde'>('Manhã');
+  const [manualExitDate, setManualExitDate] = useState('');
   const [isManualExitSubmitting, setIsManualExitSubmitting] = useState(false);
 
   // Toast
@@ -430,12 +429,13 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
     }
   };
 
-  // Abrir modal de Saída Manual (Carvalho / Macpaul)
+  // Abrir modal de Saída Manual (Carvalho / Macpaul) — agora é só uma
+  // confirmação: mostra os dados do produto e a data de saída (hoje, por
+  // padrão), sem pedir Kg nem turno (o líder de Pesagem não tem essa
+  // informação pra preencher, e não é mais necessária aqui).
   const handleOpenManualExit = (op: ProductionOrder) => {
-    const currentHour = new Date().getHours();
     setManualExitOp(op);
-    setManualExitKg('');
-    setManualExitShift(currentHour < 12 ? 'Manhã' : 'Tarde');
+    setManualExitDate(todayStr);
   };
 
   // Confirmar Saída Manual: cria diretamente a OSM de Manipulação já
@@ -449,11 +449,14 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
     e.preventDefault();
     if (!profile || !manualExitOp) return;
 
-    const kgNum = parseFloat(manualExitKg);
-    if (isNaN(kgNum) || kgNum <= 0) {
-      showToast('Informe uma quantidade válida em Kg.', 'error');
+    if (!manualExitDate) {
+      showToast('Informe a data de saída.', 'error');
       return;
     }
+
+    // Turno não é mais perguntado ao líder — detecta automaticamente pela
+    // hora atual, só pra manter a OSM classificada nos relatórios por turno.
+    const detectedShift: 'Manhã' | 'Tarde' = new Date().getHours() < 12 ? 'Manhã' : 'Tarde';
 
     setIsManualExitSubmitting(true);
     try {
@@ -464,14 +467,14 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
         number: manualExitOp.number,
         product: manualExitOp.product,
         lote: manualExitOp.lote,
-        plannedQuantity: kgNum,
-        producedQuantity: kgNum,
+        plannedQuantity: manualExitOp.plannedQuantity || 0,
+        producedQuantity: manualExitOp.producedQuantity || 0,
         status: 'completed',
         leaderId: profile.uid,
         priority: 'Normal',
         lineId: 'area-manipulacao',
-        scheduledShift: manualExitShift,
-        scheduledDate: todayStr,
+        scheduledShift: detectedShift,
+        scheduledDate: manualExitDate,
         industria: manualExitOp.industria,
         granel: manualExitOp.granel || manualExitOp.observation,
       });
@@ -1099,7 +1102,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               <LogOut className="w-5 h-5" />
             </div>
             <DialogTitle className="text-lg font-bold text-white">
-              Saída Manual — OSM {manualExitOp?.number}
+              Confirmar Saída — OSM {manualExitOp?.number}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
               Encerre esta OSM diretamente, sem passar pela Manipulação — indicado para OSMs de{' '}
@@ -1110,59 +1113,42 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
 
           {manualExitOp && (
             <form onSubmit={handleConfirmManualExit} className="space-y-4 mt-2">
-              {/* Produto */}
-              <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3">
-                <div className="text-[11px] text-[#a1a1aa]">Produto / Granel</div>
-                <div className="text-xs font-bold text-white mt-0.5">{manualExitOp.product}</div>
+              {/* Dados do produto — só confirmação, nada pra preencher aqui */}
+              <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3 space-y-2">
+                <div>
+                  <div className="text-[11px] text-[#a1a1aa]">Produto / Granel</div>
+                  <div className="text-xs font-bold text-white mt-0.5">{manualExitOp.product}</div>
+                </div>
+                <div className="flex items-center gap-4">
+                  {manualExitOp.lote && (
+                    <div>
+                      <div className="text-[11px] text-[#a1a1aa]">Lote</div>
+                      <div className="text-xs font-mono font-bold text-white mt-0.5">{manualExitOp.lote}</div>
+                    </div>
+                  )}
+                  {manualExitOp.industria && (
+                    <div>
+                      <div className="text-[11px] text-[#a1a1aa]">Indústria</div>
+                      <div className="text-xs font-bold text-white mt-0.5">{manualExitOp.industria}</div>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* Quantidade em Kg */}
+              {/* Data de Saída */}
               <div>
-                <Label className="text-xs font-semibold text-[#d4d4d8]">
-                  Quantidade Final (Kg) <span className="text-orange-400">*</span>
+                <Label className="text-xs font-semibold text-[#d4d4d8] flex items-center gap-1.5 mb-1.5">
+                  <Calendar className="w-3.5 h-3.5 text-orange-400" />
+                  <span>Data de Saída <span className="text-orange-400">*</span></span>
                 </Label>
                 <Input
-                  type="number"
-                  step="1"
-                  min="1"
-                  value={manualExitKg}
-                  onChange={(e) => setManualExitKg(e.target.value)}
+                  type="date"
+                  value={manualExitDate}
+                  onChange={(e) => setManualExitDate(e.target.value)}
                   required
                   autoFocus
-                  className="mt-1 bg-[#121215] border-[#27272a] focus:border-orange-500 text-white font-mono text-sm h-10 rounded-xl"
+                  className="bg-[#121215] border-[#27272a] focus:border-orange-500 text-white font-medium text-sm h-10 rounded-xl [color-scheme:dark]"
                 />
-              </div>
-
-              {/* Seleção de Turno */}
-              <div>
-                <Label className="text-xs font-semibold text-[#d4d4d8] mb-2 block">
-                  Turno de Conclusão <span className="text-orange-400">*</span>
-                </Label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setManualExitShift('Manhã')}
-                    className={`p-3 rounded-xl border text-center flex flex-col items-center justify-center gap-1.5 transition-all ${
-                      manualExitShift === 'Manhã'
-                        ? 'bg-blue-950/80 border-blue-500 text-blue-200 ring-2 ring-blue-500/30'
-                        : 'bg-[#121215] border-[#27272a] text-[#a1a1aa] hover:border-[#3f3f46]'
-                    }`}
-                  >
-                    <span className="text-xs font-bold">Turno Manhã</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setManualExitShift('Tarde')}
-                    className={`p-3 rounded-xl border text-center flex flex-col items-center justify-center gap-1.5 transition-all ${
-                      manualExitShift === 'Tarde'
-                        ? 'bg-amber-950/80 border-amber-500 text-amber-200 ring-2 ring-amber-500/30'
-                        : 'bg-[#121215] border-[#27272a] text-[#a1a1aa] hover:border-[#3f3f46]'
-                    }`}
-                  >
-                    <span className="text-xs font-bold">Turno Tarde</span>
-                  </button>
-                </div>
               </div>
 
               <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
@@ -1189,7 +1175,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                   ) : (
                     <>
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Confirmar Saída Manual</span>
+                      <span>Confirmar Saída</span>
                     </>
                   )}
                 </Button>
