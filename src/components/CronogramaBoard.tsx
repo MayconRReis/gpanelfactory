@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
+import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 
 interface CronogramaBoardProps {
@@ -96,6 +96,11 @@ export function CronogramaBoard({
   }, [weekOffset]);
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
 
+  // Busca dentro da coluna "Estoque / Sem Linha" — o board não tem paginação,
+  // então quando o estoque acumula muitas OPs sem linha fica difícil achar
+  // uma específica só rolando a coluna.
+  const [backlogSearchTerm, setBacklogSearchTerm] = useState('');
+
   const weekRangeLabel = useMemo(() => {
     if (weekDays.length === 0) return '';
     const first = weekDays[0];
@@ -134,6 +139,19 @@ export function CronogramaBoard({
     () => ops.filter(o => !o.lineId && o.status !== 'completed'),
     [ops]
   );
+
+  // Lista exibida na coluna Estoque, já filtrada pela busca (o contador no
+  // topo da coluna continua mostrando o total real, sem o filtro).
+  const visibleBacklogOps = useMemo(() => {
+    const term = backlogSearchTerm.trim().toLowerCase();
+    if (!term) return backlogOps;
+    return backlogOps.filter(op =>
+      op.number.toLowerCase().includes(term) ||
+      op.product.toLowerCase().includes(term) ||
+      (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
+      (op.granel ? op.granel.toLowerCase().includes(term) : false)
+    );
+  }, [backlogOps, backlogSearchTerm]);
 
   // Colunas de linha mostram só as OPs agendadas para o dia selecionado.
   const opsByLine = useMemo(() => {
@@ -177,10 +195,12 @@ export function CronogramaBoard({
     if (dragOverOpId !== opId) setDragOverOpId(opId);
   };
 
-  // Solto em cima de um card específico: se for a MESMA coluna do item
-  // arrastado, reordena a fila (insere na posição do card-alvo); se for de
-  // outra coluna/estoque, primeiro atribui a esta coluna (reatribuição de
-  // linha) e mantém a ordem que a atribuição já resolve.
+  // Solto em cima de um card específico. Reordenar por arrastar-e-soltar
+  // DENTRO da mesma coluna foi removido daqui (virou instável/imprevisível
+  // na prática — ver os botões de seta ▲▼ em cada card, que fazem esse
+  // reordenamento de forma explícita e sem ambiguidade). Este handler agora
+  // só cuida de reatribuir a linha quando o card vem de OUTRA coluna/estoque,
+  // soltando-o na posição do card-alvo dentro da nova coluna.
   const handleDropOnCard = async (e: React.DragEvent, columnId: string, targetOpId: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -194,20 +214,19 @@ export function CronogramaBoard({
     if (!op) return;
 
     const currentColumnId = op.lineId || BACKLOG_COLUMN_ID;
+    // Mesma coluna — não reordena mais por drag, só pelas setas ▲▼ do card.
+    if (currentColumnId === columnId) return;
 
     setIsDropping(true);
     try {
-      if (currentColumnId !== columnId) {
-        // Veio de outra coluna — primeiro reatribui a linha (ou tira do
-        // estoque), depois deixa a nova ordem definida pelo próximo passo.
-        if (columnId === BACKLOG_COLUMN_ID) {
-          await onUnassign(opId);
-        } else {
-          await onAssignToQueue(opId, columnId, selectedDate);
-        }
+      // Veio de outra coluna — primeiro reatribui a linha (ou tira do
+      // estoque), depois posiciona na posição do card-alvo dentro da nova coluna.
+      if (columnId === BACKLOG_COLUMN_ID) {
+        await onUnassign(opId);
+      } else {
+        await onAssignToQueue(opId, columnId, selectedDate);
       }
 
-      // Monta a nova ordem desta coluna com o card arrastado na posição do alvo
       const currentIds = columnOps(columnId)
         .filter(o => o.id !== opId)
         .map(o => o.id);
@@ -215,6 +234,28 @@ export function CronogramaBoard({
       const insertAt = targetIdx === -1 ? currentIds.length : targetIdx;
       const newOrder = [...currentIds.slice(0, insertAt), opId, ...currentIds.slice(insertAt)];
 
+      await onReorderColumn(columnId, newOrder, columnId === BACKLOG_COLUMN_ID ? undefined : selectedDate);
+    } finally {
+      setIsDropping(false);
+    }
+  };
+
+  // Move o card uma posição para cima/baixo DENTRO da mesma coluna — troca
+  // de lugar com o vizinho imediato. Substitui o antigo reordenamento por
+  // arrastar-sobre-outro-card dentro da mesma coluna, que na prática estava
+  // dando problema (soltar na posição errada, indicador visual impreciso).
+  const handleMoveInColumn = async (columnId: string, opId: string, direction: 'up' | 'down') => {
+    const currentIds = columnOps(columnId).map(o => o.id);
+    const idx = currentIds.indexOf(opId);
+    if (idx === -1) return;
+    const swapWith = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapWith < 0 || swapWith >= currentIds.length) return;
+
+    const newOrder = [...currentIds];
+    [newOrder[idx], newOrder[swapWith]] = [newOrder[swapWith], newOrder[idx]];
+
+    setIsDropping(true);
+    try {
       await onReorderColumn(columnId, newOrder, columnId === BACKLOG_COLUMN_ID ? undefined : selectedDate);
     } finally {
       setIsDropping(false);
@@ -260,6 +301,16 @@ export function CronogramaBoard({
     // trava o card nesses dois status: só dá pra pausar/retomar/concluir pela
     // tela de operação da linha.
     const isLocked = op.status === 'in_progress' || op.status === 'paused';
+
+    // Posição do card dentro da coluna (pra saber se mostra/desabilita as
+    // setas ▲▼ de reordenar — não dá pra subir o primeiro nem descer o
+    // último). Usa a lista completa da coluna (não a filtrada pela busca),
+    // já que a busca só afeta o que é exibido, não a fila real.
+    const colIds = columnOps(columnId).map(o => o.id);
+    const posIdx = colIds.indexOf(op.id);
+    const canMoveUp = posIdx > 0;
+    const canMoveDown = posIdx !== -1 && posIdx < colIds.length - 1;
+
     return (
       <div
         key={op.id}
@@ -299,19 +350,17 @@ export function CronogramaBoard({
         title={
           isLocked
             ? `Esta OP está ${op.status === 'in_progress' ? 'em produção' : 'pausada'} — não é possível mover ou editar por aqui enquanto estiver assim. Use a tela de operação da linha.`
-            : 'Arraste para reordenar a fila desta linha, ou solte em outra coluna para reatribuir'
+            : 'Use as setas ▲▼ para reordenar dentro desta coluna, ou arraste para outra coluna para reatribuir'
         }
       >
         <div className="flex items-center justify-between gap-1.5 mb-1">
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 min-w-0 flex-wrap">
             {isLocked ? (
               <Lock className="w-3 h-3 text-[#52525b] shrink-0" />
             ) : (
               <GripVertical className="w-3 h-3 text-[#52525b] shrink-0" />
             )}
-            <span className="font-mono font-bold text-white text-[11px]">OP {op.number}</span>
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
+            <span className="font-mono font-bold text-white text-[11px] shrink-0">OP {op.number}</span>
             {op.isSleeve && (
               <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-purple-950 text-purple-300 border border-purple-600/60 uppercase">
                 Sleev
@@ -332,6 +381,42 @@ export function CronogramaBoard({
               </span>
             ) : null}
           </div>
+          {/* Setas para reordenar a fila dentro da mesma coluna — troca de
+              lugar com o vizinho imediato acima/abaixo. Substitui o antigo
+              arrastar-sobre-outro-card, que dava problema. Mais largas que
+              o resto do card pra facilitar o clique. */}
+          {!isLocked && (
+            <div className="flex flex-col shrink-0 -my-1 -mr-1">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canMoveUp) handleMoveInColumn(columnId, op.id, 'up');
+                }}
+                disabled={!canMoveUp}
+                title="Mover para cima"
+                className={`leading-none flex items-center justify-center w-6 h-4 rounded transition-colors ${
+                  canMoveUp ? 'text-[#a1a1aa] hover:text-blue-400 hover:bg-white/5 cursor-pointer' : 'text-[#2c2c3c] cursor-not-allowed'
+                }`}
+              >
+                <ChevronUp className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canMoveDown) handleMoveInColumn(columnId, op.id, 'down');
+                }}
+                disabled={!canMoveDown}
+                title="Mover para baixo"
+                className={`leading-none flex items-center justify-center w-6 h-4 rounded transition-colors ${
+                  canMoveDown ? 'text-[#a1a1aa] hover:text-blue-400 hover:bg-white/5 cursor-pointer' : 'text-[#2c2c3c] cursor-not-allowed'
+                }`}
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
         <p className="text-[11px] text-[#d4d4d8] font-medium line-clamp-1 leading-tight" title={op.product}>
           {op.product}
@@ -464,11 +549,36 @@ export function CronogramaBoard({
               {backlogOps.length}
             </span>
           </div>
+          {/* Busca dentro do Estoque — filtra por OP, Produto, Lote ou Granel */}
+          <div className="px-2.5 pt-2 sticky top-[45px] bg-[#0e0e12] z-10">
+            <div className="relative">
+              <Search className="w-3 h-3 text-[#52525b] absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={backlogSearchTerm}
+                onChange={(e) => setBacklogSearchTerm(e.target.value)}
+                placeholder="Buscar no estoque..."
+                className="w-full h-7 pl-6 pr-6 text-[10px] bg-[#131318] border border-[#232330] rounded-lg text-[#f4f4f5] placeholder:text-[#52525b] focus:outline-none focus:border-blue-600/60"
+              />
+              {backlogSearchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setBacklogSearchTerm('')}
+                  title="Limpar busca"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#52525b] hover:text-[#f4f4f5]"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          </div>
           <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
-            {backlogOps.length === 0 ? (
-              <p className="text-[11px] text-[#52525b] text-center py-6">Nenhuma OP em estoque</p>
+            {visibleBacklogOps.length === 0 ? (
+              <p className="text-[11px] text-[#52525b] text-center py-6">
+                {backlogOps.length === 0 ? 'Nenhuma OP em estoque' : 'Nenhuma OP encontrada para essa busca'}
+              </p>
             ) : (
-              backlogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
+              visibleBacklogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
             )}
           </div>
         </div>
