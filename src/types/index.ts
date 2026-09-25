@@ -109,7 +109,7 @@ export interface FactoryMonthlyGoal {
   updatedAt: string;
 }
 
-export type EventType = 'STARTED' | 'PAUSED' | 'RESUMED' | 'FINISHED' | 'QUANTITY_REPORTED';
+export type EventType = 'STARTED' | 'PAUSED' | 'RESUMED' | 'FINISHED' | 'QUANTITY_REPORTED' | 'CANCELLED';
 
 export interface ProductionEvent {
   id: string;

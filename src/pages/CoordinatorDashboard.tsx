@@ -1,105 +1,126 @@
-import * as React from 'react';
-import { useState, useEffect, useRef } from 'react';
-import { useAuthStore } from '../store/authStore';
-import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
-import { Label } from '../components/ui/label';
-import { 
-  Factory, 
-  LogOut, 
-  RefreshCw, 
-  Plus, 
-  Play, 
-  Pause, 
-  CheckCircle2, 
-  AlertTriangle, 
-  Clock, 
-  Users, 
-  Layers, 
-  History, 
-  Package, 
-  Search, 
-  Trash2, 
-  X,
-  Sparkles,
-  TrendingUp,
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import {
+  LayoutDashboard,
+  Layers,
+  Package,
   ShieldCheck,
+  History,
+  TrendingUp,
+  Sparkles,
+  BarChart3,
+  Calendar,
+  Clock,
+  AlertTriangle,
+  CheckCircle2,
+  Play,
+  Pause,
+  RotateCcw,
+  Plus,
+  Search,
+  Filter,
+  Download,
+  Upload,
   UserCheck,
   UserX,
-  Award,
-  MailPlus,
-  Mail,
-  Copy,
-  Check,
+  RefreshCw,
+  LogOut,
+  ChevronRight,
+  ChevronLeft,
+  ChevronDown,
+  Trash2,
+  Edit,
+  SlidersHorizontal,
   FileSpreadsheet,
-  Upload,
-  Download,
-  Boxes,
-  Tag,
-  FlaskConical,
-  Database,
-  Menu,
+  X,
+  Target,
+  Share2,
+  Eye,
   KeyRound,
   Edit2,
   Loader2,
   Info,
-  XCircle
+  XCircle,
+  Copy,
+  Check,
+  Lock,
+  ArrowRight,
+  Maximize2,
+  Minimize2,
+  Users,
+  Factory
 } from 'lucide-react';
-import { 
-  getLines, 
-  getAllOPs, 
-  getLeaders, 
+import {
+  getLines,
+  createLine,
+  getAllOPs,
+  createOP,
+  updateOP,
+  deleteOP,
+  startOP,
+  pauseOP,
+  resumeOP,
+  finishOP,
+  cancelOP,
+  reportQuantity,
   getAllUsers,
+  getLeaders,
   updateUserRole,
-  updateUserArea,
+  updateUserRule,
   updateUserStatus,
   preAuthorizeUser,
   syncPendingLeadersToSupabase,
+  resetLeaderPassword,
   deleteUserProfile,
-  getAllRotations, 
-  saveLeaderRotation, 
-  createOP, 
-  updateOP,
-  deleteOP, 
-  startOP, 
-  pauseOP, 
-  resumeOP, 
-  finishOP, 
-  getRecentEvents, 
+  getAllRotations,
+  getRecentEvents,
   getPauseReasons,
-  resetProductionDatabase,
-  generateTemporaryPassword,
-  generateLeaderEmail,
   getMonthlyGoals,
   getLineDailyGoals,
   getFactoryMonthlyGoal,
   getFactoryMonthlyGoals,
-  getTipoDocumento,
-  resetLeaderPassword,
-  updateUserRule
+  DEFAULT_PAUSE_REASONS
 } from '../services/db';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule } from '../types';
+import {
+  ProductionLine,
+  ProductionOrder,
+  UserProfile,
+  ProductionEvent,
+  PauseReason,
+  MonthlyGoal,
+  LineDailyGoal,
+  FactoryMonthlyGoal,
+  DashboardTab,
+  AccessRule
+} from '../types';
 import { supabase } from '../lib/supabase';
-import { Sidebar, DashboardTab } from '../components/Sidebar';
+import { useAuthStore } from '../store/authStore';
+import { getIndustriaBadgeClass } from '../lib/industria';
+import { ACCESS_RULES, getUserRule, getUserAllowedTabs } from '../lib/permissions';
+import { Sidebar } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
-import { ShareDashboardModal } from '../components/ShareDashboardModal';
-import { GoalsModal } from '../components/GoalsModal';
-import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
 import { LeaderScreen } from './LeaderScreen';
+import { CronogramaBoard, BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
+import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { TrainingSimulator } from './TrainingSimulator';
-import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
+import { GoalsModal } from '../components/GoalsModal';
+import { ShareDashboardModal } from '../components/ShareDashboardModal';
 import { CsvImportModal } from '../components/CsvImportModal';
-import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
+import { AssignLineModal } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, GraduationCap } from 'lucide-react';
+import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter
+} from '../components/ui/dialog';
 
-// "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
-// isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
-// Brasília) a data já vira o dia seguinte, fazendo os filtros/agendamentos de
-// "hoje" errarem o dia durante essa janela.
 function getLocalDateStr(d: Date = new Date()): string {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -110,259 +131,171 @@ function getLocalDateStr(d: Date = new Date()): string {
 export function CoordinatorDashboard() {
   const { profile, signOut } = useAuthStore();
 
-  // Navigation tabs (Sidebar)
   const [activeTab, setActiveTab] = useState<DashboardTab>('home');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Permissões de telas via Rules (com home sempre permitido e fallback seguro)
-  const allowedTabs = React.useMemo(() => getUserAllowedTabs(profile), [profile]);
-
-  useEffect(() => {
-    if ((activeTab as string) === 'rotations' || (activeTab as string) === 'lines') {
-      setActiveTab('cronograma');
-      return;
-    }
-    if (!allowedTabs.includes(activeTab)) {
-      setActiveTab('home');
-    }
-  }, [allowedTabs, activeTab]);
-
-  // Líderes de Pesagem/Manipulação/Envase devem abrir direto na tela de
-  // uso (operacional), não no Dashboard Geral — o dashboard fica a um
-  // clique de distância pelo botão no cabeçalho. Roda só uma vez, assim
-  // que o perfil carrega, para não atrapalhar a navegação manual depois.
-  const initialTabSetRef = useRef(false);
-  useEffect(() => {
-    if (initialTabSetRef.current || !profile) return;
-    initialTabSetRef.current = true;
-    const rule = getUserRule(profile);
-    if (rule === 'pesagem' || rule === 'manipulacao' || rule === 'envase') {
-      setActiveTab(rule);
-    }
-  }, [profile]);
-
-  // Main data state
+  // Dados globais
   const [lines, setLines] = useState<ProductionLine[]>([]);
   const [ops, setOps] = useState<ProductionOrder[]>([]);
-  const [leaders, setLeaders] = useState<UserProfile[]>([]);
-  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
-  const [rotations, setRotations] = useState<Record<string, string>>({});
   const [events, setEvents] = useState<ProductionEvent[]>([]);
-  const [pauseReasons, setPauseReasons] = useState<PauseReason[]>([]);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  const [leaders, setLeaders] = useState<UserProfile[]>([]);
+  const [rotations, setRotations] = useState<Record<string, string>>({});
   const [goals, setGoals] = useState<MonthlyGoal[]>([]);
   const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
   const [factoryMonthlyGoal, setFactoryMonthlyGoal] = useState<number | null>(null);
-  // Metas mensais da fábrica de TODOS os meses do ano — usado pelo gráfico
-  // "Produção Mensal" pra mostrar a meta certa de cada mês (em vez de repetir
-  // a meta do mês atual pro ano inteiro) e pelo GoalsModal pra editar a meta
-  // de qualquer mês, não só o atual.
   const [factoryMonthlyGoals, setFactoryMonthlyGoals] = useState<FactoryMonthlyGoal[]>([]);
+  const [pauseReasons, setPauseReasons] = useState<PauseReason[]>([]);
 
-  // UI state
+  const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [userSearchTerm, setUserSearchTerm] = useState('');
-  const [userRoleFilter, setUserRoleFilter] = useState<'all' | 'pending' | 'coordinator' | 'leader'>('all');
-  
-  // Modal: Link de visualização pública do Dashboard Geral
-  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
 
-  // Modal: Metas de Produção (mensal única da fábrica + diária por linha)
+  // Modais de PCP e Gestão
   const [showGoalsModal, setShowGoalsModal] = useState(false);
-
-  // Modal: Nova OP / Editar OP
-  const [showNewOpModal, setShowNewOpModal] = useState(false);
-  const [editingOp, setEditingOp] = useState<ProductionOrder | null>(null);
-  const [newOpNumber, setNewOpNumber] = useState('');
-  const [newOpProduct, setNewOpProduct] = useState('');
-  const [newOpSetor, setNewOpSetor] = useState<'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'>('Envase');
-  const [newOpUnidade, setNewOpUnidade] = useState<'Un' | 'Kg' | 'Qtd'>('Un');
-  const [newOpPlannedHours, setNewOpPlannedHours] = useState('');
-  const [newOpRejectedQuantity, setNewOpRejectedQuantity] = useState('');
-  const [newOpLote, setNewOpLote] = useState('');
-  const [newOpPlanned, setNewOpPlanned] = useState('');
-  const [newOpGranel, setNewOpGranel] = useState('');
-  const [newOpPriority, setNewOpPriority] = useState<'Crítica' | 'Alta' | 'Normal' | 'Baixa'>('Normal');
-  const [newOpLineId, setNewOpLineId] = useState('');
-  const [newOpPackage, setNewOpPackage] = useState('1000');
-  const [newOpIndustria, setNewOpIndustria] = useState<'Ybera' | 'Carvalho' | 'Macpaul' | ''>('Ybera');
-  const [newOpScheduledDate, setNewOpScheduledDate] = useState('');
-  const [newOpScheduledEndDate, setNewOpScheduledEndDate] = useState('');
-  const [newOpScheduledDays, setNewOpScheduledDays] = useState('1');
-  const [newOpScheduledShift, setNewOpScheduledShift] = useState<'Manhã' | 'Tarde' | 'Integral' | ''>('Integral');
-  const [isSubmittingOp, setIsSubmittingOp] = useState(false);
-
-  // Modal: Importar CSV de Estoque
-  const [showCsvImportModal, setShowCsvImportModal] = useState(false);
-
-  // Modal: Limpar / Resetar Banco de Dados
-  const [showResetModal, setShowResetModal] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
-
-  // Modal: Atribuir Linha & Cronograma
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [showCsvModal, setShowCsvModal] = useState(false);
   const [assignModalOp, setAssignModalOp] = useState<ProductionOrder | null>(null);
+  const [assignStockLine, setAssignStockLine] = useState<ProductionLine | null>(null);
 
-  // Modal: Confirmação de Exclusão de OP
-  const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
-  const [isDeletingOp, setIsDeletingOp] = useState(false);
+  // Modal: Nova / Editar OP
+  const [showOpModal, setShowOpModal] = useState(false);
+  const [editingOp, setEditingOp] = useState<ProductionOrder | null>(null);
+  const [opFormData, setOpFormData] = useState({
+    number: '',
+    product: '',
+    plannedQuantity: '',
+    lote: '',
+    granel: '',
+    priority: 'Normal' as ProductionOrder['priority'],
+    setor: 'Envase' as ProductionOrder['setor'],
+    unidade: 'Un' as ProductionOrder['unidade'],
+    lineId: '',
+    scheduledDate: getLocalDateStr(),
+    scheduledShift: 'Manhã',
+    tipoDocumento: 'OP' as 'OP' | 'OSM',
+    industria: 'Ybera',
+    observation: ''
+  });
+  const [isSavingOp, setIsSavingOp] = useState(false);
 
-  // Modal: "Mais informações" do card de OP no Estoque de OPs
+  // Modal: Detalhes da OP (Estoque de OPs)
   const [detailsModalOp, setDetailsModalOp] = useState<ProductionOrder | null>(null);
 
-  // Modal: Cadastros & Confirmações de Usuários
-  const [showAuthorizeModal, setShowAuthorizeModal] = useState(false);
-  const [modalUserSearch, setModalUserSearch] = useState('');
-
-  // Modal: Cadastrar Novo Líder
-  const [showNewLeaderModal, setShowNewLeaderModal] = useState(false);
-  const [newLeaderName, setNewLeaderName] = useState('');
-  const [newLeaderEmail, setNewLeaderEmail] = useState('');
-  const [newLeaderCargo, setNewLeaderCargo] = useState('Líder de Produção');
-  const [newLeaderArea, setNewLeaderArea] = useState<'Envase' | 'Pesagem' | 'Manipulação'>('Envase');
-  const [isSubmittingLeader, setIsSubmittingLeader] = useState(false);
-  const [isAutoEmail, setIsAutoEmail] = useState(true);
-
-  // Modal: Credenciais Geradas (Primeiro Acesso)
-  const [createdCredentialsModalData, setCreatedCredentialsModalData] = useState<{
-    name: string;
-    email: string;
-    password: string;
-    cargo: string;
-    area?: string;
-  } | null>(null);
-
-  // Modal: Redefinir Senha do Líder
-  const [resetPasswordModal, setResetPasswordModal] = useState<{
-    leader: UserProfile;
-    newPassword?: string;
-    loading: boolean;
-  } | null>(null);
-
-  // Modal: Excluir Colaborador
-  const [deleteUserModalData, setDeleteUserModalData] = useState<UserProfile | null>(null);
-  const [isDeletingUser, setIsDeletingUser] = useState(false);
-  const [isSyncingPending, setIsSyncingPending] = useState(false);
-
-  // Modal: "Ver detalhes" do card de colaborador na Gestão de Equipe. Guarda
-  // só o identificador (não o objeto) e reconsulta `allUsers` a cada render,
-  // assim o modal reflete na hora qualquer mudança feita nele mesmo (trocar
-  // área, regra de acesso, promover, etc.) sem precisar fechar e reabrir.
-  const [detailsModalUserId, setDetailsModalUserId] = useState<string | null>(null);
+  // Modal: Excluir OP
+  const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
+  const [isDeletingOp, setIsDeletingOp] = useState(false);
 
   // Modal: Pausar OP
   const [pauseModalData, setPauseModalData] = useState<{ opId: string; lineId: string; opNumber: string } | null>(null);
   const [selectedPauseReason, setSelectedPauseReason] = useState('');
-  const [pauseObservation, setPauseObservation] = useState('');
+  const [pauseObs, setPauseObs] = useState('');
+  const [isPausingOp, setIsPausingOp] = useState(false);
 
-  // Modal: Vincular OP do Estoque diretamente à Linha
-  const [assignStockModalTargetLine, setAssignStockModalTargetLine] = useState<ProductionLine | null>(null);
+  // Modal: Detalhes do Colaborador (Gestão de Equipe)
+  const [detailsModalUserId, setDetailsModalUserId] = useState<string | null>(null);
 
-  // Toast feedback
-  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
-  // Guarda o e-mail do usuário cujo SQL acabou de ser copiado (não um boolean
-  // único) — assim o ícone de "copiado" aparece só na linha certa da tabela,
-  // em vez de piscar em todas as linhas ao mesmo tempo.
-  const [copiedSqlEmail, setCopiedSqlEmail] = useState<string | null>(null);
+  // Modal: Cadastrar Novo Colaborador
+  const [showAuthorizeModal, setShowAuthorizeModal] = useState(false);
+  const [newUserFormData, setNewUserFormData] = useState({
+    name: '',
+    email: '',
+    cargo: '',
+    area: 'Envase' as 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação',
+    rule: 'envase' as AccessRule,
+  });
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [userCreatedPassword, setUserCreatedPassword] = useState<string | null>(null);
 
-  const showToast = (text: string, type: 'success' | 'info' | 'error' = 'success') => {
-    setToastMessage({ text, type });
-    setTimeout(() => setToastMessage(null), 3500);
+  // Modal: Confirmar Exclusão de Colaborador
+  const [deleteUserModalData, setDeleteUserModalData] = useState<UserProfile | null>(null);
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
+
+  // Sincronização de pendentes
+  const [isSyncingPending, setIsSyncingPending] = useState(false);
+
+  // Filtros de Estoque de OPs
+  const [opsFilterTab, setOpsFilterTab] = useState<'today' | 'week' | 'unassigned' | 'completed' | 'all'>('all');
+  const [opsSearchTerm, setOpsSearchTerm] = useState('');
+  const [opsSectorFilter, setOpsSectorFilter] = useState<'Todos' | 'Envase' | 'Pesagem' | 'Manipulação'>('Todos');
+
+  // Filtros de Usuários
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [userRuleFilter, setUserRuleFilter] = useState<string>('all');
+
+  // Filtros de Auditoria
+  const [eventSearchTerm, setEventSearchTerm] = useState('');
+  const [eventTypeFilter, setEventTypeFilter] = useState<string>('all');
+  const [eventLineFilter, setEventLineFilter] = useState<string>('all');
+
+  // Toast simples
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Evita recarregas sobrepostas: uma rajada de eventos Realtime (ex.: vários
-  // apontamentos seguidos) ou o poll de segurança caindo em cima de uma
-  // requisição ainda em andamento não deve empilhar múltiplas chamadas
-  // simultâneas a todas as tabelas.
-  //
-  // IMPORTANTE: antes, um evento Realtime que chegasse durante um loadData()
-  // já em andamento era simplesmente DESCARTADO (o guard abaixo só tinha o
-  // "return", sem lembrar de tentar de novo depois) — se esse fosse o último
-  // evento antes do estado final no banco, a tela ficava visivelmente
-  // desatualizada até o próximo poll de 15s ou até sair e entrar na página de
-  // novo (o que força um loadData() novo, sem esse guard no caminho). Agora
-  // `pendingReloadRef` marca "chegou coisa nova enquanto eu carregava" e o
-  // `finally` dispara um loadData() extra assim que o atual terminar, então
-  // nenhuma atualização fica perdida — o pior caso passa a ser um pequeno
-  // atraso (esperar o fetch em andamento terminar), nunca mais um "travado".
-  const isLoadingDataRef = useRef(false);
-  const pendingReloadRef = useRef(false);
-
-  const loadData = async () => {
-    if (isLoadingDataRef.current) {
-      // Já tem um loadData() rodando — não empilha uma segunda chamada
-      // simultânea, mas marca que precisa recarregar de novo assim que a
-      // atual terminar, pra não perder este evento.
-      pendingReloadRef.current = true;
-      return;
-    }
-    isLoadingDataRef.current = true;
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setIsRefreshing(true);
     try {
       const currentYear = new Date().getFullYear();
       const currentMonth = new Date().getMonth() + 1;
-      const [ls, os, lds, usrs, rots, evts, prs, gls, ldgs, fmg, fmgs] = await Promise.all([
+
+      const [ls, os, evts, usrs, ldrs, rots, gls, ldgs, fmg, fmgs, prs] = await Promise.all([
         getLines(),
         getAllOPs(),
-        getLeaders(),
-        getAllUsers(),
-        getAllRotations(),
         getRecentEvents(),
-        getPauseReasons(),
+        getAllUsers(),
+        getLeaders(),
+        getAllRotations(),
         getMonthlyGoals(currentYear),
         getLineDailyGoals(),
         getFactoryMonthlyGoal(currentYear, currentMonth),
         getFactoryMonthlyGoals(currentYear),
+        getPauseReasons()
       ]);
-      setLines(ls);
-      setOps(os);
-      setLeaders(lds);
-      setAllUsers(usrs);
-      setRotations(rots);
-      setEvents(evts);
-      setPauseReasons(prs);
+
+      setLines(ls || []);
+      setOps(os || []);
+      setEvents(evts || []);
+      setAllUsers(usrs || []);
+      setLeaders(ldrs || []);
+      setRotations(rots || {});
       setGoals(gls || []);
       setLineDailyGoals(ldgs || []);
       setFactoryMonthlyGoal(fmg);
       setFactoryMonthlyGoals(fmgs || []);
-    } catch (e) {
-      console.warn('Erro ao carregar dados do coordenador:', e);
+      setPauseReasons(prs && prs.length > 0 ? prs : DEFAULT_PAUSE_REASONS);
+    } catch (err) {
+      console.error('Erro ao carregar dados do coordenador:', err);
     } finally {
-      isLoadingDataRef.current = false;
-      if (pendingReloadRef.current) {
-        pendingReloadRef.current = false;
-        loadData();
-      }
+      setIsLoading(false);
+      setIsRefreshing(false);
     }
-  };
+  }, []);
 
+  const loadDataRef = useRef(loadData);
   useEffect(() => {
-    loadData();
+    loadDataRef.current = loadData;
+  }, [loadData]);
 
-    // Supabase Realtime Channels
-    // Nota: "production_lines", "production_orders" e "production_events" são
-    // VIEWS sobre "lines", "ops" e "events" — o Realtime só emite
-    // postgres_changes para a tabela física (com REPLICA IDENTITY), então
-    // essas 3 assinaturas duplicadas nunca disparavam nada; cada mudança real
-    // já chegava pelas tabelas base abaixo. Removê-las corta 1/3 dos eventos
-    // mortos deste canal.
+  // Carregamento inicial e Realtime
+  useEffect(() => {
+    loadDataRef.current();
+
+    const stableRefresh = () => loadDataRef.current(true);
+
     const channel = supabase
-      .channel('coordinator-realtime-dashboard')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'lines' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'rotations' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'monthly_goals' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'line_daily_goals' }, () => loadData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'factory_monthly_goal' }, () => loadData())
+      .channel('coordinator-dashboard-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stableRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'lines' }, stableRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, stableRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, stableRefresh)
       .subscribe();
 
-    // Fallback sync — o Realtime acima agora cobre de fato todas as tabelas,
-    // então isso é só uma rede de segurança caso a conexão realtime caia,
-    // não o mecanismo principal de atualização (antes recarregava tudo a
-    // cada 4s incondicionalmente, mesmo sem nenhuma mudança).
-    const interval = setInterval(loadData, 15000);
+    const interval = setInterval(() => {
+      loadDataRef.current(true);
+    }, 20000);
 
     return () => {
       supabase.removeChannel(channel);
@@ -370,208 +303,8 @@ export function CoordinatorDashboard() {
     };
   }, []);
 
-  const handleManualRefresh = async () => {
-    setIsRefreshing(true);
-    await loadData();
-    showToast('Dados de chão de fábrica sincronizados com sucesso!', 'info');
-    setTimeout(() => setIsRefreshing(false), 500);
-  };
-
-  // ---------------- USER & ROLE MANAGEMENT ACTIONS ----------------
-  const handlePromoteToCoordinator = async (user: UserProfile) => {
-    if (window.confirm(`Deseja promover ${user.name} (${user.email}) para o cargo de COORDENADOR GERAL?`)) {
-      const ok = await updateUserRole(user.uid || user.email, 'coordinator', 'Coordenador Geral');
-      if (ok) {
-        showToast(`${user.name} agora possui cargo de Coordenador Geral!`);
-        await loadData();
-      } else {
-        showToast('Falha ao atualizar cargo no Supabase.', 'error');
-      }
-    }
-  };
-
-  const handleDemoteToLeader = async (user: UserProfile) => {
-    if (user.uid === profile?.uid) {
-      showToast('Você não pode rebaixar seu próprio cargo enquanto logado.', 'error');
-      return;
-    }
-    if (window.confirm(`Deseja alterar o cargo de ${user.name} para LÍDER DE PRODUÇÃO?`)) {
-      const ok = await updateUserRole(user.uid || user.email, 'leader', 'Líder de Produção');
-      if (ok) {
-        showToast(`${user.name} foi redefinido para Líder de Produção.`);
-        await loadData();
-      } else {
-        showToast('Falha ao atualizar cargo no Supabase.', 'error');
-      }
-    }
-  };
-
-  const handleUpdateUserArea = async (user: UserProfile, newArea: 'Envase' | 'Pesagem' | 'Manipulação') => {
-    let newCargo = 'Líder de Produção';
-    if (newArea === 'Pesagem') newCargo = 'Líder de Pesagem';
-    else if (newArea === 'Manipulação') newCargo = 'Líder de Manipulação';
-    else if (newArea === 'Envase') newCargo = 'Líder de Envase';
-
-    const ok = await updateUserArea(user.uid || user.email, newArea, newCargo);
-    if (ok) {
-      showToast(`Área de ${user.name} alterada para ${newArea} (${newCargo})!`);
-      await loadData();
-    } else {
-      showToast('Falha ao atualizar área do colaborador.', 'error');
-    }
-  };
-
-  const handleUpdateUserRule = async (user: UserProfile, newRule: AccessRule) => {
-    const ok = await updateUserRule(user.uid || user.email, newRule);
-    if (ok) {
-      const ruleConfig = ACCESS_RULES[newRule];
-      showToast(`Regra de acesso de ${user.name} alterada para ${ruleConfig?.name || newRule}!`);
-      await loadData();
-    } else {
-      showToast('Falha ao atualizar regra de acesso no Supabase.', 'error');
-    }
-  };
-
-  const handleToggleUserStatus = async (user: UserProfile) => {
-    if (user.uid === profile?.uid) {
-      showToast('Você não pode inativar sua própria conta.', 'error');
-      return;
-    }
-    const newStatus = user.status === 'inactive' ? 'active' : 'inactive';
-    const ok = await updateUserStatus(user.uid || user.email, newStatus);
-    if (ok) {
-      showToast(`Status de ${user.name} alterado para ${newStatus === 'active' ? 'Ativo' : 'Inativo'}.`);
-      await loadData();
-    } else {
-      showToast('Falha ao atualizar status.', 'error');
-    }
-  };
-
-  const handleOpenDeleteUserModal = (user: UserProfile) => {
-    if (user.uid === profile?.uid || (profile?.email && user.email?.toLowerCase() === profile.email.toLowerCase())) {
-      showToast('Você não pode excluir seu próprio perfil.', 'error');
-      return;
-    }
-    setDeleteUserModalData(user);
-  };
-
-  const handleConfirmDeleteUser = async () => {
-    if (!deleteUserModalData) return;
-    setIsDeletingUser(true);
-    try {
-      await deleteUserProfile(deleteUserModalData.uid, deleteUserModalData.email);
-      showToast(`Colaborador ${deleteUserModalData.name} removido com sucesso.`);
-      setDeleteUserModalData(null);
-      await loadData();
-    } catch (err: any) {
-      showToast(`Erro ao remover colaborador: ${err?.message || 'Falha na operação'}`, 'error');
-    } finally {
-      setIsDeletingUser(false);
-    }
-  };
-
-  const handleCopySqlForUser = (userEmail: string) => {
-    const sql = `-- 1. Define papel na tabela profiles:
-UPDATE public.profiles SET role = 'coordinator' WHERE email = '${userEmail}';
--- 2. Define papel nos metadados do auth:
-UPDATE auth.users SET raw_user_meta_data = raw_user_meta_data || '{"role": "coordinator"}'::jsonb WHERE email = '${userEmail}';
--- 3. Confirma o e-mail imediatamente:
-UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${userEmail}';`;
-    navigator.clipboard.writeText(sql);
-    setCopiedSqlEmail(userEmail);
-    showToast('Script SQL copiado para a área de transferência!');
-    setTimeout(() => setCopiedSqlEmail((current) => (current === userEmail ? null : current)), 3000);
-  };
-
-  const handleCopyConfirmEmailSql = (userEmail: string) => {
-    const sql = `UPDATE auth.users SET email_confirmed_at = now() WHERE email = '${userEmail}';`;
-    navigator.clipboard.writeText(sql);
-    showToast(`SQL de confirmação para ${userEmail} copiado!`);
-  };
-
-  const handleCopyConfirmAllSql = () => {
-    if (allUsers.length === 0) {
-      showToast('Nenhum usuário cadastrado encontrado.', 'info');
-      return;
-    }
-    const emails = allUsers.map(u => `'${u.email}'`).join(',\n  ');
-    const sql = `-- 1. Valida todos os e-mails no Supabase Auth:
-UPDATE auth.users 
-SET email_confirmed_at = now() 
-WHERE email IN (
-  ${emails}
-);
-
--- 2. Ativa todos os perfis na tabela public.profiles:
-UPDATE public.profiles
-SET status = 'active'
-WHERE email IN (
-  ${emails}
-);`;
-    navigator.clipboard.writeText(sql);
-    showToast('SQL para validar e ativar todos os colaboradores copiado!');
-  };
-
-  const handleApproveUser = async (user: UserProfile, targetRole?: 'coordinator' | 'leader') => {
-    const roleToSet = targetRole || user.role || 'leader';
-    const okStatus = await updateUserStatus(user.uid || user.email, 'active');
-    const okRole = await updateUserRole(user.uid || user.email, roleToSet);
-
-    if (okStatus && okRole) {
-      showToast(`${user.name} aprovado e ativado como ${roleToSet === 'coordinator' ? 'Coordenador' : 'Líder'}!`);
-      await loadData();
-    } else if (okStatus || okRole) {
-      // Uma das duas escritas falhou — o usuário ficou parcialmente atualizado.
-      showToast(`${user.name} foi parcialmente atualizado (status ou cargo pode não ter salvo). Verifique e tente novamente.`, 'error');
-      await loadData();
-    } else {
-      showToast('Erro ao aprovar colaborador.', 'error');
-    }
-  };
-
-  // ---------------- OP ACTIONS ----------------
-  const handleOpenAssignModal = (op: ProductionOrder) => {
-    setAssignModalOp(op);
-  };
-
-  const handleSaveAssignment = async (
-    opId: string, 
-    updates: { 
-      lineId: string | null; 
-      scheduledDate?: string; 
-      scheduledEndDate?: string;
-      scheduledDays?: number;
-      scheduledShift?: string;
-    }
-  ) => {
-    await updateOP(opId, {
-      lineId: updates.lineId,
-      scheduledDate: updates.scheduledDate,
-      scheduledEndDate: updates.scheduledEndDate,
-      scheduledDays: updates.scheduledDays,
-      scheduledShift: updates.scheduledShift,
-    });
-    showToast('Cronograma e linha da OP atualizados com sucesso!');
-    await loadData();
-  };
-
-  const handleAssignAndStart = async (opId: string, lineId: string) => {
-    const today = getLocalDateStr();
-    await updateOP(opId, { 
-      lineId, 
-      scheduledDate: today,
-      scheduledEndDate: today,
-      scheduledDays: 1,
-    });
-    await startOP(opId, lineId, profile?.uid || 'coord');
-    showToast(`OP vinculada e iniciada com sucesso na linha!`);
-    await loadData();
-  };
-
+  // PCP Handlers
   const handleAssignToQueue = async (opId: string, lineId: string, scheduledDate?: string) => {
-    // `scheduledDate` vem da aba de dia selecionada no Kanban do Cronograma
-    // (CronogramaBoard); quando o chamador não informa um dia (ex.: o modal
-    // de vincular OP do estoque), cai no comportamento antigo de agendar hoje.
     const date = scheduledDate || getLocalDateStr();
     await updateOP(opId, {
       lineId,
@@ -579,23 +312,21 @@ WHERE email IN (
       scheduledEndDate: date,
       scheduledDays: 1,
     });
-    showToast(`OP colocada na fila de produção da linha com sucesso.`);
-    await loadData();
+    showToast('OP colocada na fila de produção da linha com sucesso.');
+    await loadData(true);
   };
 
-  // Reordena a fila de produção de uma coluna do Cronograma (uma linha, ou o
-  // "Estoque / Sem Linha") depois que o coordenador arrasta um card para
-  // cima de outro. Em vez de inventar novos números de sequência, reusamos
-  // exatamente o MESMO conjunto de valores de `sequence` que essa coluna já
-  // tinha — só redistribuídos na nova ordem — então cada OP recebe apenas
-  // uma pequena atualização, sem bagunçar a sequência global entre colunas.
+  const handleUnassign = async (opId: string) => {
+    await updateOP(opId, {
+      lineId: null,
+      sequence: 0,
+    });
+    showToast('OP devolvida ao estoque.');
+    await loadData(true);
+  };
+
   const handleReorderColumn = async (columnId: string, orderedOpIds: string[], scheduledDate?: string) => {
-    // Colunas de linha agora mostram só o dia selecionado no Kanban do
-    // Cronograma, então a reordenação também precisa se restringir às OPs
-    // daquele mesmo dia — senão `sortedSequences` incluiria valores de
-    // `sequence` usados por OPs de OUTROS dias na mesma linha, e a
-    // redistribuição colidiria entre dias diferentes.
-    const columnOps = columnId === CRONOGRAMA_BACKLOG_COLUMN_ID
+    const columnOps = columnId === BACKLOG_COLUMN_ID
       ? ops.filter(o => !o.lineId && o.status !== 'completed')
       : ops.filter(o => o.lineId === columnId && o.status !== 'completed' && (!scheduledDate || o.scheduledDate === scheduledDate));
 
@@ -603,583 +334,337 @@ WHERE email IN (
       .map(o => o.sequence || 0)
       .sort((a, b) => a - b);
 
-    const updates: Array<Promise<any>> = [];
-    orderedOpIds.forEach((opId, idx) => {
-      const newSequence = sortedSequences[idx];
-      const currentOp = columnOps.find(o => o.id === opId);
-      if (newSequence === undefined || !currentOp || currentOp.sequence === newSequence) return;
-      updates.push(updateOP(opId, { sequence: newSequence }));
+    const updatePromises = orderedOpIds.map((id, index) => {
+      const targetSeq = sortedSequences[index] ?? (index + 1) * 10;
+      return updateOP(id, { sequence: targetSeq });
     });
 
-    if (updates.length === 0) return;
-
-    await Promise.all(updates);
-    await loadData();
+    await Promise.all(updatePromises);
+    await loadData(true);
   };
 
-  const handleOpenCreateOPModal = (lineId?: string, prefillDate?: string) => {
+  // Handler de Nova / Edição de OP
+  const handleOpenCreateOp = () => {
     setEditingOp(null);
-    setNewOpNumber('');
-    setNewOpProduct('');
-    setNewOpSetor('Envase');
-    setNewOpUnidade('Un');
-    setNewOpPlannedHours('');
-    setNewOpRejectedQuantity('');
-    setNewOpLote('');
-    setNewOpPlanned('');
-    setNewOpGranel('');
-    setNewOpPriority('Normal');
-    setNewOpLineId(lineId || '');
-    setNewOpPackage('1000');
-    setNewOpIndustria('Ybera');
-    const today = prefillDate || getLocalDateStr();
-    setNewOpScheduledDate(today);
-    setNewOpScheduledEndDate(today);
-    setNewOpScheduledDays('1');
-    setNewOpScheduledShift('Integral');
-    setShowNewOpModal(true);
+    setOpFormData({
+      number: '',
+      product: '',
+      plannedQuantity: '',
+      lote: '',
+      granel: '',
+      priority: 'Normal',
+      setor: 'Envase',
+      unidade: 'Un',
+      lineId: '',
+      scheduledDate: getLocalDateStr(),
+      scheduledShift: 'Manhã',
+      tipoDocumento: 'OP',
+      industria: 'Ybera',
+      observation: ''
+    });
+    setShowOpModal(true);
   };
 
-  const handleOpenEditOPModal = (op: ProductionOrder) => {
+  const handleOpenEditOp = (op: ProductionOrder) => {
     setEditingOp(op);
-    setNewOpNumber(op.number || '');
-    setNewOpProduct(op.product || '');
-    const currentSetor = op.setor || 'Envase';
-    setNewOpSetor(currentSetor);
-    setNewOpUnidade(op.unidade || (currentSetor === 'Manipulação' ? 'Kg' : currentSetor === 'Pesagem' ? 'Qtd' : 'Un'));
-    setNewOpPlannedHours(op.plannedHours !== undefined && op.plannedHours !== null ? String(op.plannedHours) : '');
-    setNewOpRejectedQuantity(op.rejectedQuantity !== undefined && op.rejectedQuantity !== null ? String(op.rejectedQuantity) : '0');
-    setNewOpLote(op.lote || '');
-    setNewOpPlanned(String(op.plannedQuantity || ''));
-    setNewOpGranel(op.granel || '');
-    setNewOpPriority(op.priority || 'Normal');
-    setNewOpLineId(op.lineId || '');
-    setNewOpPackage(String(op.packageAvailability || 1000));
-    setNewOpIndustria((op.industria as any) || 'Ybera');
-    setNewOpScheduledDate(op.scheduledDate || '');
-    setNewOpScheduledDays(op.scheduledDays ? String(op.scheduledDays) : '1');
-    setNewOpScheduledEndDate(op.scheduledEndDate || op.scheduledDate || '');
-    setNewOpScheduledShift((op.scheduledShift as any) || 'Integral');
-    setShowNewOpModal(true);
+    setOpFormData({
+      number: op.number,
+      product: op.product,
+      plannedQuantity: String(op.plannedQuantity || ''),
+      lote: op.lote || '',
+      granel: op.granel || '',
+      priority: op.priority || 'Normal',
+      setor: op.setor || 'Envase',
+      unidade: op.unidade || 'Un',
+      lineId: op.lineId || '',
+      scheduledDate: op.scheduledDate || getLocalDateStr(),
+      scheduledShift: op.scheduledShift || 'Manhã',
+      tipoDocumento: op.tipoDocumento || 'OP',
+      industria: op.industria || 'Ybera',
+      observation: op.observation || ''
+    });
+    setShowOpModal(true);
   };
 
-  const handleSaveOP = async (e: React.FormEvent) => {
+  const handleSaveOp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newOpNumber.trim() || !newOpProduct.trim() || !newOpPlanned) {
-      showToast('Preencha os campos obrigatórios da OP.', 'error');
+    if (!opFormData.number || !opFormData.product || !opFormData.plannedQuantity) {
+      showToast('Preencha os campos obrigatórios (Número, Produto, Quantidade).');
       return;
     }
 
-    if (!newOpSetor) {
-      showToast('Selecione o setor da OP antes de salvar.', 'error');
-      return;
-    }
-
-    const rejQty = newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0;
-    const prodQty = Number(editingOp?.producedQuantity || 0);
-    if (rejQty > prodQty) {
-      showToast('Quantidade refugada não pode ser maior que a produzida.', 'error');
-      return;
-    }
-
-    setIsSubmittingOp(true);
+    setIsSavingOp(true);
     try {
-      const tipoDocumento = getTipoDocumento(newOpSetor);
-      const docLabel = 'Ordem de Produção (OP)';
-
-      const opPayload = {
-        number: newOpNumber.trim(),
-        product: newOpProduct.trim(),
-        lote: newOpLote.trim() || undefined,
-        plannedQuantity: Number(newOpPlanned),
-        granel: newOpGranel.trim() || undefined,
-        priority: newOpPriority,
-        lineId: newOpLineId || null,
-        packageAvailability: Number(newOpPackage) || 0,
-        setor: newOpSetor,
-        tipoDocumento,
-        unidade: newOpUnidade,
-        industria: newOpIndustria || undefined,
-        plannedHours: newOpPlannedHours ? Number(newOpPlannedHours) : undefined,
-        rejectedQuantity: newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0,
-        scheduledDate: newOpScheduledDate || undefined,
-        scheduledEndDate: newOpScheduledEndDate || undefined,
-        scheduledDays: newOpScheduledDays ? Number(newOpScheduledDays) : undefined,
-        scheduledShift: newOpScheduledShift || undefined,
-      };
-
+      const qty = parseFloat(opFormData.plannedQuantity.replace(/\./g, '').replace(',', '.')) || 0;
       if (editingOp) {
-        await updateOP(editingOp.id, opPayload);
-        showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
+        await updateOP(editingOp.id, {
+          number: opFormData.number.trim(),
+          product: opFormData.product.trim(),
+          plannedQuantity: qty,
+          lote: opFormData.lote.trim() || undefined,
+          granel: opFormData.granel.trim() || undefined,
+          priority: opFormData.priority,
+          setor: opFormData.setor,
+          unidade: opFormData.unidade,
+          lineId: opFormData.lineId || null,
+          scheduledDate: opFormData.scheduledDate,
+          scheduledShift: opFormData.scheduledShift,
+          tipoDocumento: opFormData.tipoDocumento,
+          industria: opFormData.industria,
+          observation: opFormData.observation.trim() || undefined
+        });
+        showToast(`OP ${opFormData.number} atualizada.`);
       } else {
-        await createOP(opPayload);
-        showToast(`${docLabel} ${newOpNumber} criada com sucesso no estoque!`);
+        await createOP({
+          number: opFormData.number.trim(),
+          product: opFormData.product.trim(),
+          plannedQuantity: qty,
+          lote: opFormData.lote.trim() || undefined,
+          granel: opFormData.granel.trim() || undefined,
+          priority: opFormData.priority,
+          setor: opFormData.setor,
+          unidade: opFormData.unidade,
+          lineId: opFormData.lineId || null,
+          scheduledDate: opFormData.scheduledDate,
+          scheduledShift: opFormData.scheduledShift,
+          tipoDocumento: opFormData.tipoDocumento,
+          industria: opFormData.industria,
+        });
+        showToast(`OP ${opFormData.number} criada com sucesso.`);
       }
-
-      setShowNewOpModal(false);
-      setEditingOp(null);
-      setNewOpNumber('');
-      setNewOpProduct('');
-      setNewOpSetor('Envase');
-      setNewOpUnidade('Un');
-      setNewOpPlannedHours('');
-      setNewOpRejectedQuantity('');
-      setNewOpLote('');
-      setNewOpPlanned('');
-      setNewOpGranel('');
-      setNewOpPriority('Normal');
-      setNewOpLineId('');
-      setNewOpIndustria('Ybera');
-      setNewOpScheduledDate('');
-      setNewOpScheduledEndDate('');
-      setNewOpScheduledDays('1');
-      setNewOpScheduledShift('Integral');
-      await loadData();
-    } catch {
-      showToast(editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.', 'error');
+      setShowOpModal(false);
+      await loadData(true);
+    } catch (err) {
+      console.error('Erro ao salvar OP:', err);
+      showToast('Falha ao salvar a OP.');
     } finally {
-      setIsSubmittingOp(false);
+      setIsSavingOp(false);
     }
   };
 
-  const handleOpenDeleteModal = (op: ProductionOrder) => {
-    setDeleteModalOp(op);
-  };
-
-  const handleConfirmDelete = async () => {
+  // Exclusão de OP
+  const handleDeleteOp = async () => {
     if (!deleteModalOp) return;
-    const targetOp = deleteModalOp;
     setIsDeletingOp(true);
-    // Atualização otimista imediata na UI
-    setOps(prev => prev.filter(o => o.id !== targetOp.id));
-    setDeleteModalOp(null);
     try {
-      await deleteOP(targetOp.id);
-      showToast(`OP ${targetOp.number} removida com sucesso do estoque.`);
-      await loadData();
+      await deleteOP(deleteModalOp.id);
+      showToast(`OP ${deleteModalOp.number} excluída com sucesso.`);
+      setDeleteModalOp(null);
+      await loadData(true);
     } catch (err) {
       console.error('Erro ao excluir OP:', err);
-      showToast('Falha ao remover a OP do estoque.', 'error');
-      await loadData();
+      showToast('Erro ao excluir a ordem de produção.');
     } finally {
       setIsDeletingOp(false);
     }
   };
 
-  const handleResetDatabase = async () => {
-    setIsResetting(true);
-    // Limpeza otimista imediata na UI
-    setOps([]);
-    setShowResetModal(false);
-    try {
-      await resetProductionDatabase();
-      showToast('Base de dados limpa com sucesso! Todas as OPs foram removidas.');
-      await loadData();
-    } catch (err) {
-      console.error('Erro ao resetar base:', err);
-      showToast('Falha ao resetar banco de dados.', 'error');
-      await loadData();
-    } finally {
-      setIsResetting(false);
-    }
-  };
-
-  const handleStartOP = async (op: ProductionOrder) => {
-    const targetLineId = op.lineId || lines[0]?.id || 'line-1';
-    await startOP(op.id, targetLineId, profile?.uid || 'coord');
-    showToast(`OP ${op.number} iniciada na ${lines.find(l => l.id === targetLineId)?.name || 'linha'}!`);
-    await loadData();
-  };
-
-  const handleOpenPauseModal = (op: ProductionOrder) => {
-    setPauseModalData({
-      opId: op.id,
-      lineId: op.lineId || 'line-1',
-      opNumber: op.number,
-    });
-    setSelectedPauseReason(pauseReasons[0]?.name || 'Aguardando laboratório');
-    setPauseObservation('');
-  };
-
+  // Pausar OP
   const handleConfirmPause = async () => {
-    if (!pauseModalData) return;
-    await pauseOP(
-      pauseModalData.opId,
-      pauseModalData.lineId,
-      profile?.uid || 'coord',
-      selectedPauseReason,
-      pauseObservation
-    );
-    showToast(`OP ${pauseModalData.opNumber} pausada com justificativa registrada.`, 'info');
-    setPauseModalData(null);
-    await loadData();
-  };
-
-  const handleResumeOP = async (op: ProductionOrder) => {
-    const targetLineId = op.lineId || 'line-1';
-    await resumeOP(op.id, targetLineId, profile?.uid || 'coord');
-    showToast(`OP ${op.number} retomada!`);
-    await loadData();
-  };
-
-  const handleFinishOP = async (op: ProductionOrder) => {
-    if (window.confirm(`Deseja concluir o lote da OP ${op.number}?`)) {
-      const targetLineId = op.lineId || 'line-1';
-      await finishOP(op.id, targetLineId, profile?.uid || 'coord');
-      showToast(`OP ${op.number} concluída com sucesso!`);
-      await loadData();
+    if (!pauseModalData || !selectedPauseReason) return;
+    setIsPausingOp(true);
+    try {
+      await pauseOP(pauseModalData.opId, pauseModalData.lineId, selectedPauseReason, profile?.uid || 'coordinator', pauseObs);
+      showToast(`OP ${pauseModalData.opNumber} pausada.`);
+      setPauseModalData(null);
+      setSelectedPauseReason('');
+      setPauseObs('');
+      await loadData(true);
+    } catch (err) {
+      console.error('Erro ao pausar OP:', err);
+      showToast('Erro ao pausar a OP.');
+    } finally {
+      setIsPausingOp(false);
     }
   };
 
-  const handleUpdateLeaderRotation = async (leaderId: string, lineId: string) => {
-    // Busca o perfil completo para passar email e nome — necessário para
-    // resolver o uid canônico dentro de saveLeaderRotation e evitar
-    // registros duplicados por email/uid na tabela de rotações.
-    const leaderProfile = leaders.find(l => l.uid === leaderId || l.email === leaderId);
-    await saveLeaderRotation(
-      leaderId,
-      lineId,
-      leaderProfile?.email,
-      leaderProfile?.name,
-    );
-    setRotations(prev => ({ ...prev, [leaderId]: lineId }));
-    showToast('Escala do líder atualizada no Supabase.');
-    await loadData();
-  };
+  // Cadastrar Colaborador
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newUserFormData.name || !newUserFormData.email) {
+      showToast('Preencha nome e e-mail do colaborador.');
+      return;
+    }
 
-  const handleCopyLeaderCredentials = (leader: UserProfile) => {
-    // A senha temporária é salva no perfil do líder no momento da criação.
-    // Se não estiver disponível (líder criado antes desta versão), orienta o coordenador
-    // a deletar e recriar o acesso para gerar uma nova senha temporária.
-    const pwd = leader.defaultPassword;
-    const text = pwd
-      ? `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${leader.email}\n🔑 *Senha Temporária:* ${pwd}\n\n⚠️ *Atenção:* No seu primeiro acesso, o sistema solicitará automaticamente a criação de uma nova senha pessoal definitiva.`
-      : `🏭 *Acesso ao SIG-Produção*\nOlá ${leader.name}!\n\n📧 *E-mail de Login:* ${leader.email}\n\n⚠️ Senha temporária não disponível. Solicite ao coordenador que recrie seu acesso para gerar uma nova senha.`;
-    navigator.clipboard.writeText(text);
-    showToast(`Credenciais de ${leader.name} copiadas para a área de transferência!`);
-  };
-
-  const handleResetLeaderPassword = async (leader: UserProfile) => {
-    setResetPasswordModal({
-      leader,
-      loading: true,
-    });
-
+    setIsCreatingUser(true);
     try {
-      const res = await resetLeaderPassword(leader.uid, leader.email);
-      if (res.success && res.newPassword) {
-        setResetPasswordModal({
-          leader,
-          newPassword: res.newPassword,
-          loading: false,
-        });
-        await loadData();
+      const generatedPass = Math.random().toString(36).slice(-8) + 'A1!';
+      const res = await preAuthorizeUser({
+        name: newUserFormData.name.trim(),
+        email: newUserFormData.email.trim().toLowerCase(),
+        role: newUserFormData.rule === 'admin' ? 'coordinator' : 'leader',
+        cargo: newUserFormData.cargo.trim() || 'Operador',
+        area: newUserFormData.area,
+        defaultPassword: generatedPass,
+      });
+
+      if (res.success) {
+        if (res.uid) {
+          await updateUserRule(res.uid, newUserFormData.rule);
+        }
+        setUserCreatedPassword(generatedPass);
+        showToast('Colaborador pré-cadastrado com sucesso!');
+        await loadData(true);
       } else {
-        setResetPasswordModal(null);
-        showToast(res.error || 'Não foi possível redefinir a senha do líder.', 'error');
+        showToast(res.error || 'Não foi possível cadastrar o colaborador.');
       }
-    } catch (err: any) {
-      setResetPasswordModal(null);
-      showToast(err?.message || 'Erro ao redefinir a senha do líder.', 'error');
+    } catch (err) {
+      console.error('Erro ao cadastrar colaborador:', err);
+      showToast('Erro ao cadastrar colaborador.');
+    } finally {
+      setIsCreatingUser(false);
     }
   };
 
-  const handleMarkAsActive = async (user: UserProfile) => {
-    try {
-      await updateUserStatus(user.uid, 'active');
-      showToast(`Status de ${user.name} atualizado para Ativo.`);
-      await loadData();
-    } catch (err: any) {
-      showToast('Erro ao atualizar status do colaborador.', 'error');
-    }
-  };
-
-  const handleSyncPendingLeaders = async () => {
+  // Sincronizar Líderes Pendentes
+  const handleSyncPending = async () => {
     setIsSyncingPending(true);
     try {
       const res = await syncPendingLeadersToSupabase();
-      if (res.synced > 0) {
-        showToast(`${res.synced} colaborador(es) sincronizado(s) com o Supabase!`);
-      } else if (res.total === 0) {
-        showToast('Todos os colaboradores já estão sincronizados com o Supabase.');
-      } else {
-        showToast(`Falha ao sincronizar: ${res.errors[0] || 'Verifique as permissões ou limite de e-mail.'}`, 'error');
-      }
-      await loadData();
-    } catch (err: any) {
-      showToast(`Erro na sincronização: ${err?.message || 'Falha de conexão'}`, 'error');
+      showToast(`Sincronização concluída: ${res.synced} usuários sincronizados.`);
+      await loadData(true);
+    } catch (err) {
+      console.error('Erro ao sincronizar:', err);
+      showToast('Erro ao sincronizar usuários pendentes.');
     } finally {
       setIsSyncingPending(false);
     }
   };
 
-  const resetNewLeaderForm = () => {
-    setNewLeaderName('');
-    setNewLeaderEmail('');
-    setNewLeaderCargo('Líder de Produção');
-    setNewLeaderArea('Envase');
-    setIsAutoEmail(true);
-  };
-
-  const handleCreateLeader = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const name = newLeaderName.trim();
-    const email = (newLeaderEmail.trim() || generateLeaderEmail(name)).toLowerCase();
-
-    if (!name || !email) {
-      showToast('Por favor, informe o nome e o e-mail do líder.', 'error');
-      return;
-    }
-
-    if (!newLeaderArea) {
-      showToast('Por favor, selecione a área de atuação do líder.', 'error');
-      return;
-    }
-
-    setIsSubmittingLeader(true);
-    // Gera uma senha temporária única para este líder — nunca reutilizamos a mesma para todos
-    const tempPassword = generateTemporaryPassword();
-    const defaultCargoForArea = newLeaderArea === 'Pesagem' 
-      ? 'Líder de Pesagem' 
-      : newLeaderArea === 'Manipulação' 
-      ? 'Líder de Manipulação' 
-      : 'Líder de Envase';
-    const effectiveCargo = newLeaderCargo.trim() && newLeaderCargo.trim() !== 'Líder de Produção' 
-      ? newLeaderCargo.trim() 
-      : defaultCargoForArea;
-
+  // Excluir Colaborador
+  const handleDeleteUser = async () => {
+    if (!deleteUserModalData) return;
+    setIsDeletingUser(true);
     try {
-      // Líderes de Envase não têm mais uma "linha responsável" fixa —
-      // qualquer um deles pode operar qualquer linha, bastando selecioná-la
-      // na própria tela do líder (as OPs pertencem à linha, atribuídas pelo
-      // cronograma de envase, não ao líder). Por isso não enviamos mais
-      // lineId aqui na criação do cadastro.
-      const res = await preAuthorizeUser({
-        name,
-        email,
-        role: 'leader',
-        cargo: effectiveCargo,
-        area: newLeaderArea,
-        mustChangePassword: true,
-        defaultPassword: tempPassword,
-      });
-
-      if (res.success) {
-        if (res.isOfflineFallback) {
-          showToast(`Líder ${name} salvo localmente (pendente envio ao Supabase).`, 'info');
-        } else {
-          showToast(`Líder ${name} cadastrado com sucesso no Supabase!`);
-        }
-
-        // Exibe o modal com os dados de acesso gerados para cópia imediata
-        setCreatedCredentialsModalData({
-          name,
-          email,
-          password: tempPassword,
-          cargo: effectiveCargo,
-          area: newLeaderArea,
-        });
-
-        setNewLeaderName('');
-        setNewLeaderEmail('');
-        setNewLeaderCargo('Líder de Envase');
-        setNewLeaderArea('Envase');
-        setIsAutoEmail(true);
-        setShowNewLeaderModal(false);
-        await loadData();
-      } else {
-        showToast(res.message || 'Falha ao cadastrar líder.', 'error');
-        if (res.isOfflineFallback) {
-          setCreatedCredentialsModalData({
-            name,
-            email,
-            password: tempPassword,
-            cargo: effectiveCargo,
-            area: newLeaderArea,
-          });
-          setShowNewLeaderModal(false);
-          await loadData();
-        }
+      await deleteUserProfile(deleteUserModalData.uid, deleteUserModalData.email);
+      showToast(`Colaborador ${deleteUserModalData.name} removido com sucesso.`);
+      setDeleteUserModalData(null);
+      if (detailsModalUserId === deleteUserModalData.uid || detailsModalUserId === deleteUserModalData.email) {
+        setDetailsModalUserId(null);
       }
-    } catch (err: any) {
-      showToast(`Erro ao cadastrar: ${err?.message || 'Falha na gravação'}`, 'error');
+      await loadData(true);
+    } catch (err) {
+      console.error('Erro ao excluir colaborador:', err);
+      showToast('Erro ao excluir perfil de colaborador.');
     } finally {
-      setIsSubmittingLeader(false);
+      setIsDeletingUser(false);
     }
   };
 
-  // ---------------- KPI COMPUTATIONS ----------------
-  const todayStr = getLocalDateStr();
-  const currentWeekRange = React.useMemo(() => getWeekRange(todayStr), [todayStr]);
-
-  const todayOps = ops.filter(o => o.scheduledDate === todayStr);
-  const todayScheduledVolume = todayOps.reduce((acc, o) => acc + o.plannedQuantity, 0);
-
-  const weekOps = ops.filter(o => o.scheduledDate && o.scheduledDate >= currentWeekRange.startStr && o.scheduledDate <= currentWeekRange.endStr);
-  const weekScheduledVolume = weekOps.reduce((acc, o) => acc + o.plannedQuantity, 0);
-
-  const unassignedOps = ops.filter(o => !o.lineId);
-  const unassignedVolume = unassignedOps.reduce((acc, o) => acc + o.plannedQuantity, 0);
-  const totalOpsVolume = ops.reduce((acc, o) => acc + o.plannedQuantity, 0);
-
-  const totalPlanned = ops
-    .filter(op => op.status === 'in_progress' || op.status === 'completed' || op.status === 'paused')
-    .reduce((acc, op) => acc + op.plannedQuantity, 0);
-  const totalProduced = ops.reduce((acc, op) => acc + op.producedQuantity, 0);
-  const globalProgress = totalPlanned > 0 ? Math.min(Math.round((totalProduced / totalPlanned) * 100), 100) : 0;
-
-  const activeLinesCount = lines.filter(l => l.status === 'active').length;
-  const pausedLinesCount = lines.filter(l => l.status === 'paused').length;
-  const idleLinesCount = lines.filter(l => l.status === 'idle').length;
-  const criticalOpsCount = ops.filter(op => op.priority === 'Crítica' && op.status !== 'completed').length;
-
-  const coordinatorCount = allUsers.filter(u => u.role === 'coordinator').length;
-  const leadersCount = allUsers.filter(u => u.role === 'leader').length;
-  const pendingCount = allUsers.filter(u => u.status === 'pending' || u.status === 'inactive').length;
-  const pendingSyncCount = allUsers.filter(u => u.role === 'leader' && ((u as any).pendingSupabaseSync || u.uid?.startsWith('usr-'))).length;
-
-  // Uma OP/OSM é considerada "finalizada" (deve sumir do estoque e só
-  // aparecer na aba "Concluídas") quando seu status é 'completed' — EXCETO
-  // a OSM de Pesagem, que já nasce com status 'completed' no banco só para
-  // indicar "registrada e disponível para a Manipulação" (ver
-  // "Pronta p/ Manipulação" logo abaixo). Essa OSM ainda está em estoque,
-  // então não deve sumir das demais abas como se já tivesse sido concluída.
-  const isOpFinalizada = (op: ProductionOrder) => {
-    if (op.setor === 'Pesagem') return false;
-    return op.status === 'completed';
-  };
-
-  // Filtered OPs
-  const filteredOps = ops.filter(op => {
-    const term = searchTerm.toLowerCase();
-    const matchSearch = op.number.toLowerCase().includes(term) ||
-                        op.product.toLowerCase().includes(term) ||
-                        (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
-                        (op.granel ? op.granel.toLowerCase().includes(term) : false);
-
-    let matchStatus = true;
-    if (statusFilter === 'completed') {
-      matchStatus = isOpFinalizada(op);
-    } else if (isOpFinalizada(op)) {
-      // Fora da aba "Concluídas", uma OP finalizada nunca deve aparecer —
-      // ela some do estoque disponível assim que é concluída.
-      matchStatus = false;
-    } else if (statusFilter === 'today') {
-      matchStatus = op.scheduledDate === todayStr;
-    } else if (statusFilter === 'week') {
-      matchStatus = Boolean(op.scheduledDate && op.scheduledDate >= currentWeekRange.startStr && op.scheduledDate <= currentWeekRange.endStr);
-    } else if (statusFilter === 'unassigned') {
-      matchStatus = !op.lineId;
-    } else if (statusFilter === 'stock') {
-      matchStatus = op.status === 'pending';
-    } else if (statusFilter !== 'all') {
-      matchStatus = op.status === statusFilter;
+  // Resetar Senha
+  const handleResetPassword = async (user: UserProfile) => {
+    try {
+      const res = await resetLeaderPassword(user.uid, user.email);
+      if (res.success && res.newPassword) {
+        navigator.clipboard.writeText(res.newPassword);
+        showToast(`Nova senha temporária: ${res.newPassword} (copiada!)`);
+        await loadData(true);
+      }
+    } catch (err) {
+      console.error('Erro ao resetar senha:', err);
+      showToast('Falha ao resetar a senha.');
     }
-
-    return matchSearch && matchStatus;
-  });
-
-  // Filtered Users
-  const filteredUsers = allUsers.filter(u => {
-    const matchSearch = u.name.toLowerCase().includes(userSearchTerm.toLowerCase()) || 
-                        u.email.toLowerCase().includes(userSearchTerm.toLowerCase()) ||
-                        (u.cargo && u.cargo.toLowerCase().includes(userSearchTerm.toLowerCase()));
-    const matchRole = userRoleFilter === 'all' 
-      ? true 
-      : userRoleFilter === 'pending'
-      ? (u.status === 'pending' || u.status === 'inactive')
-      : u.role === userRoleFilter;
-    return matchSearch && matchRole;
-  });
-
-  // Modal Filtered Users
-  const modalFilteredUsers = allUsers.filter(u => {
-    if (!modalUserSearch.trim()) return true;
-    const s = modalUserSearch.toLowerCase();
-    return u.name.toLowerCase().includes(s) || u.email.toLowerCase().includes(s) || (u.cargo && u.cargo.toLowerCase().includes(s));
-  });
-
-  const pendingUsersCount = allUsers.filter(
-    (u) => u.status === 'pending' || u.status === 'awaiting_confirmation'
-  ).length;
-
-  const screenTitles: Record<
-    DashboardTab,
-    { title: string; subtitle: string; icon: React.ComponentType<{ className?: string }> }
-  > = {
-    home: {
-      title: 'Dashboard Geral',
-      subtitle: 'Painel de Indicadores de Produção',
-      icon: LayoutDashboard,
-    },
-    pesagem: {
-      title: 'Área de Pesagem',
-      subtitle: 'Pesagem e separação de materias primas',
-      icon: Scale,
-    },
-    manipulacao: {
-      title: 'Área de Manipulação',
-      subtitle: 'Manipulação de materias primas',
-      icon: FlaskConical,
-    },
-    envase: {
-      title: 'Chão de Fábrica (Envase)',
-      subtitle: 'Controle de linhas de envase',
-      icon: Factory,
-    },
-    cronograma: {
-      title: 'Cronograma de Envase',
-      subtitle: 'Quadro Kanban para atribuir e mover OPs entre as linhas de envase',
-      icon: Layers,
-    },
-    daily_production: {
-      title: 'Histórico & Gráficos',
-      subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
-      icon: BarChart3,
-    },
-    ops: {
-      title: 'Estoque de OPs',
-      subtitle: 'Gestão de ordens de produção em estoque, lotes industriais e importação CSV',
-      icon: Package,
-    },
-    users: {
-      title: 'Equipe & Regras de Acesso (Rules)',
-      subtitle: 'Controle de perfis, permissões por telas e aprovação de usuários',
-      icon: ShieldCheck,
-    },
-    events: {
-      title: 'Auditoria Operacional',
-      subtitle: 'Histórico detalhado de paradas, apontamentos e eventos',
-      icon: History,
-    },
-    training: {
-      title: 'Treinamento (Simulação)',
-      subtitle: 'Simula as telas dos líderes com OPs fictícias para treinamento, sem afetar a produção real',
-      icon: GraduationCap,
-    },
   };
 
-  const currentScreen = screenTitles[activeTab] || screenTitles.home;
-  const ScreenIcon = currentScreen.icon;
+  // Filtragem do Estoque de OPs
+  const todayStr = useMemo(() => getLocalDateStr(), []);
+
+  const filteredOps = useMemo(() => {
+    return ops.filter((op) => {
+      // Filtro de aba
+      if (opsFilterTab === 'today') {
+        if (op.scheduledDate !== todayStr) return false;
+      } else if (opsFilterTab === 'week') {
+        if (!op.scheduledDate) return false;
+        const now = new Date();
+        const dow = now.getDay();
+        const diffToMonday = dow === 0 ? -6 : 1 - dow;
+        const monday = new Date(now);
+        monday.setDate(now.getDate() + diffToMonday);
+        monday.setHours(0, 0, 0, 0);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        sunday.setHours(23, 59, 59, 999);
+        const opDate = new Date(op.scheduledDate + 'T12:00:00');
+        if (opDate < monday || opDate > sunday) return false;
+      } else if (opsFilterTab === 'unassigned') {
+        if (op.lineId || op.status === 'completed') return false;
+      } else if (opsFilterTab === 'completed') {
+        if (op.status !== 'completed') return false;
+      }
+
+      // Filtro de setor
+      if (opsSectorFilter !== 'Todos') {
+        if (op.setor !== opsSectorFilter) return false;
+      }
+
+      // Busca textual
+      if (opsSearchTerm.trim()) {
+        const term = opsSearchTerm.trim().toLowerCase();
+        const matchNumber = op.number?.toLowerCase().includes(term);
+        const matchProduct = op.product?.toLowerCase().includes(term);
+        const matchLote = op.lote ? op.lote.toLowerCase().includes(term) : false;
+        const matchGranel = op.granel ? op.granel.toLowerCase().includes(term) : false;
+        if (!matchNumber && !matchProduct && !matchLote && !matchGranel) return false;
+      }
+
+      return true;
+    });
+  }, [ops, opsFilterTab, opsSectorFilter, opsSearchTerm, todayStr]);
+
+  // Filtragem de Usuários
+  const filteredUsers = useMemo(() => {
+    return allUsers.filter((u) => {
+      if (userRuleFilter !== 'all') {
+        if ((u.rule || 'envase') !== userRuleFilter) return false;
+      }
+      if (userSearchTerm.trim()) {
+        const term = userSearchTerm.trim().toLowerCase();
+        const matchName = u.name?.toLowerCase().includes(term);
+        const matchEmail = u.email?.toLowerCase().includes(term);
+        const matchCargo = u.cargo?.toLowerCase().includes(term);
+        if (!matchName && !matchEmail && !matchCargo) return false;
+      }
+      return true;
+    });
+  }, [allUsers, userRuleFilter, userSearchTerm]);
+
+  // Filtragem de Auditoria
+  const filteredEvents = useMemo(() => {
+    return events.filter((ev) => {
+      if (eventTypeFilter !== 'all') {
+        if (ev.type !== eventTypeFilter) return false;
+      }
+      if (eventLineFilter !== 'all') {
+        if (ev.lineId !== eventLineFilter) return false;
+      }
+      if (eventSearchTerm.trim()) {
+        const term = eventSearchTerm.trim().toLowerCase();
+        const matchOp = ev.opNumber?.toLowerCase().includes(term);
+        const matchLeader = ev.leaderName?.toLowerCase().includes(term);
+        const matchLine = ev.lineName?.toLowerCase().includes(term);
+        const matchReason = ev.reason?.toLowerCase().includes(term);
+        const matchObs = ev.observation?.toLowerCase().includes(term);
+        if (!matchOp && !matchLeader && !matchLine && !matchReason && !matchObs) return false;
+      }
+      return true;
+    });
+  }, [events, eventTypeFilter, eventLineFilter, eventSearchTerm]);
+
+  const activeLinesCount = useMemo(() => lines.filter(l => l.status === 'active').length, [lines]);
+  const pendingUsersCount = useMemo(() => allUsers.filter(u => u.status === 'pending' || u.status === 'first_access').length, [allUsers]);
 
   return (
-    <div className="h-screen bg-[#09090b] text-[#f4f4f5] flex font-sans overflow-hidden selection:bg-blue-600 selection:text-white">
-      
-      {/* Toast Notification */}
+    <div className="flex h-screen bg-[#09090b] text-[#f4f4f5] font-sans antialiased overflow-hidden">
+      {/* Toast flutuante */}
       {toastMessage && (
-        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-3 duration-200 ${
-          toastMessage.type === 'success' ? 'bg-emerald-950/90 border-emerald-800 text-emerald-200 shadow-emerald-950/50' :
-          toastMessage.type === 'error' ? 'bg-red-950/90 border-red-800 text-red-200 shadow-red-950/50' :
-          'bg-blue-950/90 border-blue-800 text-blue-200 shadow-blue-950/50'
-        }`}>
-          {toastMessage.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-          {toastMessage.type === 'error' && <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />}
-          {toastMessage.type === 'info' && <Sparkles className="w-4 h-4 text-blue-400 shrink-0" />}
-          <span>{toastMessage.text}</span>
+        <div className="fixed bottom-6 right-6 z-50 bg-blue-600 text-white font-medium text-xs px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <Info className="w-4 h-4 shrink-0" />
+          <span>{toastMessage}</span>
         </div>
       )}
 
-      {/* ---------------- MENU LATERAL (SIDEBAR) ---------------- */}
+      {/* Barra Lateral Unificada */}
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -1190,133 +675,104 @@ WHERE email IN (
         pendingCount={pendingUsersCount}
         profile={profile}
         onOpenGoals={() => setShowGoalsModal(true)}
-        onRefresh={handleManualRefresh}
-        onSignOut={() => signOut()}
+        onRefresh={() => loadData(false)}
+        onSignOut={signOut}
         isRefreshing={isRefreshing}
         isCollapsed={isSidebarCollapsed}
         setIsCollapsed={setIsSidebarCollapsed}
-        mobileOpen={isMobileSidebarOpen}
-        setMobileOpen={setIsMobileSidebarOpen}
+        mobileOpen={mobileMenuOpen}
+        setMobileOpen={setMobileMenuOpen}
       />
 
-      {/* ---------------- ÁREA PRINCIPAL DE CONTEÚDO ---------------- */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        
-        {/* CABEÇALHO SUPERIOR DA TELA ATIVA */}
-        <header className="h-14 sm:h-16 border-b border-[#1e1e24] bg-[#0d0d11]/90 backdrop-blur-md flex items-center justify-between px-3 sm:px-6 shrink-0 z-20">
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-            {/* Botão Hamburger para Mobile */}
+      {/* Conteúdo Principal */}
+      <main className="flex-1 flex flex-col min-w-0 overflow-y-auto custom-scrollbar">
+        {/* Topbar móvel */}
+        <div className="lg:hidden flex items-center justify-between p-3.5 bg-[#121216] border-b border-[#222226]">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setIsMobileSidebarOpen(true)}
-              className="md:hidden p-2 rounded-xl bg-[#171720] border border-[#262632] text-[#f4f4f5] hover:text-white hover:bg-[#20202c] transition-colors shrink-0"
-              title="Abrir Menu de Navegação"
+              onClick={() => setMobileMenuOpen(true)}
+              className="p-1.5 rounded-lg bg-[#18181f] text-zinc-300 hover:text-white"
             >
-              <Menu className="w-5 h-5 text-blue-400" />
+              <Factory className="w-5 h-5 text-blue-500" />
             </button>
-
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#171720] border border-[#262632] flex items-center justify-center text-blue-400 shrink-0">
-              <ScreenIcon className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <h1 className="text-xs sm:text-sm font-bold text-[#f4f4f5] tracking-tight truncate">
-                {currentScreen.title}
-              </h1>
-              <p className="text-[10px] sm:text-[11px] text-[#71717a] truncate font-medium">
-                {currentScreen.subtitle}
-              </p>
-            </div>
+            <span className="text-xs font-bold uppercase tracking-wider text-white">GPANEL FACTORY</span>
           </div>
+          <button
+            onClick={() => loadData(false)}
+            className="p-1.5 rounded-lg bg-[#18181f] text-zinc-300 hover:text-white"
+            title="Atualizar"
+          >
+            <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
+          </button>
+        </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            {/* Atalho para voltar ao Dashboard Geral — essencial para líderes,
-                que abrem direto na tela de uso e precisam de 1 toque para
-                ver as métricas gerais, sem precisar abrir o menu lateral. */}
-            {activeTab !== 'home' && allowedTabs.includes('home') && (
-              <button
-                onClick={() => setActiveTab('home')}
-                className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-blue-950/60 hover:bg-blue-900/60 border border-blue-800/50 text-xs font-semibold text-blue-300 hover:text-white flex items-center gap-1.5 transition-all shrink-0"
-                title="Ir para o Dashboard Geral"
-              >
-                <LayoutDashboard className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Dashboard</span>
-              </button>
-            )}
-          </div>
-        </header>
+        {/* ÁREA DE RENDERIZAÇÃO DAS TELAS CONFORME TAB ATIVA */}
+        <div className="flex-1 p-3 sm:p-5">
+          {/* TAB 1: DASHBOARD GERAL */}
+          {activeTab === 'home' && (
+            <HomeDashboard
+              lines={lines}
+              ops={ops}
+              leaders={leaders}
+              allUsers={allUsers}
+              events={events}
+              rotations={rotations}
+              goals={goals}
+              factoryMonthlyGoal={factoryMonthlyGoal}
+              factoryMonthlyGoals={factoryMonthlyGoals}
+              lineDailyGoals={lineDailyGoals}
+              onNavigateTab={(tab) => setActiveTab(tab)}
+              onOpenShareModal={() => setShowShareModal(true)}
+            />
+          )}
 
-        {/* CORPO PRINCIPAL POR ABA (SCROLLÁVEL) */}
-        <main className="flex-1 overflow-auto p-3 sm:p-6 bg-[#09090b]">
-          <div className="max-w-7xl mx-auto space-y-6">
+          {/* TAB 2: PESAGEM */}
+          {activeTab === 'pesagem' && (
+            <PesagemScreen embedded={true} />
+          )}
 
-            {/* ---------------- TELA 1: HOME (DASHBOARD COM MÉTRICAS) ---------------- */}
-            {activeTab === 'home' && (
-              <HomeDashboard
-                lines={lines}
-                ops={ops}
-                leaders={leaders}
-                allUsers={allUsers}
-                events={events}
-                rotations={rotations}
-                goals={goals}
-                factoryMonthlyGoal={factoryMonthlyGoal}
-                factoryMonthlyGoals={factoryMonthlyGoals}
-                lineDailyGoals={lineDailyGoals}
-                onNavigateTab={(tab) => setActiveTab(tab)}
-                onOpenShareModal={() => setIsShareModalOpen(true)}
-              />
-            )}
+          {/* TAB 3: MANIPULAÇÃO */}
+          {activeTab === 'manipulacao' && (
+            <ManipulacaoScreen embedded={true} />
+          )}
 
-            {/* ---------------- TELA: PESAGEM (BALANÇA & MATÉRIAS-PRIMAS) ---------------- */}
-            {activeTab === 'pesagem' && (
-              <PesagemScreen embedded={true} />
-            )}
+          {/* TAB 4: CHÃO DE FÁBRICA (ENVASE) */}
+          {activeTab === 'envase' && (
+            <LeaderScreen embedded={true} />
+          )}
 
-            {/* ---------------- TELA: MANIPULAÇÃO (GRANÉIS & REATORES) ---------------- */}
-            {activeTab === 'manipulacao' && (
-              <ManipulacaoScreen embedded={true} />
-            )}
-
-            {/* ---------------- TELA: ENVASE (CHÃO DE FÁBRICA / PORTAL DO LÍDER) ---------------- */}
-            {activeTab === 'envase' && (
-              <LeaderScreen embedded={true} />
-            )}
-
-            {/* ---------------- TELA: TREINAMENTO (SIMULAÇÃO DAS TELAS DOS LÍDERES) ----------------
-                Só aparece pra quem tem a Rule "admin" (Coordenador Geral) — ver
-                ACCESS_RULES.admin.tabs em lib/permissions.ts. 100% dados fictícios,
-                nenhuma chamada a services/db.ts ou ao Supabase. */}
-            {activeTab === 'training' && (
-              <TrainingSimulator />
-            )}
-
-            {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
-            {activeTab === 'daily_production' && (
-              <DailyProductionHistory
-                ops={ops}
-                lines={lines}
-                leaders={leaders}
-                goals={goals}
-                events={events}
-              />
-            )}
-
-            {/* ---------------- TELA: CRONOGRAMA DE ENVASE (KANBAN) ---------------- */}
-            {activeTab === 'cronograma' && (
+          {/* TAB 5: CRONOGRAMA DE ENVASE (KANBAN) */}
+          {activeTab === 'cronograma' && (
             <div className="space-y-4">
-              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-4 rounded-2xl">
                 <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                      Cronograma de Envase
-                    </h2>
-                    <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Tempo Real
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-5 h-5 text-blue-400" />
+                    <h2 className="text-base font-black text-white uppercase tracking-wider">Cronograma de Envase</h2>
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-blue-950/80 text-blue-400 border border-blue-800/40">
+                      Kanban Semanal
                     </span>
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
                     Selecione o dia da semana nas abas abaixo e arraste as OPs entre as colunas para atribuí-las às linhas de envase naquele dia, ou use o "+" de cada coluna.
                   </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    onClick={handleOpenCreateOp}
+                    className="h-9 px-3 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Nova OP</span>
+                  </Button>
+                  <Button
+                    onClick={() => setShowCsvModal(true)}
+                    variant="outline"
+                    className="h-9 px-3 text-xs font-medium rounded-xl border-[#272733] bg-[#181820] text-zinc-300 hover:text-white gap-1.5"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Importar CSV</span>
+                  </Button>
                 </div>
               </div>
 
@@ -1324,326 +780,271 @@ WHERE email IN (
                 lines={lines}
                 ops={ops}
                 onAssignToQueue={handleAssignToQueue}
-                onUnassign={(opId) => handleSaveAssignment(opId, { lineId: null })}
+                onUnassign={handleUnassign}
                 onReorderColumn={handleReorderColumn}
-                onOpenAssignModal={(line) => setAssignStockModalTargetLine(line)}
-                onOpenEditOpModal={(op) => handleOpenEditOPModal(op)}
+                onOpenAssignModal={(line) => setAssignStockLine(line)}
+                onOpenEditOpModal={(op) => handleOpenEditOp(op)}
               />
             </div>
-            )}
+          )}
 
-          {/* ---------------- ABA 2: ESTOQUE DE OPS & IMPORTAÇÃO CSV ---------------- */}
+          {/* TAB 6: HISTÓRICO & GRÁFICOS */}
+          {activeTab === 'daily_production' && (
+            <DailyProductionHistory
+              ops={ops}
+              lines={lines}
+              leaders={leaders}
+              goals={goals}
+              events={events}
+            />
+          )}
+
+          {/* TAB 7: ESTOQUE DE OPS */}
           {activeTab === 'ops' && (
             <div className="space-y-4">
-              
-              {/* Header do Estoque de OPs com os botões no canto superior direito */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-4 rounded-2xl overflow-hidden">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                      Estoque de Ordens de Produção (OPs)
-                    </h2>
-                    <span className="text-[10px] bg-blue-950/80 text-blue-400 border border-blue-800/40 px-2 py-0.5 rounded-full font-bold whitespace-nowrap">
-                      {ops.length} OPs cadastradas
+              {/* Header do Estoque de OPs */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-4 rounded-2xl">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Package className="w-5 h-5 text-blue-400" />
+                    <h2 className="text-base font-black text-white uppercase tracking-wider">Estoque de Ordens de Produção</h2>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-blue-950/80 text-blue-400 border border-blue-800/40">
+                      {filteredOps.length} de {ops.length} OPs
                     </span>
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
-                    Importe planilhas CSV com os lotes disponíveis em estoque e despache para as linhas de envase.
+                    Visão geral de ordens emitidas, filas de linhas, prioridades e progresso de envase.
                   </p>
                 </div>
 
-                {/* Botões no canto superior direito */}
-                <div className="flex items-center gap-2 w-full md:w-auto shrink-0 flex-wrap sm:flex-nowrap">
-                  {ops.length > 0 && (
-                    <button
-                      type="button"
-                      id="btn-limpar-base"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowResetModal(true);
-                      }}
-                      className="h-9 px-3.5 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 hover:border-red-700/60 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95 whitespace-nowrap flex-1 sm:flex-initial"
-                      title="Limpar todas as OPs e resetar a base de dados"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                      <span>Limpar Base</span>
-                    </button>
-                  )}
-
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
-                    onClick={() => setShowCsvImportModal(true)}
-                    className="h-9 px-3.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-blue-400 hover:text-blue-300 text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
-                    title="Importar planilha de OPs em estoque via arquivo CSV"
+                    onClick={handleOpenCreateOp}
+                    className="h-9 px-3 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white gap-1.5 shadow-md shadow-blue-950/40"
                   >
-                    <FileSpreadsheet className="w-4 h-4 text-blue-400 shrink-0" />
+                    <Plus className="w-4 h-4" />
+                    <span>Nova OP</span>
+                  </Button>
+                  <Button
+                    onClick={() => setShowCsvModal(true)}
+                    variant="outline"
+                    className="h-9 px-3 text-xs font-medium rounded-xl border-[#272733] bg-[#181820] text-zinc-300 hover:text-white gap-1.5"
+                  >
+                    <Upload className="w-4 h-4" />
                     <span>Importar CSV</span>
                   </Button>
-
-                  <Button
-                    onClick={() => handleOpenCreateOPModal()}
-                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-[0_0_12px_rgba(37,99,235,0.3)] transition-all whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4 shrink-0" />
-                    <span>Cadastrar Nova OP</span>
-                  </Button>
                 </div>
               </div>
 
-              {/* Cards de Métricas Rápidas do Cronograma & Estoque */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                
-                {/* Meta / Programado Hoje */}
-                <div className="bg-[#121217] border border-[#202027] p-3.5 rounded-xl flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-blue-600/15 border border-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
-                    <Calendar className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-[10px] uppercase font-bold text-[#71717a] block truncate">
-                      Programado Hoje
-                    </span>
-                    <span className="text-base font-black font-mono text-[#f4f4f5]">
-                      {todayScheduledVolume.toLocaleString('pt-BR')} un
-                    </span>
-                    <span className="text-[10px] text-blue-400 font-semibold block">
-                      {todayOps.length} {todayOps.length === 1 ? 'OP agendada' : 'OPs agendadas'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Meta / Programado Esta Semana */}
-                <div className="bg-[#121217] border border-[#202027] p-3.5 rounded-xl flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-emerald-600/15 border border-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
-                    <CalendarDays className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-[10px] uppercase font-bold text-[#71717a] block truncate">
-                      Meta Desta Semana
-                    </span>
-                    <span className="text-base font-black font-mono text-[#f4f4f5]">
-                      {weekScheduledVolume.toLocaleString('pt-BR')} un
-                    </span>
-                    <span className="text-[10px] text-emerald-400 font-semibold block">
-                      {weekOps.length} {weekOps.length === 1 ? 'OP agendada' : 'OPs agendadas'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Aguardando Linha / Estoque */}
-                <div className="bg-[#121217] border border-[#202027] p-3.5 rounded-xl flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-amber-600/15 border border-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
-                    <Boxes className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-[10px] uppercase font-bold text-[#71717a] block truncate">
-                      Aguardando Linha
-                    </span>
-                    <span className="text-base font-black font-mono text-[#f4f4f5]">
-                      {unassignedOps.length} OPs
-                    </span>
-                    <span className="text-[10px] text-amber-400 font-semibold block">
-                      {unassignedVolume.toLocaleString('pt-BR')} un disponíveis
-                    </span>
-                  </div>
-                </div>
-
-                {/* Total Geral em Carteira */}
-                <div className="bg-[#121217] border border-[#202027] p-3.5 rounded-xl flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-purple-600/15 border border-purple-500/20 text-purple-400 flex items-center justify-center shrink-0">
-                    <TrendingUp className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-[10px] uppercase font-bold text-[#71717a] block truncate">
-                      Total em Carteira
-                    </span>
-                    <span className="text-base font-black font-mono text-[#f4f4f5]">
-                      {totalOpsVolume.toLocaleString('pt-BR')} un
-                    </span>
-                    <span className="text-[10px] text-purple-400 font-semibold block">
-                      {ops.length} OPs cadastradas
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Barra de Filtros e Busca no Estoque & Cronograma */}
-              <div className="bg-[#121216] border border-[#222226] p-3 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                <div className="relative flex-1 max-w-md">
-                  <Search className="w-4 h-4 text-[#71717a] absolute left-3 top-2.5" />
-                  <Input
-                    placeholder="Buscar por OP, Produto, Lote ou Granel..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="h-9 bg-[#0b0b0e] border-[#222227] pl-9 text-xs text-[#f4f4f5] rounded-xl"
-                  />
-                </div>
-
+              {/* Filtros e Busca */}
+              <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-3 rounded-2xl">
+                {/* Abas Rápidas */}
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
                   {[
                     { id: 'today', label: 'Hoje' },
                     { id: 'week', label: 'Esta Semana' },
-                    { id: 'in_progress', label: 'Em Produção' },
                     { id: 'unassigned', label: 'Sem Linha' },
                     { id: 'completed', label: 'Concluídas' },
                     { id: 'all', label: 'Todas as OPs' }
-                  ].map(tab => (
+                  ].map((tab) => (
                     <button
                       key={tab.id}
-                      onClick={() => setStatusFilter(tab.id)}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
-                        statusFilter === tab.id
-                          ? 'bg-blue-600 text-white shadow-sm'
-                          : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
+                      onClick={() => setOpsFilterTab(tab.id as any)}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl transition-all whitespace-nowrap ${
+                        opsFilterTab === tab.id
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-950/40'
+                          : 'bg-[#181820] text-zinc-400 hover:text-zinc-200 border border-[#222228]'
                       }`}
                     >
                       {tab.label}
                     </button>
                   ))}
                 </div>
-              </div>
 
-              {/* Cards do Estoque de OPs & Cronograma */}
-              {filteredOps.length === 0 ? (
-                <div className="bg-[#121216] border border-[#222226] rounded-2xl py-12 text-center text-[#71717a]">
-                  <div className="flex flex-col items-center justify-center">
-                    <FileSpreadsheet className="w-8 h-8 text-[#52525b] mb-2 opacity-50" />
-                    <p className="text-xs font-bold text-[#f4f4f5]">Nenhuma Ordem de Produção encontrada</p>
-                    <p className="text-[11px] text-[#71717a] mt-1 max-w-sm">
-                      Importe uma planilha CSV com os lotes disponíveis ou cadastre uma nova OP no botão acima.
-                    </p>
-                    <Button
-                      size="sm"
-                      onClick={() => setShowCsvImportModal(true)}
-                      className="mt-3 h-8 px-3 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Importar CSV Agora</span>
-                    </Button>
+                <div className="flex items-center gap-2">
+                  {/* Filtro Setor */}
+                  <select
+                    value={opsSectorFilter}
+                    onChange={(e) => setOpsSectorFilter(e.target.value as any)}
+                    className="h-9 text-xs bg-[#181820] border border-[#272733] rounded-xl px-2.5 text-zinc-200 focus:outline-none focus:border-blue-500"
+                  >
+                    <option value="Todos">Todos os Setores</option>
+                    <option value="Envase">Envase</option>
+                    <option value="Pesagem">Pesagem</option>
+                    <option value="Manipulação">Manipulação</option>
+                  </select>
+
+                  {/* Barra de Busca */}
+                  <div className="relative min-w-[200px]">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                    <Input
+                      type="text"
+                      placeholder="Buscar por OP, produto, lote..."
+                      value={opsSearchTerm}
+                      onChange={(e) => setOpsSearchTerm(e.target.value)}
+                      className="h-9 pl-9 pr-3 text-xs bg-[#181820] border-[#272733] rounded-xl text-zinc-200 placeholder:text-zinc-500"
+                    />
+                    {opsSearchTerm && (
+                      <button
+                        onClick={() => setOpsSearchTerm('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
+              </div>
+
+              {/* Lista de Cards do Estoque de OPs */}
+              {filteredOps.length === 0 ? (
+                <div className="bg-[#121216] border border-[#222226] rounded-2xl p-12 text-center space-y-3">
+                  <Package className="w-10 h-10 text-zinc-600 mx-auto" />
+                  <p className="text-sm font-bold text-zinc-300">Nenhuma ordem de produção encontrada</p>
+                  <p className="text-xs text-zinc-500 max-w-sm mx-auto">
+                    Tente ajustar os filtros acima ou cadastre uma nova OP pelo botão no topo.
+                  </p>
+                </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                   {filteredOps.map((op) => {
-                    const assignedLine = lines.find(l => l.id === op.lineId);
+                    const line = lines.find(l => l.id === op.lineId);
+                    const progress = op.plannedQuantity > 0
+                      ? Math.min(100, Math.round(((op.producedQuantity || 0) / op.plannedQuantity) * 100))
+                      : 0;
+
                     const isCritical = op.priority === 'Crítica' || op.priority === 'Alta';
 
                     return (
                       <div
                         key={op.id}
-                        className={`bg-[#121216] border rounded-2xl p-3.5 flex flex-col gap-2.5 transition-colors ${
-                          op.status === 'in_progress'
-                            ? 'border-emerald-800/50'
-                            : op.priority === 'Crítica'
-                            ? 'border-red-800/50'
-                            : op.priority === 'Alta'
-                            ? 'border-orange-800/40'
-                            : 'border-[#222226]'
+                        className={`bg-[#121216] border rounded-2xl p-4 flex flex-col justify-between transition-all hover:border-[#383848] space-y-3 ${
+                          op.status === 'in_progress' ? 'border-emerald-500/40 bg-emerald-950/10' :
+                          op.status === 'paused' ? 'border-amber-500/40 bg-amber-950/10' :
+                          'border-[#222226]'
                         }`}
                       >
-                        {/* Cabeçalho: OP + Status */}
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-                            <span className={`text-[10px] font-black uppercase px-1.5 py-0.5 rounded border shrink-0 ${
-                              (op.tipoDocumento === 'OSM' || op.setor === 'Pesagem' || op.setor === 'Manipulação')
-                                ? 'bg-cyan-950/70 text-[#06b6d4] border-cyan-500/40'
-                                : 'bg-blue-950/70 text-[#3b82f6] border-blue-500/40'
-                            }`}>
-                              {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
-                            </span>
-                            <span className="font-mono font-black text-[#f4f4f5] bg-[#1a1a22] border border-[#2c2c38] px-2 py-0.5 rounded-lg text-xs shrink-0">
-                              {op.number}
-                            </span>
-                          </div>
-                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 ${
-                            op.status === 'in_progress' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
-                            op.status === 'paused' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
-                            op.status === 'completed' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
-                            'bg-blue-950/60 text-blue-300 border border-blue-800/30'
-                          }`}>
-                            {op.status === 'in_progress' ? 'Em Produção' :
-                             op.status === 'paused' ? 'Pausada' :
-                             op.status === 'completed' ? 'Concluída' : 'Em Estoque'}
-                          </span>
-                        </div>
-
-                        {/* Nome do Produto */}
+                        {/* Topo do Card */}
                         <div>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-bold text-[#f4f4f5] text-xs truncate" title={op.product}>
-                              {op.product}
-                            </span>
-                            {op.isSleeve && (
-                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-purple-950/80 text-purple-300 border-purple-600/60 shadow-sm shrink-0">
-                                Sleev
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-mono font-black text-sm text-white">
+                                {op.tipoDocumento || 'OP'} {op.number}
                               </span>
-                            )}
-                            {isCritical && (
-                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border bg-red-900/80 text-red-300 border-red-700/50 flex items-center gap-0.5 shrink-0">
-                                <AlertTriangle className="w-2.5 h-2.5" />
-                                {op.priority}
+                              {op.setor && (
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                  op.setor === 'Pesagem' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
+                                  op.setor === 'Manipulação' ? 'bg-cyan-950/80 text-cyan-400 border border-cyan-800/40' :
+                                  'bg-blue-950/80 text-blue-400 border border-blue-800/40'
+                                }`}>
+                                  {op.setor}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              {/* Status */}
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                op.status === 'in_progress' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/50' :
+                                op.status === 'paused' ? 'bg-amber-950 text-amber-400 border border-amber-800/50' :
+                                op.status === 'completed' ? 'bg-purple-950 text-purple-400 border border-purple-800/50' :
+                                'bg-zinc-800/80 text-zinc-400 border border-zinc-700/50'
+                              }`}>
+                                {op.status === 'in_progress' ? 'Em Produção' :
+                                 op.status === 'paused' ? 'Pausada' :
+                                 op.status === 'completed' ? 'Concluída' : 'Aguardando'}
                               </span>
+
+                              {/* Prioridade */}
+                              {isCritical && (
+                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-950/90 text-rose-400 border border-rose-800/50">
+                                  {op.priority}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <h3 className="text-xs font-bold text-zinc-100 line-clamp-2 leading-snug" title={op.product}>
+                            {op.product}
+                          </h3>
+
+                          {/* Info adicional (Lote, Granel, Linha) */}
+                          <div className="grid grid-cols-2 gap-2 mt-3 text-[11px] text-zinc-400 bg-[#16161c] p-2.5 rounded-xl border border-white/5">
+                            <div>
+                              <span className="text-zinc-500 block text-[9px] uppercase font-bold">Lote</span>
+                              <span className="font-mono text-zinc-200">{op.lote || '—'}</span>
+                            </div>
+                            <div>
+                              <span className="text-zinc-500 block text-[9px] uppercase font-bold">Linha de Envase</span>
+                              <span className={`font-semibold ${line ? 'text-blue-400' : 'text-zinc-500'}`}>
+                                {line ? line.name : 'Não vinculada'}
+                              </span>
+                            </div>
+                            {op.scheduledDate && (
+                              <div>
+                                <span className="text-zinc-500 block text-[9px] uppercase font-bold">Data Agendada</span>
+                                <span className="font-mono text-zinc-300">
+                                  {op.scheduledDate.split('-').reverse().join('/')}
+                                </span>
+                              </div>
                             )}
+                            <div>
+                              <span className="text-zinc-500 block text-[9px] uppercase font-bold">Progresso</span>
+                              <span className="font-bold text-white">
+                                {(op.producedQuantity || 0).toLocaleString('pt-BR')} / {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Barra de Progresso */}
+                          <div className="w-full bg-[#1e1e26] rounded-full h-1.5 mt-2.5 overflow-hidden">
+                            <div
+                              className={`h-full transition-all duration-300 ${
+                                op.status === 'completed' ? 'bg-purple-500' :
+                                progress >= 100 ? 'bg-emerald-500' : 'bg-blue-500'
+                              }`}
+                              style={{ width: `${progress}%` }}
+                            />
                           </div>
                         </div>
 
-                        {/* Lote + Linha Destino */}
-                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                          <div className="min-w-0">
-                            <span className="text-[10px] text-[#71717a] uppercase font-bold block">Lote</span>
-                            {op.lote ? (
-                              <span className="font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-2 py-0.5 rounded text-[11px] inline-block mt-0.5">
-                                {op.lote}
-                              </span>
-                            ) : (
-                              <span className="text-[#52525b] text-[11px] italic">Sem Lote</span>
-                            )}
-                          </div>
-                          <div className="min-w-0 text-right">
-                            <span className="text-[10px] text-[#71717a] uppercase font-bold block">Linha</span>
-                            {assignedLine ? (
-                              <span className="font-semibold text-xs text-[#d4d4d8] flex items-center gap-1.5 justify-end mt-0.5">
-                                <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-                                {assignedLine.name}
-                              </span>
-                            ) : (
-                              <span className="text-[#71717a] text-[11px] italic">Sem Linha</span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Ações */}
-                        <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
+                        {/* Ações do Card */}
+                        <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-white/5">
                           <button
                             type="button"
                             onClick={() => setDetailsModalOp(op)}
-                            className="flex-1 h-9 px-2.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-[11px] font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors"
-                            title="Ver mais informações desta OP"
+                            className="text-xs font-bold text-blue-400 hover:text-blue-300 flex items-center gap-1 py-1"
                           >
                             <Info className="w-3.5 h-3.5" />
                             <span>Mais informações</span>
                           </button>
 
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleOpenEditOPModal(op)}
-                            className="h-9 w-9 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/40 rounded-lg p-0 transition-colors shrink-0"
-                            title={`Editar OP ${op.number}`}
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </Button>
-
-                          <button
-                            type="button"
-                            id={`btn-excluir-op-${op.id}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenDeleteModal(op);
-                            }}
-                            className="h-9 w-9 flex items-center justify-center text-[#71717a] hover:text-red-400 hover:bg-red-950/50 border border-transparent hover:border-red-900/40 rounded-lg p-0 transition-all cursor-pointer active:scale-95 shrink-0"
-                            title={`Excluir OP ${op.number} do Estoque`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setAssignModalOp(op)}
+                              className="p-1.5 rounded-lg bg-[#181822] text-zinc-300 hover:text-white border border-[#272733]"
+                              title="Alocar ou Trocar Linha"
+                            >
+                              <Layers className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditOp(op)}
+                              className="p-1.5 rounded-lg bg-[#181822] text-zinc-300 hover:text-white border border-[#272733]"
+                              title="Editar OP"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setDeleteModalOp(op)}
+                              className="p-1.5 rounded-lg bg-rose-950/40 text-rose-400 hover:bg-rose-900/50 border border-rose-800/30"
+                              title="Excluir OP"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1653,567 +1054,329 @@ WHERE email IN (
             </div>
           )}
 
-          {/* ---------------- ABA 4: GESTÃO DE EQUIPE & ACESSOS ---------------- */}
+          {/* TAB 8: EQUIPE & ACESSOS */}
           {activeTab === 'users' && (
             <div className="space-y-4">
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                    Gestão de Equipe, Acessos & Promoção de Coordenadores
-                  </h2>
-                  <p className="text-xs text-[#71717a]">
-                    Autorize novos e-mails, promova líderes a coordenadores e controle os acessos de chão de fábrica.
+              {/* Header da Gestão de Equipe */}
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-4 rounded-2xl">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-blue-400" />
+                    <h2 className="text-base font-black text-white uppercase tracking-wider">Gestão de Equipe & Acessos</h2>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-blue-950/80 text-blue-400 border border-blue-800/40">
+                      {filteredUsers.length} Colaboradores
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#71717a] mt-0.5">
+                    Controle central de papéis, lideranças de linha, senhas temporárias e permissões de tela.
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2 w-full md:w-auto shrink-0 flex-wrap sm:flex-nowrap">
+                <div className="flex items-center gap-2">
                   <Button
                     onClick={() => {
-                      resetNewLeaderForm();
-                      setShowNewLeaderModal(true);
+                      setUserCreatedPassword(null);
+                      setNewUserFormData({
+                        name: '',
+                        email: '',
+                        cargo: 'Líder de Produção',
+                        area: 'Envase',
+                        rule: 'envase',
+                      });
+                      setShowAuthorizeModal(true);
                     }}
-                    variant="outline"
-                    className="h-9 px-3.5 border-[#32323e] bg-[#1a1a24] hover:bg-[#222230] text-[#f4f4f5] text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
+                    className="h-9 px-3 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white gap-1.5"
                   >
-                    <Plus className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                    <span>Novo Líder</span>
+                    <Plus className="w-4 h-4" />
+                    <span>Cadastrar Colaborador</span>
                   </Button>
-
                   <Button
-                    onClick={() => setShowAuthorizeModal(true)}
-                    className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-[0_0_12px_rgba(37,99,235,0.3)] whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"
+                    onClick={handleSyncPending}
+                    disabled={isSyncingPending}
+                    variant="outline"
+                    className="h-9 px-3 text-xs font-medium rounded-xl border-[#272733] bg-[#181820] text-zinc-300 hover:text-white gap-1.5"
                   >
-                    <Users className="w-4 h-4 shrink-0" />
-                    <span>Cadastros & Acessos</span>
-                    {pendingCount > 0 && (
-                      <span className="bg-amber-400 text-black text-[10px] font-black px-1.5 py-0.5 rounded-full">
-                        {pendingCount}
-                      </span>
-                    )}
+                    <RefreshCw className={`w-4 h-4 ${isSyncingPending ? 'animate-spin' : ''}`} />
+                    <span>Sincronizar Pendentes</span>
                   </Button>
-                </div>
-              </div>
-
-              {/* Banner de Ajuda: Confirmação de E-mail */}
-              <div className="bg-[#15151c] border border-blue-900/40 rounded-2xl p-4 flex items-start gap-3 shadow-lg">
-                <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center shrink-0 mt-0.5 text-blue-400">
-                  <Mail className="w-4 h-4" />
-                </div>
-                <div className="flex-1 text-xs">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <h4 className="font-bold text-[#f4f4f5]">Dica sobre "E-mail não confirmado" no Supabase</h4>
-                    <Button
-                      size="sm"
-                      onClick={handleCopyConfirmAllSql}
-                      className="h-9 text-[11px] bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 border border-blue-500/30 rounded-lg px-2.5 font-semibold shrink-0"
-                    >
-                      <Copy className="w-3 h-3 mr-1" />
-                      Copiar SQL p/ Validar Todos
-                    </Button>
-                  </div>
-                  <p className="text-[#a1a1aa] text-[11px] mt-1 leading-relaxed">
-                    Se um colaborador cadastrado receber a mensagem de e-mail não confirmado ao tentar fazer login:
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
-                    <div className="bg-[#0e0e12] border border-[#23232b] p-2.5 rounded-xl">
-                      <p className="text-blue-300 font-bold text-[11px]">Opção 1: Liberação Imediata via SQL</p>
-                      <p className="text-[#71717a] text-[10px] mt-0.5">
-                        Clique no ícone de envelope <Mail className="w-3 h-3 inline mx-0.5 text-blue-400" /> na tabela para copiar o comando de validação instantânea no Supabase SQL Editor.
-                      </p>
-                    </div>
-                    <div className="bg-[#0e0e12] border border-[#23232b] p-2.5 rounded-xl">
-                      <p className="text-emerald-300 font-bold text-[11px]">Opção 2: Desativar no Supabase</p>
-                      <p className="text-[#71717a] text-[10px] mt-0.5">
-                        No painel do Supabase, acesse <strong>Authentication &gt; Providers &gt; Email</strong> e desmarque a opção <strong>Confirm email</strong> para liberar entrada direta sem link.
-                      </p>
-                    </div>
-                  </div>
                 </div>
               </div>
 
               {/* Filtros de Usuários */}
-              <div className="bg-[#121216] border border-[#222226] p-3 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                <div className="relative flex-1 max-w-md">
-                  <Search className="w-4 h-4 text-[#71717a] absolute left-3 top-2.5" />
-                  <Input
-                    placeholder="Buscar colaborador por nome, e-mail ou cargo..."
-                    value={userSearchTerm}
-                    onChange={(e) => setUserSearchTerm(e.target.value)}
-                    className="h-9 bg-[#0b0b0e] border-[#222227] pl-9 text-xs text-[#f4f4f5] rounded-xl"
-                  />
-                </div>
-
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <button
-                    onClick={() => setUserRoleFilter('all')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                      userRoleFilter === 'all' ? 'bg-blue-600 text-white' : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
-                    }`}
-                  >
-                    Todos ({allUsers.length})
-                  </button>
-                  {pendingCount > 0 && (
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-3 rounded-2xl">
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                  {[
+                    { id: 'all', label: 'Todos' },
+                    { id: 'admin', label: 'Coordenação' },
+                    { id: 'envase', label: 'Envase' },
+                    { id: 'pesagem', label: 'Pesagem' },
+                    { id: 'manipulacao', label: 'Manipulação' }
+                  ].map((f) => (
                     <button
-                      onClick={() => setUserRoleFilter('pending')}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                        userRoleFilter === 'pending' ? 'bg-amber-500 text-black' : 'text-amber-400 hover:bg-amber-950/20'
+                      key={f.id}
+                      onClick={() => setUserRuleFilter(f.id)}
+                      className={`px-3 py-1.5 text-xs font-bold rounded-xl transition-all ${
+                        userRuleFilter === f.id
+                          ? 'bg-blue-600 text-white shadow-md shadow-blue-950/40'
+                          : 'bg-[#181820] text-zinc-400 hover:text-zinc-200 border border-[#222228]'
                       }`}
                     >
-                      <span>Aguardando ({pendingCount})</span>
+                      {f.label}
                     </button>
-                  )}
-                  <button
-                    onClick={() => setUserRoleFilter('coordinator')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                      userRoleFilter === 'coordinator' ? 'bg-blue-600 text-white' : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
-                    }`}
-                  >
-                    Coordenadores ({coordinatorCount})
-                  </button>
-                  <button
-                    onClick={() => setUserRoleFilter('leader')}
-                    className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                      userRoleFilter === 'leader' ? 'bg-blue-600 text-white' : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
-                    }`}
-                  >
-                    Líderes ({leadersCount})
-                  </button>
+                  ))}
+                </div>
 
-                  {pendingSyncCount > 0 && (
+                <div className="relative min-w-[220px]">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                  <Input
+                    type="text"
+                    placeholder="Buscar por nome, e-mail, cargo..."
+                    value={userSearchTerm}
+                    onChange={(e) => setUserSearchTerm(e.target.value)}
+                    className="h-9 pl-9 pr-3 text-xs bg-[#181820] border-[#272733] rounded-xl text-zinc-200 placeholder:text-zinc-500"
+                  />
+                  {userSearchTerm && (
                     <button
-                      onClick={handleSyncPendingLeaders}
-                      disabled={isSyncingPending}
-                      className="px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 disabled:opacity-50"
-                      title="Gravar no Supabase os líderes salvos localmente"
+                      onClick={() => setUserSearchTerm('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
                     >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncingPending ? 'animate-spin' : ''}`} />
-                      <span>Sincronizar no Supabase ({pendingSyncCount})</span>
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
               </div>
 
-              {/* Cards de Colaboradores & Acessos */}
-              {filteredUsers.length === 0 ? (
-                <div className="bg-[#121216] border border-[#222226] rounded-2xl py-8 text-center text-[#71717a] text-xs">
-                  Nenhum colaborador encontrado com os filtros aplicados.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {filteredUsers.map((user) => {
-                    const isSelf = user.uid === profile?.uid;
-                    const isCoordinator = user.role === 'coordinator';
-                    const isActive = user.status !== 'inactive';
-                    const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
-                    const activeRule = (user.rule || getUserRule(user)) as AccessRule;
-                    const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
+              {/* Cards de Usuários */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {filteredUsers.map((user) => {
+                  const ruleConfig = ACCESS_RULES[user.rule || 'envase'] || ACCESS_RULES.envase;
+                  const isPending = user.status === 'pending' || user.status === 'first_access';
 
-                    return (
-                      <div
-                        key={user.uid || user.email}
-                        className={`bg-[#121216] border rounded-2xl p-3.5 flex flex-col gap-2.5 transition-colors ${
-                          isFirstAccess ? 'border-amber-800/40' : !isActive ? 'border-red-800/40' : 'border-[#222226]'
-                        }`}
-                      >
-                        {/* Cabeçalho: Avatar + Nome + Status */}
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black uppercase shrink-0 ${
-                              isCoordinator
-                                ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
-                                : 'bg-[#22222a] border border-[#2c2c36] text-[#a1a1aa]'
-                            }`}>
-                              {user.name.substring(0, 2)}
-                            </div>
-                            <p className="font-bold text-[#f4f4f5] text-xs flex items-center gap-1.5 flex-wrap min-w-0">
-                              <span className="truncate">{user.name}</span>
-                              {isSelf && (
-                                <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold shrink-0">
-                                  Você
-                                </span>
-                              )}
-                            </p>
+                  return (
+                    <div
+                      key={user.uid || user.email}
+                      className="bg-[#121216] border border-[#222226] rounded-2xl p-4 flex flex-col justify-between space-y-3 hover:border-[#383848] transition-all"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${ruleConfig.badgeClass}`}>
+                            {ruleConfig.shortName}
+                          </span>
+
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            user.status === 'active' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
+                            isPending ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
+                            'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}>
+                            {user.status === 'active' ? 'Ativo' :
+                             user.status === 'first_access' ? 'Primeiro Acesso' :
+                             user.status === 'pending' ? 'Pendente' : 'Inativo'}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-blue-600/20 text-blue-400 font-black text-sm flex items-center justify-center shrink-0 border border-blue-500/30">
+                            {user.name ? user.name.slice(0, 2).toUpperCase() : 'CO'}
                           </div>
-                          {isFirstAccess ? (
-                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-1 w-fit shrink-0 bg-amber-950/80 text-amber-300 border border-amber-800/40">
-                              <KeyRound className="w-2.5 h-2.5 text-amber-400" />
-                              <span>1º Acesso</span>
-                            </span>
-                          ) : (
-                            <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded flex items-center gap-1 w-fit shrink-0 ${
-                              isActive
-                                ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
-                                : 'bg-red-950/80 text-red-400 border border-red-800/40'
-                            }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                              <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
-                            </span>
-                          )}
+                          <div className="min-w-0">
+                            <h3 className="text-xs font-bold text-white truncate">{user.name}</h3>
+                            <p className="text-[11px] text-zinc-400 truncate">{user.cargo || 'Operador Industrial'}</p>
+                            <p className="text-[10px] text-zinc-500 truncate font-mono">{user.email}</p>
+                          </div>
                         </div>
 
-                        {/* E-mail */}
-                        <p className="font-mono text-[11px] text-[#a1a1aa] truncate">{user.email}</p>
+                        {user.defaultPassword && isPending && (
+                          <div className="mt-3 p-2 bg-amber-950/30 border border-amber-800/40 rounded-xl flex items-center justify-between">
+                            <div className="text-[10px] text-amber-400">
+                              <span className="font-semibold block">Senha Provisória:</span>
+                              <span className="font-mono font-bold text-white">{user.defaultPassword}</span>
+                            </div>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(user.defaultPassword || '');
+                                showToast('Senha copiada!');
+                              }}
+                              className="p-1 rounded bg-amber-900/50 text-amber-200 hover:bg-amber-800"
+                              title="Copiar senha"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
 
-                        {/* Roles: Cargo/Área + Regra de Acesso */}
-                        <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1e1e24]">
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                            isCoordinator
-                              ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
-                              : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
-                          }`}>
-                            {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
-                            <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
-                          </span>
-                          {!isCoordinator && (
-                            <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-[#14141a] border-[#2c2c38] text-[#a1a1aa]">
-                              {user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
-                            </span>
-                          )}
-                          <span className={`text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                            ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
-                          }`}>
-                            {ruleConfig.name}
-                          </span>
-                        </div>
+                      <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-white/5">
+                        <button
+                          type="button"
+                          onClick={() => setDetailsModalUserId(user.uid || user.email)}
+                          className="text-xs font-bold text-blue-400 hover:text-blue-300 flex items-center gap-1 py-1"
+                        >
+                          <Info className="w-3.5 h-3.5" />
+                          <span>Ver detalhes</span>
+                        </button>
 
-                        {/* Ações */}
-                        <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
+                        <div className="flex items-center gap-1">
                           <button
                             type="button"
-                            onClick={() => setDetailsModalUserId(user.uid || user.email)}
-                            className="flex-1 h-9 px-2.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-[11px] font-bold rounded-lg flex items-center justify-center gap-1.5 transition-colors"
-                            title="Ver mais detalhes e ações deste colaborador"
+                            onClick={() => handleResetPassword(user)}
+                            className="p-1.5 rounded-lg bg-[#181822] text-zinc-300 hover:text-white border border-[#272733]"
+                            title="Resetar Senha"
                           >
-                            <Info className="w-3.5 h-3.5" />
-                            <span>Detalhes</span>
+                            <KeyRound className="w-3.5 h-3.5" />
                           </button>
-
-                          {!isCoordinator && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleResetLeaderPassword(user)}
-                              className="h-9 w-9 p-0 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 shrink-0"
-                              title="Redefinir senha temporária"
-                            >
-                              <KeyRound className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-
-                          {!isSelf && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleToggleUserStatus(user)}
-                              className={`h-9 w-9 p-0 text-[11px] font-bold rounded-lg shrink-0 ${
-                                isActive
-                                  ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
-                                  : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
-                              }`}
-                              title={isActive ? 'Bloquear Acesso' : 'Desbloquear Acesso'}
-                            >
-                              {isActive ? <UserX className="w-3.5 h-3.5" /> : <UserCheck className="w-3.5 h-3.5" />}
-                            </Button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => setDeleteUserModalData(user)}
+                            className="p-1.5 rounded-lg bg-rose-950/40 text-rose-400 hover:bg-rose-900/50 border border-rose-800/30"
+                            title="Excluir Colaborador"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* ---------------- ABA 5: AUDITORIA & EVENTOS ---------------- */}
+          {/* TAB 9: AUDITORIA / LOG DE EVENTOS */}
           {activeTab === 'events' && (
             <div className="space-y-4">
-              <div>
-                <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                  Feed de Eventos e Auditoria de Chão de Fábrica
-                </h2>
-                <p className="text-xs text-[#71717a]">
-                  Registro cronológico de paradas, apontamentos de quantidade, inícios e conclusões de lotes.
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#121216] border border-[#222226] p-4 rounded-2xl">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <History className="w-5 h-5 text-blue-400" />
+                    <h2 className="text-base font-black text-white uppercase tracking-wider">Auditoria & Registro de Eventos</h2>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-blue-950/80 text-blue-400 border border-blue-800/40">
+                      {filteredEvents.length} eventos
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#71717a] mt-0.5">
+                    Histórico cronológico detalhado de apontamentos, paradas, inícios e conclusões de linha.
+                  </p>
+                </div>
               </div>
 
-              <div className="bg-[#121216] border border-[#222226] rounded-2xl overflow-hidden shadow-xl p-4">
-                {events.length === 0 ? (
-                  <div className="py-8 text-center text-[#71717a] text-xs">
-                    Nenhum evento registrado no histórico recente.
+              {/* Filtros de Auditoria */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-[#121216] border border-[#222226] p-3 rounded-2xl">
+                <select
+                  value={eventTypeFilter}
+                  onChange={(e) => setEventTypeFilter(e.target.value)}
+                  className="h-9 text-xs bg-[#181820] border border-[#272733] rounded-xl px-2.5 text-zinc-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="all">Todos os Tipos de Evento</option>
+                  <option value="STARTED">Início de Produção</option>
+                  <option value="PAUSED">Pausa / Parada</option>
+                  <option value="RESUMED">Retomada</option>
+                  <option value="FINISHED">Conclusão de Lote</option>
+                  <option value="QUANTITY_REPORTED">Apontamento de Quantidade</option>
+                  <option value="CANCELLED">Início Cancelado</option>
+                </select>
+
+                <select
+                  value={eventLineFilter}
+                  onChange={(e) => setEventLineFilter(e.target.value)}
+                  className="h-9 text-xs bg-[#181820] border border-[#272733] rounded-xl px-2.5 text-zinc-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="all">Todas as Linhas</option>
+                  {lines.map(l => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                  <Input
+                    type="text"
+                    placeholder="Buscar por OP, líder, motivo de pausa..."
+                    value={eventSearchTerm}
+                    onChange={(e) => setEventSearchTerm(e.target.value)}
+                    className="h-9 pl-9 pr-3 text-xs bg-[#181820] border-[#272733] rounded-xl text-zinc-200 placeholder:text-zinc-500"
+                  />
+                  {eventSearchTerm && (
+                    <button
+                      onClick={() => setEventSearchTerm('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Lista Cronológica de Eventos */}
+              <div className="bg-[#121216] border border-[#222226] rounded-2xl overflow-hidden divide-y divide-white/5">
+                {filteredEvents.length === 0 ? (
+                  <div className="p-12 text-center text-zinc-500 text-xs">
+                    Nenhum evento registrado nos critérios selecionados.
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#1e1e23]">
-                    {events.map((evt) => (
-                      <div key={evt.id} className="py-3.5 flex flex-col sm:flex-row items-start justify-between gap-2 sm:gap-4">
-                        <div className="flex items-start gap-3 min-w-0">
-                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                            evt.type === 'STARTED' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
-                            evt.type === 'PAUSED' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
-                            evt.type === 'RESUMED' ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40' :
-                            evt.type === 'FINISHED' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
-                            evt.type === 'CANCELLED' ? 'bg-rose-950/80 text-rose-400 border border-rose-800/40' :
-                            'bg-[#1c1c24] text-[#a1a1aa]'
-                          }`}>
-                            {evt.type === 'STARTED' && <Play className="w-3.5 h-3.5" />}
-                            {evt.type === 'PAUSED' && <Pause className="w-3.5 h-3.5" />}
-                            {evt.type === 'RESUMED' && <Play className="w-3.5 h-3.5" />}
-                            {evt.type === 'FINISHED' && <CheckCircle2 className="w-3.5 h-3.5" />}
-                            {evt.type === 'QUANTITY_REPORTED' && <TrendingUp className="w-3.5 h-3.5" />}
-                            {evt.type === 'CANCELLED' && <XCircle className="w-3.5 h-3.5" />}
-                          </div>
+                  filteredEvents.map((evt) => {
+                    const formattedDate = new Date(evt.createdAt).toLocaleString('pt-BR');
 
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-bold text-[#f4f4f5]">
+                    return (
+                      <div key={evt.id} className="p-3.5 flex items-start gap-3 hover:bg-white/[0.02] transition-colors">
+                        <div className={`p-2 rounded-xl shrink-0 mt-0.5 ${
+                          evt.type === 'STARTED' ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40' :
+                          evt.type === 'PAUSED' ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40' :
+                          evt.type === 'RESUMED' ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40' :
+                          evt.type === 'FINISHED' ? 'bg-purple-950/80 text-purple-400 border border-purple-800/40' :
+                          evt.type === 'CANCELLED' ? 'bg-rose-950/80 text-rose-400 border border-rose-800/40' :
+                          'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
+                        }`}>
+                          {evt.type === 'STARTED' && <Play className="w-3.5 h-3.5" />}
+                          {evt.type === 'PAUSED' && <Pause className="w-3.5 h-3.5" />}
+                          {evt.type === 'RESUMED' && <RotateCcw className="w-3.5 h-3.5" />}
+                          {evt.type === 'FINISHED' && <CheckCircle2 className="w-3.5 h-3.5" />}
+                          {evt.type === 'QUANTITY_REPORTED' && <TrendingUp className="w-3.5 h-3.5" />}
+                          {evt.type === 'CANCELLED' && <XCircle className="w-3.5 h-3.5" />}
+                        </div>
+
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-white">
                                 {evt.type === 'STARTED' && 'Início de Produção'}
-                                {evt.type === 'PAUSED' && 'Parada de Linha / Pausa'}
+                                {evt.type === 'PAUSED' && 'Parada Registrada'}
                                 {evt.type === 'RESUMED' && 'Retomada de Produção'}
                                 {evt.type === 'FINISHED' && 'Conclusão de Lote'}
                                 {evt.type === 'QUANTITY_REPORTED' && `Apontamento de Quantidade (+${evt.quantity} un)`}
                                 {evt.type === 'CANCELLED' && 'Início Cancelado (por engano)'}
                               </span>
-                              <span className="text-[10px] text-blue-400 font-mono font-bold">
-                                {evt.opNumber ? `OP ${evt.opNumber}` : ''}
-                              </span>
-                              <span className="text-[10px] text-[#71717a] truncate max-w-[160px]">
-                                • {evt.lineName || 'Linha'}
-                              </span>
+                              {evt.opNumber && (
+                                <span className="text-[10px] text-blue-400 font-mono font-bold">
+                                  OP {evt.opNumber}
+                                </span>
+                              )}
+                              {evt.lineName && (
+                                <span className="text-[10px] text-zinc-400">
+                                  na {evt.lineName}
+                                </span>
+                              )}
                             </div>
+                            <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                              {formattedDate}
+                            </span>
+                          </div>
 
-                            {evt.reason && (
-                              <p className="text-xs text-amber-300 font-semibold mt-0.5">
-                                Motivo: {evt.reason}
-                              </p>
-                            )}
-
-                            {evt.observation && (
-                              <p className="text-[11px] text-[#a1a1aa] mt-0.5">
-                                Detalhes: {evt.observation}
-                              </p>
-                            )}
-
-                            <p className="text-[10px] text-[#71717a] mt-1">
-                              Operado por: <strong>{evt.leaderName || 'Líder de Produção'}</strong>
+                          {evt.reason && (
+                            <p className="text-[11px] text-amber-300/90 mt-1 font-medium">
+                              Motivo: {evt.reason}
                             </p>
-                          </div>
-                        </div>
-
-                        <span className="text-[10px] font-mono text-[#71717a] shrink-0">
-                          {new Date(evt.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          </div>
-        </main>
-      </div>
-
-      {/* ---------------- MODAL: CADASTROS & CONFIRMAÇÕES DE USUÁRIOS ---------------- */}
-      {showAuthorizeModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#121216] border border-[#27272e] w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
-            
-            {/* Header do Modal */}
-            <div className="p-4 border-b border-[#222228] flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
-                  <Users className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                      Gestão de Cadastros & Confirmações
-                    </h3>
-                    {pendingCount > 0 && (
-                      <span className="bg-amber-400 text-black text-[10px] font-black px-1.5 py-0.2 rounded-full">
-                        {pendingCount} pendente{pendingCount > 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] text-[#71717a]">
-                    Confirme acessos pendentes, promova colaboradores e gerencie permissões.
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowAuthorizeModal(false)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1a1a22]"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo: Lista de Cadastros & Confirmações */}
-            <div className="flex-1 overflow-hidden flex flex-col p-4 space-y-3">
-              {/* Barra de Ações & Busca rápida */}
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shrink-0">
-                <div className="relative flex-1">
-                  <Search className="w-3.5 h-3.5 text-[#71717a] absolute left-3 top-2.5" />
-                  <Input
-                    placeholder="Filtrar colaboradores por nome ou e-mail..."
-                    value={modalUserSearch}
-                    onChange={(e) => setModalUserSearch(e.target.value)}
-                    className="h-8 bg-[#0b0b0e] border-[#222227] pl-8 text-xs text-[#f4f4f5] rounded-lg"
-                  />
-                </div>
-                <Button
-                  size="sm"
-                  onClick={handleCopyConfirmAllSql}
-                  className="h-8 text-[11px] bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded-lg px-3 font-semibold shrink-0"
-                  title="Copia o script SQL para confirmar e ativar todos os colaboradores no Supabase de uma só vez"
-                >
-                  <Copy className="w-3 h-3 mr-1" />
-                  Copiar SQL Validar Todos
-                </Button>
-              </div>
-
-              {/* Lista de Usuários com Scroll */}
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[55vh]">
-                {modalFilteredUsers.length === 0 ? (
-                  <div className="p-8 text-center bg-[#0d0d10] border border-[#222228] rounded-xl">
-                    <Users className="w-8 h-8 text-[#52525b] mx-auto mb-2 opacity-50" />
-                    <p className="text-xs font-bold text-[#f4f4f5]">Nenhum colaborador encontrado</p>
-                    <p className="text-[11px] text-[#71717a] mt-1">
-                      Os usuários cadastrados na tela de login aparecerão automaticamente aqui para aprovação.
-                    </p>
-                  </div>
-                ) : (
-                  modalFilteredUsers.map((user) => {
-                    const isSelf = user.uid === profile?.uid;
-                    const isCoordinator = user.role === 'coordinator';
-                    const isPending = user.status === 'pending';
-                    const isInactive = user.status === 'inactive';
-
-                    return (
-                      <div
-                        key={user.uid || user.email}
-                        className="bg-[#0e0e12] border border-[#23232b] rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-[#32323e] transition-all"
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 text-xs font-black ${
-                            isCoordinator ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' : 'bg-purple-600/20 text-purple-400 border border-purple-500/30'
-                          }`}>
-                            {user.name?.charAt(0).toUpperCase() || 'U'}
-                          </div>
-
-                          <div>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-bold text-[#f4f4f5]">{user.name}</span>
-                              {isSelf && (
-                                <span className="text-[9px] bg-blue-950 text-blue-400 border border-blue-800/50 px-1.5 py-0.2 rounded font-bold">
-                                  VOCÊ
-                                </span>
-                              )}
-                              
-                              {/* Badge de Status */}
-                              {isPending && (
-                                <span className="text-[9px] bg-amber-950/80 text-amber-300 border border-amber-800/60 px-1.5 py-0.2 rounded font-bold flex items-center gap-1">
-                                  <Clock className="w-2.5 h-2.5" /> Aguardando Confirmação
-                                </span>
-                              )}
-                              {isInactive && (
-                                <span className="text-[9px] bg-rose-950/80 text-rose-300 border border-rose-800/60 px-1.5 py-0.2 rounded font-bold">
-                                  Bloqueado
-                                </span>
-                              )}
-                              {!isPending && !isInactive && (
-                                <span className="text-[9px] bg-emerald-950/80 text-emerald-300 border border-emerald-800/60 px-1.5 py-0.2 rounded font-bold">
-                                  Ativo
-                                </span>
-                              )}
-
-                              {/* Badge de Cargo */}
-                              <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
-                                isCoordinator ? 'bg-blue-950/60 text-blue-400 border border-blue-900/40' : 'bg-[#1a1a22] text-[#a1a1aa] border border-[#2b2b36]'
-                              }`}>
-                                {isCoordinator ? 'Coordenador Geral' : 'Líder de Produção'}
-                              </span>
-                            </div>
-
-                            <p className="text-[11px] font-mono text-[#71717a] mt-0.5">{user.email}</p>
-                          </div>
-                        </div>
-
-                        {/* Ações Rápidas */}
-                        <div className="flex items-center gap-1.5 self-end sm:self-center shrink-0 flex-wrap">
-                          {/* Botão Aprovar / Ativar Acesso */}
-                          {(isPending || isInactive) && (
-                            <Button
-                              size="sm"
-                              onClick={() => handleApproveUser(user, user.role)}
-                              className="h-9 text-[11px] bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-2.5 font-bold flex items-center gap-1 shadow-sm"
-                              title="Aprovar e liberar acesso deste usuário"
-                            >
-                              <CheckCircle2 className="w-3 h-3" />
-                              <span>Aprovar Acesso</span>
-                            </Button>
                           )}
 
-                          {/* Botão Promover a Coordenador */}
-                          {!isCoordinator && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleApproveUser(user, 'coordinator')}
-                              className="h-9 text-[11px] border-blue-600/40 text-blue-400 hover:bg-blue-950/30 rounded-lg px-2 flex items-center gap-1"
-                              title="Promover a Coordenador Geral"
-                            >
-                              <Award className="w-3 h-3" />
-                              <span>Tornar Coordenador</span>
-                            </Button>
+                          {evt.observation && (
+                            <p className="text-[11px] text-zinc-400 mt-0.5 italic">
+                              "{evt.observation}"
+                            </p>
                           )}
 
-                          {/* Botão Rebaixar a Líder */}
-                          {isCoordinator && !isSelf && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleDemoteToLeader(user)}
-                              className="h-9 text-[10px] text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1a1a22] rounded-lg px-2"
-                              title="Definir como Líder de Produção"
-                            >
-                              Tornar Líder
-                            </Button>
-                          )}
-
-                          {/* Botão Copiar SQL de Confirmação de E-mail */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleCopyConfirmEmailSql(user.email)}
-                            className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg"
-                            title="Copiar SQL para validar/confirmar e-mail no Supabase"
-                          >
-                            <Mail className="w-3.5 h-3.5" />
-                          </Button>
-
-                          {/* Botão Copiar SQL Coordenador */}
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleCopySqlForUser(user.email)}
-                            className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg"
-                            title="Copiar SQL completo para Supabase"
-                          >
-                            {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                          </Button>
-
-                          {/* Botão Excluir */}
-                          {!isSelf && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleOpenDeleteUserModal(user)}
-                              className="h-9 w-9 text-[#71717a] hover:text-red-400 hover:bg-red-950/30 rounded-lg p-0 transition-colors"
-                              title="Remover Colaborador"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
+                          {evt.leaderName && (
+                            <p className="text-[10px] text-zinc-500 mt-1">
+                              Registrado por: <strong className="text-zinc-400">{evt.leaderName}</strong>
+                            </p>
                           )}
                         </div>
                       </div>
@@ -2221,349 +1384,179 @@ WHERE email IN (
                   })
                 )}
               </div>
-
-              <div className="pt-2 border-t border-[#1e1e24] flex items-center justify-between text-[11px] text-[#71717a]">
-                <span>Total de colaboradores cadastrados: <strong>{allUsers.length}</strong></span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setShowAuthorizeModal(false)}
-                  className="h-8 text-xs text-[#a1a1aa] hover:text-white"
-                >
-                  Fechar
-                </Button>
-              </div>
             </div>
+          )}
 
-          </div>
+          {/* TAB 10: SIMULADOR DE TREINAMENTO */}
+          {activeTab === 'training' && (
+            <TrainingSimulator />
+          )}
         </div>
-      )}
+      </main>
 
-      {/* ---------------- MODAL: NOVA OP / EDITAR OP ---------------- */}
-      {showNewOpModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#121216] border border-[#27272e] w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="p-5 border-b border-[#222228] flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Package className="w-4 h-4 text-blue-400" />
-                <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                  {editingOp 
-                    ? `Editar Ordem de Produção (OP ${editingOp.number})`
-                    : 'Nova Ordem de Produção (OP)'}
-                </h3>
-              </div>
-              <button
-                onClick={() => {
-                  setShowNewOpModal(false);
-                  setEditingOp(null);
-                }}
-                className="text-[#71717a] hover:text-white p-2 -m-2 rounded-lg hover:bg-[#1a1a24]"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* ---------------- MODAIS DO SISTEMA ---------------- */}
 
-            <form onSubmit={handleSaveOP} className="p-5 space-y-4 max-h-[85vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">
-                    Número da OP *
-                  </Label>
-                  <Input
-                    placeholder="Ex: 40236"
-                    value={newOpNumber}
-                    onChange={(e) => setNewOpNumber(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
-                    required
-                  />
-                </div>
+      {/* MODAL: NOVA / EDITAR OP */}
+      <Dialog open={showOpModal} onOpenChange={setShowOpModal}>
+        <DialogContent className="bg-[#121216] border-[#272733] text-white max-w-lg rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black uppercase tracking-wider text-white">
+              {editingOp ? `Editar Ordem de Produção ${editingOp.number}` : 'Cadastrar Nova Ordem de Produção'}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-400">
+              Preencha os dados técnicos da OP para integrar com a programação fabril.
+            </DialogDescription>
+          </DialogHeader>
 
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Prioridade *</Label>
-                  <select
-                    value={newOpPriority}
-                    onChange={(e) => setNewOpPriority(e.target.value as any)}
-                    className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
-                  >
-                    <option value="Crítica">Crítica (Urgência Máxima)</option>
-                    <option value="Alta">Alta</option>
-                    <option value="Normal">Normal</option>
-                    <option value="Baixa">Baixa</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Descrição do Produto *</Label>
+          <form onSubmit={handleSaveOp} className="space-y-3.5 mt-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-[11px] text-zinc-300">Número da OP *</Label>
                 <Input
-                  placeholder="Ex: Shampoo Nutritivo Pro 500ml"
-                  value={newOpProduct}
-                  onChange={(e) => setNewOpProduct(e.target.value)}
-                  className="bg-[#0b0b0e] border-[#25252c] text-xs font-semibold text-[#f4f4f5]"
                   required
+                  placeholder="Ex: 104502"
+                  value={opFormData.number}
+                  onChange={(e) => setOpFormData({ ...opFormData, number: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white font-mono mt-1"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Lote do Produto</Label>
-                  <Input
-                    placeholder="Ex: LT-24-101"
-                    value={newOpLote}
-                    onChange={(e) => setNewOpLote(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-emerald-400"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">OP Granel</Label>
-                  <Input
-                    placeholder="Ex: GR-SH-910"
-                    value={newOpGranel}
-                    onChange={(e) => setNewOpGranel(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-amber-400"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
-                <Input
-                  type="number"
-                  placeholder="Ex: 2500"
-                  value={newOpPlanned}
-                  onChange={(e) => setNewOpPlanned(e.target.value)}
-                  className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
-                  required
-                />
-              </div>
-
-              {/* Setor, unidade, indústria, linha, horas de turno, embalagens e cronograma
-                  saem deste modal — ficam com os valores padrão (Envase/Un/Ybera/Estoque Geral)
-                  e são ajustados depois nas telas de Pesagem/Manipulação/Cronograma, ou nem
-                  precisam estar vinculados à OP neste momento. */}
-
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => {
-                    setShowNewOpModal(false);
-                    setEditingOp(null);
-                  }}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
-                >
-                  Cancelar
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={isSubmittingOp}
-                  className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl"
-                >
-                  {isSubmittingOp ? 'Gravando no Supabase...' : editingOp ? 'Salvar Alterações' : 'Confirmar e Salvar no Estoque'}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ---------------- MODAL: IMPORTAR CSV DO ESTOQUE ---------------- */}
-      <CsvImportModal
-        isOpen={showCsvImportModal}
-        onClose={() => setShowCsvImportModal(false)}
-        onSuccess={(imported) => {
-          showToast(`${imported.length} Ordens de Produção importadas com sucesso para o estoque!`);
-          loadData();
-        }}
-      />
-
-      {/* ---------------- MODAL: PAUSAR OP ---------------- */}
-      {pauseModalData && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#121216] border border-[#27272e] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="p-5 border-b border-[#222228] flex items-center justify-between">
-              <div className="flex items-center gap-2 text-amber-400">
-                <Pause className="w-4 h-4" />
-                <h3 className="text-sm font-bold uppercase tracking-wide">
-                  Pausar OP {pauseModalData.opNumber}
-                </h3>
-              </div>
-              <button
-                onClick={() => setPauseModalData(null)}
-                className="text-[#71717a] hover:text-white p-2 -m-2 rounded-lg hover:bg-[#1f1f28]"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-4">
-              <div className="space-y-1.5">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Motivo da Parada *</Label>
+              <div>
+                <Label className="text-[11px] text-zinc-300">Tipo de Documento</Label>
                 <select
-                  value={selectedPauseReason}
-                  onChange={(e) => setSelectedPauseReason(e.target.value)}
-                  className="w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-md px-3 text-xs text-[#f4f4f5] font-semibold"
+                  value={opFormData.tipoDocumento}
+                  onChange={(e) => setOpFormData({ ...opFormData, tipoDocumento: e.target.value as any })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
                 >
-                  {pauseReasons.map(pr => (
-                    <option key={pr.id} value={pr.name}>{pr.name}</option>
+                  <option value="OP">OP (Ordem de Produção)</option>
+                  <option value="OSM">OSM (Ordem de Serviço/Manipulação)</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <Label className="text-[11px] text-zinc-300">Descrição do Produto *</Label>
+              <Input
+                required
+                placeholder="Ex: Shampoo Nutritivo 300ml"
+                value={opFormData.product}
+                onChange={(e) => setOpFormData({ ...opFormData, product: e.target.value })}
+                className="h-9 text-xs bg-[#181822] border-[#272733] text-white mt-1"
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <Label className="text-[11px] text-zinc-300">Qtd Planejada *</Label>
+                <Input
+                  required
+                  type="number"
+                  placeholder="Ex: 5000"
+                  value={opFormData.plannedQuantity}
+                  onChange={(e) => setOpFormData({ ...opFormData, plannedQuantity: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white font-mono mt-1"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-zinc-300">Unidade</Label>
+                <select
+                  value={opFormData.unidade}
+                  onChange={(e) => setOpFormData({ ...opFormData, unidade: e.target.value as any })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+                >
+                  <option value="Un">Unidade (un)</option>
+                  <option value="Kg">Quilograma (kg)</option>
+                  <option value="Qtd">Qtd</option>
+                </select>
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-zinc-300">Setor</Label>
+                <select
+                  value={opFormData.setor}
+                  onChange={(e) => setOpFormData({ ...opFormData, setor: e.target.value as any })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+                >
+                  <option value="Envase">Envase</option>
+                  <option value="Pesagem">Pesagem</option>
+                  <option value="Manipulação">Manipulação</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-[11px] text-zinc-300">Lote</Label>
+                <Input
+                  placeholder="Ex: L2409"
+                  value={opFormData.lote}
+                  onChange={(e) => setOpFormData({ ...opFormData, lote: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white font-mono mt-1"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-zinc-300">Granel Associado</Label>
+                <Input
+                  placeholder="Ex: G-8891"
+                  value={opFormData.granel}
+                  onChange={(e) => setOpFormData({ ...opFormData, granel: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white font-mono mt-1"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label className="text-[11px] text-zinc-300">Linha de Envase</Label>
+                <select
+                  value={opFormData.lineId}
+                  onChange={(e) => setOpFormData({ ...opFormData, lineId: e.target.value })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+                >
+                  <option value="">Sem Linha (Estoque)</option>
+                  {lines.map((l) => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
                   ))}
                 </select>
               </div>
 
-              <div className="space-y-1.5">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Observação do Chão de Fábrica</Label>
-                <textarea
-                  placeholder="Ex: Aguardando liberação de lote pelo laboratório de qualidade..."
-                  value={pauseObservation}
-                  onChange={(e) => setPauseObservation(e.target.value)}
-                  className="w-full h-20 bg-[#0b0b0e] border border-[#25252c] rounded-md p-2.5 text-xs text-[#f4f4f5] resize-none"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => setPauseModalData(null)}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+              <div>
+                <Label className="text-[11px] text-zinc-300">Prioridade</Label>
+                <select
+                  value={opFormData.priority}
+                  onChange={(e) => setOpFormData({ ...opFormData, priority: e.target.value as any })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
                 >
-                  Cancelar
-                </Button>
-                <Button
-                  onClick={handleConfirmPause}
-                  className="h-9 px-4 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl"
-                >
-                  Confirmar Parada
-                </Button>
+                  <option value="Normal">Normal</option>
+                  <option value="Alta">Alta</option>
+                  <option value="Crítica">Crítica</option>
+                  <option value="Baixa">Baixa</option>
+                </select>
               </div>
             </div>
-          </div>
-        </div>
-      )}
 
-      {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE OP ---------------- */}
-      {deleteModalOp && (
-        <div 
-          onClick={(e) => {
-            if (e.target === e.currentTarget && !isDeletingOp) setDeleteModalOp(null);
-          }}
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
-        >
-          <div className="bg-[#121216] border border-red-900/40 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            
-            {/* Header */}
-            <div className="p-5 border-b border-[#222228] bg-red-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-red-600/20 border border-red-500/30 text-red-400 flex items-center justify-center shrink-0">
-                  <Trash2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                      Excluir OP do Estoque
-                    </h3>
-                    <span className="text-[10px] bg-red-950 text-red-400 border border-red-800/50 px-2 py-0.5 rounded-full font-mono font-bold">
-                      OP #{deleteModalOp.number}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#71717a] mt-0.5">
-                    Confirme a remoção definitiva da Ordem de Produção
-                  </p>
-                </div>
-              </div>
-
-              <button
-                onClick={() => !isDeletingOp && setDeleteModalOp(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
-                disabled={isDeletingOp}
+            <DialogFooter className="mt-4 pt-3 border-t border-white/5">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setShowOpModal(false)}
+                className="h-9 px-4 text-xs rounded-xl border-[#272733] bg-[#181820] text-zinc-300"
               >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo */}
-            <div className="p-5 space-y-4">
-              
-              {/* Card de Detalhes da OP */}
-              <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
-                <div className="flex items-start justify-between gap-2">
-                  <span className="text-[11px] text-[#71717a] uppercase font-bold">Produto</span>
-                  <span className="text-xs font-bold text-[#f4f4f5] text-right max-w-[240px] truncate">
-                    {deleteModalOp.product}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1e1e24] text-xs">
-                  <div>
-                    <span className="text-[10px] text-[#71717a] uppercase font-bold block">Lote</span>
-                    <span className="font-mono font-bold text-emerald-400 text-[11px]">
-                      {deleteModalOp.lote || 'Sem Lote'}
-                    </span>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade</span>
-                    <span className="font-mono font-bold text-[#f4f4f5] text-[11px]">
-                      {deleteModalOp.plannedQuantity.toLocaleString('pt-BR')} un
-                    </span>
-                  </div>
-                </div>
-
-                {deleteModalOp.granel && (
-                  <div className="pt-2 border-t border-[#1e1e24] flex items-center justify-between text-xs">
-                    <span className="text-[10px] text-[#71717a] uppercase font-bold">Granel</span>
-                    <span className="font-mono font-semibold text-amber-300 text-[11px]">
-                      {deleteModalOp.granel}
-                    </span>
-                  </div>
-                )}
-              </div>
-
-              {/* Mensagem de Aviso */}
-              <div className="bg-red-950/30 border border-red-900/40 p-3 rounded-xl flex items-start gap-2.5 text-xs text-red-200">
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                <p className="leading-relaxed">
-                  Tem certeza de que deseja remover esta Ordem de Produção do Estoque? Esta ação apagará o registro no sistema e não poderá ser desfeita.
-                </p>
-              </div>
-
-              {/* Ações */}
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  id="btn-cancelar-exclusao-op"
-                  disabled={isDeletingOp}
-                  onClick={() => setDeleteModalOp(null)}
-                  className="h-9 px-3.5 text-xs text-[#a1a1aa] hover:text-white rounded-xl hover:bg-[#1a1a24] transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  Cancelar
-                </button>
-                
-                <button
-                  type="button"
-                  id="btn-confirmar-exclusao-op"
-                  disabled={isDeletingOp}
-                  onClick={handleConfirmDelete}
-                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)] transition-all cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isDeletingOp ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Excluindo...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Confirmar Exclusão</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-            </div>
-          </div>
-        </div>
-      )}
+                Cancelar
+              </Button>
+              <Button
+                type="submit"
+                disabled={isSavingOp}
+                className="h-9 px-4 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white"
+              >
+                {isSavingOp ? 'Salvando...' : editingOp ? 'Salvar Alterações' : 'Criar Ordem'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       {/* ---------------- MODAL: MAIS INFORMAÇÕES DA OP (Estoque de OPs) ---------------- */}
       {detailsModalOp && (
@@ -2571,955 +1564,474 @@ WHERE email IN (
           onClick={(e) => {
             if (e.target === e.currentTarget) setDetailsModalOp(null);
           }}
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
         >
-          <div className="bg-[#121216] border border-[#222228] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-
-            {/* Header */}
-            <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
-                  <Info className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                      Detalhes da OP
-                    </h3>
-                    <span className="text-[10px] bg-blue-950 text-blue-400 border border-blue-800/50 px-2 py-0.5 rounded-full font-mono font-bold">
-                      OP #{detailsModalOp.number}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#71717a] mt-0.5 truncate">
-                    {detailsModalOp.product}
-                  </p>
-                </div>
+          <div className="bg-[#121216] border border-[#272733] rounded-2xl w-full max-w-lg p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/5 pb-3">
+              <div className="flex items-center gap-2">
+                <Package className="w-5 h-5 text-blue-400" />
+                <h3 className="text-sm font-black uppercase tracking-wider text-white">
+                  Detalhes da {detailsModalOp.tipoDocumento || 'OP'} {detailsModalOp.number}
+                </h3>
               </div>
-
               <button
                 onClick={() => setDetailsModalOp(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
+                className="text-zinc-500 hover:text-white p-1 rounded-lg"
               >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Conteúdo */}
-            <div className="p-5 space-y-3">
-              {(() => {
-                const op = detailsModalOp;
-                const assignedLine = lines.find(l => l.id === op.lineId);
-                const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
-                return (
-                  <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5 text-xs">
+            <div className="space-y-3 text-xs">
+              <div>
+                <span className="text-[10px] text-zinc-500 uppercase font-bold block">Produto</span>
+                <p className="text-white font-semibold text-sm">{detailsModalOp.product}</p>
+              </div>
 
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Tipo / Setor</span>
-                      <span className="font-semibold text-[#f4f4f5] text-right">
-                        {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
-                        {op.setor ? ` · ${op.setor}` : ''}
-                      </span>
-                    </div>
+              <div className="grid grid-cols-2 gap-3 bg-[#16161c] p-3 rounded-xl border border-white/5">
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Quantidade Planejada</span>
+                  <span className="font-mono text-zinc-200 font-bold">
+                    {detailsModalOp.plannedQuantity?.toLocaleString('pt-BR')} {detailsModalOp.unidade || 'un'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Quantidade Produzida</span>
+                  <span className="font-mono text-emerald-400 font-bold">
+                    {(detailsModalOp.producedQuantity || 0).toLocaleString('pt-BR')} {detailsModalOp.unidade || 'un'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Lote</span>
+                  <span className="font-mono text-zinc-300">{detailsModalOp.lote || 'Não informado'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Granel</span>
+                  <span className="font-mono text-zinc-300">{detailsModalOp.granel || 'Não informado'}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Linha de Envase</span>
+                  <span className="text-blue-400 font-medium">
+                    {lines.find(l => l.id === detailsModalOp.lineId)?.name || 'Sem Linha Atribuída'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Data Agendada</span>
+                  <span className="font-mono text-zinc-300">
+                    {detailsModalOp.scheduledDate ? detailsModalOp.scheduledDate.split('-').reverse().join('/') : 'Não agendada'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Prioridade</span>
+                  <span className="text-zinc-200">{detailsModalOp.priority}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block">Status</span>
+                  <span className="text-zinc-200">{detailsModalOp.status}</span>
+                </div>
+              </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Prioridade</span>
-                      <span className="font-semibold text-[#f4f4f5]">{op.priority}</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1e1e24]">
-                      <div>
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Planejada</span>
-                        <span className="font-mono font-bold text-[#f4f4f5] text-[11px]">
-                          {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Produzida</span>
-                        <span className="font-mono font-bold text-emerald-400 text-[11px]">
-                          {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} {op.producedQuantity > 0 ? `(${progress}%)` : ''}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Granel</span>
-                      {op.granel ? (
-                        <span className="font-mono font-semibold text-amber-300 text-[11px]">{op.granel}</span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Granel</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Linha Destino</span>
-                      {assignedLine ? (
-                        <span className="font-semibold text-[#d4d4d8] flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-                          {assignedLine.name}
-                        </span>
-                      ) : (
-                        <span className="text-[#71717a] text-[11px] italic">Disponível no Estoque</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Data Cronograma</span>
-                      {op.scheduledDate ? (
-                        <span className="font-semibold text-[#f4f4f5] flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                          {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-                          {op.scheduledShift ? ` · ${op.scheduledShift}` : ''}
-                        </span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Data Prevista</span>
-                      )}
-                    </div>
-
-                    {op.setor === 'Pesagem' && op.status === 'completed' && (
-                      <div className="pt-2 border-t border-[#1e1e24]">
-                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
-                          Pronta p/ Manipulação
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
+              {detailsModalOp.observation && (
+                <div className="bg-[#16161c] p-3 rounded-xl border border-white/5">
+                  <span className="text-[10px] text-zinc-500 uppercase font-bold block mb-1">Observações</span>
+                  <p className="text-zinc-300 text-[11px] whitespace-pre-wrap">{detailsModalOp.observation}</p>
+                </div>
+              )}
             </div>
 
-            <div className="px-5 pb-5 flex items-center justify-end">
-              <button
-                type="button"
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/5">
+              <Button
                 onClick={() => setDetailsModalOp(null)}
-                className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
+                className="h-9 px-4 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white"
               >
                 Fechar
-              </button>
+              </Button>
             </div>
           </div>
         </div>
       )}
-
-      {/* MODAL CADASTRAR NOVO LÍDER */}
-      {showNewLeaderModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-[#121217] border border-[#26262e] rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="px-5 py-4 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
-                  <Users className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#f4f4f5]">Cadastrar Novo Líder</h3>
-                  <p className="text-[11px] text-[#71717a]">Gere e-mail automático e senha padrão de 1º acesso</p>
-                </div>
-              </div>
-              <button
-                onClick={() => {
-                  if (isSubmittingLeader) return;
-                  setShowNewLeaderModal(false);
-                  resetNewLeaderForm();
-                }}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
-                disabled={isSubmittingLeader}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Form */}
-            <form onSubmit={handleCreateLeader} className="p-5 space-y-4">
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa]">Nome Completo do Líder</Label>
-                <Input
-                  required
-                  placeholder="Ex: Carlos Mendes"
-                  value={newLeaderName}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setNewLeaderName(val);
-                    if (isAutoEmail) {
-                      setNewLeaderEmail(generateLeaderEmail(val));
-                    }
-                  }}
-                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs font-semibold text-[#a1a1aa]">E-mail Corporativo de Acesso</Label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAutoEmail(true);
-                      setNewLeaderEmail(generateLeaderEmail(newLeaderName));
-                    }}
-                    className="text-[10px] text-blue-400 hover:text-blue-300 font-semibold underline flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-2.5 h-2.5" />
-                    Gerar Automático
-                  </button>
-                </div>
-                <Input
-                  required
-                  type="email"
-                  placeholder="carlos.mendes@fabrica.com"
-                  value={newLeaderEmail}
-                  onChange={(e) => {
-                    setIsAutoEmail(false);
-                    setNewLeaderEmail(e.target.value);
-                  }}
-                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
-                />
-              </div>
-
-              {/* Informação sobre Senha Temporária & 1º Acesso */}
-              <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3.5 space-y-1.5 text-xs">
-                <div className="flex items-center gap-1.5">
-                  <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="font-bold text-amber-300">Senha Temporária Automática</span>
-                </div>
-                <p className="text-[11px] text-amber-200/80 leading-relaxed">
-                  Uma senha temporária única será gerada automaticamente para este líder. Você poderá copiá-la após confirmar o cadastro. No primeiro acesso, o sistema exigirá a criação de uma senha pessoal definitiva.
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa] flex items-center justify-between">
-                  <span>Área de Atuação *</span>
-                  <span className="text-[10px] text-blue-400 font-normal">Define tela inicial e tipo de documento (OP/OSM)</span>
-                </Label>
-                <select
-                  value={newLeaderArea}
-                  onChange={(e) => {
-                    const area = e.target.value as 'Envase' | 'Pesagem' | 'Manipulação';
-                    setNewLeaderArea(area);
-                    if (area === 'Pesagem') {
-                      setNewLeaderCargo('Líder de Pesagem');
-                    } else if (area === 'Manipulação') {
-                      setNewLeaderCargo('Líder de Manipulação');
-                    } else {
-                      setNewLeaderCargo('Líder de Envase');
-                    }
-                  }}
-                  className="w-full h-9 bg-[#17171d] border border-[#2a2a32] text-xs text-[#f4f4f5] rounded-lg px-3 focus:outline-none focus:border-blue-500 font-semibold"
-                  required
-                >
-                  <option value="Envase">Envase (Chão de Fábrica · Ordem de Produção - OP)</option>
-                  <option value="Pesagem">Pesagem (Chão de Fábrica · Ordem de Serviço - OSM · 1 Turno)</option>
-                  <option value="Manipulação">Manipulação (Chão de Fábrica · Ordem de Serviço - OSM · 2 Turnos)</option>
-                </select>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label className="text-xs font-semibold text-[#a1a1aa]">Cargo / Função</Label>
-                <Input
-                  placeholder="Ex: Líder de Produção"
-                  value={newLeaderCargo}
-                  onChange={(e) => setNewLeaderCargo(e.target.value)}
-                  className="bg-[#17171d] border-[#2a2a32] text-sm text-[#f4f4f5] focus:border-blue-500"
-                />
-              </div>
-
-              {newLeaderArea === 'Envase' && (
-                <div className="bg-blue-950/20 border border-blue-800/30 rounded-xl p-3 flex items-start gap-2">
-                  <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
-                  <p className="text-[11px] text-blue-200/80">
-                    Líderes de Envase não têm mais uma linha fixa: qualquer um deles pode escolher e trocar de linha livremente na própria tela, a qualquer momento. As OPs continuam sendo atribuídas à linha pelo cronograma de envase, não ao líder.
-                  </p>
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  disabled={isSubmittingLeader}
-                  onClick={() => {
-                    setShowNewLeaderModal(false);
-                    resetNewLeaderForm();
-                  }}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
-                >
-                  Cancelar
-                </Button>
-                
-                <Button
-                  type="submit"
-                  disabled={isSubmittingLeader}
-                  className="h-9 px-4 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-blue-900/30"
-                >
-                  {isSubmittingLeader ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Cadastrando...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Check className="w-3.5 h-3.5" />
-                      <span>Criar Acesso do Líder</span>
-                    </>
-                  )}
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: CREDENCIAIS CRIADAS (PRIMEIRO ACESSO) */}
-      {createdCredentialsModalData && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="bg-[#121217] border border-emerald-800/40 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="px-5 py-4 border-b border-[#222228] bg-emerald-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
-                  <CheckCircle2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#f4f4f5]">Líder Cadastrado com Sucesso!</h3>
-                  <p className="text-[11px] text-[#71717a]">Credenciais geradas para primeiro acesso</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setCreatedCredentialsModalData(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-4">
-              {/* Card de Credenciais */}
-              <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                  <span className="text-[#71717a] font-semibold">Nome do Líder:</span>
-                  <span className="font-bold text-[#f4f4f5]">{createdCredentialsModalData.name}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                  <span className="text-[#71717a] font-semibold">E-mail de Login:</span>
-                  <span className="font-mono font-bold text-blue-400">{createdCredentialsModalData.email}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                  <span className="text-[#71717a] font-semibold">Senha Padrão:</span>
-                  <span className="font-mono font-bold text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40">
-                    {createdCredentialsModalData.password}
-                  </span>
-                </div>
-
-                <div className="pt-1 text-[11px] text-[#a1a1aa] flex items-start gap-2">
-                  <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                  <span>
-                    No 1º acesso com esta senha padrão, o líder será automaticamente direcionado para escolher sua nova senha pessoal.
-                  </span>
-                </div>
-              </div>
-
-              {/* Botões de Ação */}
-              <div className="space-y-2 pt-2 border-t border-[#222228]">
-                <Button
-                  onClick={() => {
-                    const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${createdCredentialsModalData.name}!\nSeu acesso ao sistema de chão de fábrica foi criado:\n\n📧 *E-mail de Login:* ${createdCredentialsModalData.email}\n🔑 *Senha Padrão:* ${createdCredentialsModalData.password}\n\n⚠️ *Atenção:* No seu primeiro acesso, você definirá sua nova senha pessoal definitiva.`;
-                    navigator.clipboard.writeText(text);
-                    showToast('Dados de acesso copiados para a área de transferência!');
-                  }}
-                  className="w-full h-10 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-900/30"
-                >
-                  <Copy className="w-4 h-4" />
-                  <span>Copiar Credenciais para Enviar ao Líder</span>
-                </Button>
-
-                <Button
-                  variant="ghost"
-                  onClick={() => setCreatedCredentialsModalData(null)}
-                  className="w-full h-9 text-xs text-[#a1a1aa] hover:text-white"
-                >
-                  Fechar
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: REDEFINIR SENHA TEMPORÁRIA DO LÍDER */}
-      {resetPasswordModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="bg-[#121214] border border-[#27272a] rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
-            {/* Header */}
-            <div className="px-5 py-4 border-b border-[#27272a] bg-orange-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center">
-                  <KeyRound className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#f4f4f5]">Senha Redefinida</h3>
-                  <p className="text-[11px] text-[#71717a]">
-                    {resetPasswordModal.loading ? 'Processando redefinição...' : resetPasswordModal.leader.name}
-                  </p>
-                </div>
-              </div>
-              {!resetPasswordModal.loading && (
-                <button
-                  onClick={() => setResetPasswordModal(null)}
-                  className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              )}
-            </div>
-
-            <div className="p-5 space-y-4">
-              {resetPasswordModal.loading ? (
-                <div className="py-8 flex flex-col items-center justify-center gap-3 text-center">
-                  <Loader2 className="w-8 h-8 text-orange-400 animate-spin" />
-                  <p className="text-sm font-semibold text-[#f4f4f5]">Gerando nova senha...</p>
-                  <p className="text-xs text-[#71717a]">Atualizando permissões de acesso do líder</p>
-                </div>
-              ) : (
-                <>
-                  <div className="space-y-1">
-                    <p className="text-xs text-[#d4d4d8]">
-                      A senha temporária de <strong className="text-white">{resetPasswordModal.leader.name}</strong> foi redefinida.
-                    </p>
-                    <p className="text-xs text-[#71717a]">
-                      Repasse esta senha ao líder pessoalmente:
-                    </p>
-                  </div>
-
-                  {/* Card com a senha em destaque */}
-                  <div className="bg-[#0a0a0c] border border-[#27272a] rounded-xl p-4 text-center space-y-2">
-                    <span className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wider block">
-                      Nova Senha Temporária
-                    </span>
-                    <span className="font-mono font-black text-xl text-amber-300 bg-amber-950/60 px-4 py-1.5 rounded-lg border border-amber-800/40 inline-block tracking-wider">
-                      {resetPasswordModal.newPassword}
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-[#181820] border border-[#27272a] rounded-xl text-[11px] text-[#a1a1aa] flex items-start gap-2">
-                    <KeyRound className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                    <span>
-                      No próximo login, o sistema exigirá a criação de uma nova senha pessoal.
-                    </span>
-                  </div>
-
-                  {/* Botões de Ação */}
-                  <div className="space-y-2 pt-2 border-t border-[#27272a]">
-                    <Button
-                      onClick={() => {
-                        if (resetPasswordModal.newPassword) {
-                          const text = `🏭 *Acesso ao SIG-Produção*\nOlá ${resetPasswordModal.leader.name}!\nSua senha temporária foi redefinida:\n\n📧 *E-mail de Login:* ${resetPasswordModal.leader.email}\n🔑 *Nova Senha Temporária:* ${resetPasswordModal.newPassword}\n\n⚠️ *Atenção:* No seu próximo login, o sistema solicitará a definição da sua nova senha pessoal.`;
-                          navigator.clipboard.writeText(text);
-                          showToast('Senha temporária copiada para a área de transferência!');
-                        }
-                      }}
-                      className="w-full h-10 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-orange-950/40"
-                    >
-                      <Copy className="w-4 h-4" />
-                      <span>Copiar senha</span>
-                    </Button>
-
-                    <Button
-                      variant="ghost"
-                      onClick={() => setResetPasswordModal(null)}
-                      className="w-full h-9 text-xs text-[#a1a1aa] hover:text-white"
-                    >
-                      Fechar
-                    </Button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL DE CONFIRMAÇÃO DE RESET / LIMPEZA DO BANCO */}
-      {showResetModal && (
-        <div 
-          onClick={(e) => {
-            if (e.target === e.currentTarget && !isResetting) setShowResetModal(false);
-          }}
-          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
-        >
-          <div className="bg-[#121217] border border-red-900/50 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
-            
-            {/* Header */}
-            <div className="px-5 py-4 border-b border-[#222228] bg-red-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 flex items-center justify-center">
-                  <Trash2 className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#f4f4f5]">Limpar Base de Dados</h3>
-                  <p className="text-[11px] text-[#71717a]">Remover todas as OPs e eventos mock</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => !isResetting && setShowResetModal(false)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors cursor-pointer"
-                disabled={isResetting}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo */}
-            <div className="p-5 space-y-4">
-              <div className="bg-red-950/30 border border-red-900/40 p-3.5 rounded-xl flex items-start gap-2.5 text-xs text-red-200">
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <p className="font-bold">Atenção: Esta ação é definitiva.</p>
-                  <p className="text-[#a1a1aa] leading-relaxed">
-                    Todas as Ordens de Produção atuais ({ops.length} OPs), apontamentos e eventos serão excluídos. As linhas voltarão ao estado Disponível para novas importações de CSV e atribuições.
-                  </p>
-                </div>
-              </div>
-
-              {/* Ações */}
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  id="btn-cancelar-reset-base"
-                  disabled={isResetting}
-                  onClick={() => setShowResetModal(false)}
-                  className="h-9 px-3.5 text-xs text-[#a1a1aa] hover:text-white rounded-xl hover:bg-[#1a1a24] transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  Cancelar
-                </button>
-                
-                <button
-                  type="button"
-                  id="btn-confirmar-reset-base"
-                  disabled={isResetting}
-                  onClick={handleResetDatabase}
-                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)] transition-all cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isResetting ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Limpando base...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Confirmar e Limpar Tudo</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL DE ATRIBUIR À LINHA & CRONOGRAMA */}
-      <AssignLineModal
-        isOpen={Boolean(assignModalOp)}
-        onClose={() => setAssignModalOp(null)}
-        op={assignModalOp}
-        lines={lines}
-        allOps={ops}
-        onSave={handleSaveAssignment}
-      />
-
-      {/* MODAL DE VINCULAR OP DO ESTOQUE À LINHA */}
-      <AssignStockOpToLineModal
-        isOpen={Boolean(assignStockModalTargetLine)}
-        onClose={() => setAssignStockModalTargetLine(null)}
-        targetLine={assignStockModalTargetLine}
-        ops={ops}
-        onAssignAndStart={handleAssignAndStart}
-        onAssignToQueue={handleAssignToQueue}
-      />
 
       {/* ---------------- MODAL: DETALHES DO COLABORADOR (Gestão de Equipe) ---------------- */}
       {detailsModalUserId && (() => {
         const user = allUsers.find(u => (u.uid || u.email) === detailsModalUserId);
         if (!user) return null;
-
-        const isSelf = user.uid === profile?.uid;
-        const isCoordinator = user.role === 'coordinator';
-        const isActive = user.status !== 'inactive';
-        const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
-        const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
-        const activeRule = (user.rule || getUserRule(user)) as AccessRule;
-        const ruleConfig = ACCESS_RULES[activeRule] || ACCESS_RULES.envase;
+        const ruleConfig = ACCESS_RULES[user.rule || 'envase'] || ACCESS_RULES.envase;
 
         return (
           <div
             onClick={(e) => {
               if (e.target === e.currentTarget) setDetailsModalUserId(null);
             }}
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
           >
-            <div className="bg-[#121216] border border-[#222228] w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 max-h-[90vh] flex flex-col">
-
-              {/* Header */}
-              <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xs font-black uppercase shrink-0 ${
-                    isCoordinator
-                      ? 'bg-blue-600/20 border border-blue-500/40 text-blue-400'
-                      : 'bg-[#22222a] border border-[#2c2c36] text-[#a1a1aa]'
-                  }`}>
-                    {user.name.substring(0, 2)}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-sm font-bold text-[#f4f4f5] truncate">{user.name}</h3>
-                      {isSelf && (
-                        <span className="text-[9px] bg-blue-950/80 border border-blue-800/40 text-blue-400 px-1.5 py-0.2 rounded font-bold shrink-0">
-                          Você
-                        </span>
-                      )}
-                      {isLocalOnly && (
-                        <span className="text-[9px] bg-amber-950/80 border border-amber-800/40 text-amber-300 px-1.5 py-0.2 rounded font-bold shrink-0" title="Salvo localmente (pendente envio ao Supabase)">
-                          Pendente Supabase
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-[#71717a] font-mono truncate">{user.email}</p>
-                  </div>
+            <div className="bg-[#121216] border border-[#272733] rounded-2xl w-full max-w-lg p-5 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between border-b border-white/5 pb-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-blue-400" />
+                  <h3 className="text-sm font-black uppercase tracking-wider text-white">
+                    Perfil do Colaborador
+                  </h3>
                 </div>
-
                 <button
                   onClick={() => setDetailsModalUserId(null)}
-                  className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
+                  className="text-zinc-500 hover:text-white p-1 rounded-lg"
                 >
-                  <X className="w-5 h-5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Conteúdo */}
-              <div className="p-5 space-y-4 overflow-y-auto">
+              <div className="space-y-3 text-xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-blue-600/20 text-blue-400 font-black text-base flex items-center justify-center shrink-0 border border-blue-500/30">
+                    {user.name ? user.name.slice(0, 2).toUpperCase() : 'CO'}
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white">{user.name}</h4>
+                    <p className="text-xs text-zinc-400">{user.cargo || 'Operador Industrial'}</p>
+                    <p className="text-[11px] font-mono text-zinc-500">{user.email}</p>
+                  </div>
+                </div>
 
-                {/* Cargo & Área */}
-                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
-                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Cargo / Área</span>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                      isCoordinator
-                        ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
-                        : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
-                    }`}>
-                      {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
-                      <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
+                <div className="grid grid-cols-2 gap-3 bg-[#16161c] p-3 rounded-xl border border-white/5">
+                  <div>
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Regra de Acesso</span>
+                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full inline-block mt-0.5 ${ruleConfig.badgeClass}`}>
+                      {ruleConfig.name}
                     </span>
-
-                    {!isCoordinator ? (
-                      <select
-                        value={user.area || (user.cargo?.toLowerCase().includes('pesag') ? 'Pesagem' : user.cargo?.toLowerCase().includes('manipula') ? 'Manipulação' : 'Envase')}
-                        onChange={(e) => handleUpdateUserArea(user, e.target.value as any)}
-                        className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border bg-[#14141a] border-[#2c2c38] text-white focus:outline-none focus:border-blue-500 cursor-pointer shadow-sm"
-                        title="Clique para alterar a área de atuação deste líder (define a tela do chão de fábrica)"
-                      >
-                        <option value="Envase" className="bg-[#121217] text-[#3b82f6]">Área: Envase</option>
-                        <option value="Pesagem" className="bg-[#121217] text-[#c084fc]">Área: Pesagem</option>
-                        <option value="Manipulação" className="bg-[#121217] text-[#22d3ee]">Área: Manipulação</option>
-                      </select>
-                    ) : (
-                      <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-blue-950/70 text-blue-400 border-blue-500/40">
-                        Coordenação Geral
-                      </span>
-                    )}
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Status da Conta</span>
+                    <span className="text-zinc-200 font-bold capitalize mt-0.5 inline-block">{user.status}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Área de Atuação</span>
+                    <span className="text-zinc-300 font-medium">{user.area || 'Envase'}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-zinc-500 uppercase font-bold block">Cadastrado em</span>
+                    <span className="text-zinc-400 font-mono">
+                      {user.createdAt ? new Date(user.createdAt).toLocaleDateString('pt-BR') : '—'}
+                    </span>
                   </div>
                 </div>
 
-                {/* Regra de Acesso */}
-                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2">
-                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Regra de Acesso (Rule)</span>
+                {/* Alterar Regra Diretamente */}
+                <div className="space-y-1.5 pt-1">
+                  <Label className="text-[11px] text-zinc-300">Alterar Regra de Acesso (Rule)</Label>
                   <select
-                    value={activeRule}
-                    onChange={(e) => handleUpdateUserRule(user, e.target.value as AccessRule)}
-                    disabled={isSelf}
-                    className={`text-[10px] font-black uppercase tracking-wider px-2 py-1.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer shadow-sm w-full ${
-                      ruleConfig.badgeClass || 'bg-zinc-900 text-zinc-300 border-zinc-700'
-                    }`}
-                    title="Selecione a regra de acesso (define quais telas aparecem no menu lateral deste colaborador)"
+                    value={user.rule || 'envase'}
+                    onChange={async (e) => {
+                      const newRule = e.target.value as AccessRule;
+                      await updateUserRule(user.uid, newRule);
+                      showToast(`Regra de ${user.name} alterada para ${newRule}.`);
+                      await loadData(true);
+                    }}
+                    className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200"
                   >
-                    {Object.entries(ACCESS_RULES).map(([key, cfg]) => (
-                      <option key={key} value={key} className="bg-[#121217] text-white">
-                        {cfg.name} ({cfg.tabs.length} telas)
-                      </option>
-                    ))}
+                    <option value="admin">Coordenador Geral (Acesso Total)</option>
+                    <option value="envase">Líder de Envase (Home + Chão de Fábrica)</option>
+                    <option value="pesagem">Líder de Pesagem (Home + Pesagem)</option>
+                    <option value="manipulacao">Líder de Manipulação (Home + Manipulação)</option>
+                    <option value="custom">Personalizado</option>
                   </select>
-                  <p className="text-[10px] text-[#71717a]">{ruleConfig.description}</p>
-                </div>
-
-                {/* Status de Acesso */}
-                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-[#71717a] uppercase font-bold">Status de Acesso</span>
-                    {isFirstAccess ? (
-                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit bg-amber-950/80 text-amber-300 border border-amber-800/40">
-                        <KeyRound className="w-3 h-3 text-amber-400" />
-                        <span>1º Acesso</span>
-                      </span>
-                    ) : (
-                      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                        isActive
-                          ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/40'
-                          : 'bg-red-950/80 text-red-400 border border-red-800/40'
-                      }`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                        <span>{isActive ? 'Ativo' : 'Bloqueado'}</span>
-                      </span>
-                    )}
-                  </div>
-
-                  {isFirstAccess && (
-                    <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1e1e24]">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleCopyLeaderCredentials(user)}
-                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-blue-950/40 border-blue-800/40 text-blue-300 hover:bg-blue-900/50 flex items-center gap-1"
-                        title="Copiar e-mail e senha padrão"
-                      >
-                        <Copy className="w-3 h-3" />
-                        <span>Copiar Acesso</span>
-                      </Button>
-
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleMarkAsActive(user)}
-                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-emerald-950/40 border-emerald-800/40 text-emerald-300 hover:bg-emerald-900/50 flex items-center gap-1"
-                        title="Confirmar acesso e marcar como Ativo"
-                      >
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                        <span>Marcar Ativo</span>
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                {/* Ações Administrativas */}
-                <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
-                  <span className="text-[10px] text-[#71717a] uppercase font-bold block">Ações Administrativas</span>
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    {!isCoordinator && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleResetLeaderPassword(user)}
-                        className="h-9 px-2 text-[11px] font-bold rounded-lg bg-orange-950/40 border-orange-800/40 text-orange-400 hover:bg-orange-900/50 hover:text-orange-300 flex items-center gap-1"
-                        title="Redefinir senha temporária"
-                      >
-                        <KeyRound className="w-3 h-3 text-orange-400" />
-                        <span>Redefinir Senha</span>
-                      </Button>
-                    )}
-
-                    {!isSelf && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleToggleUserStatus(user)}
-                        className={`h-9 px-2 text-[11px] font-bold rounded-lg ${
-                          isActive
-                            ? 'bg-amber-950/30 border-amber-800/40 text-amber-300 hover:bg-amber-950/50'
-                            : 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300 hover:bg-emerald-950/50'
-                        }`}
-                        title={isActive ? 'Bloquear Acesso' : 'Desbloquear Acesso'}
-                      >
-                        {isActive ? <UserX className="w-3 h-3" /> : <UserCheck className="w-3 h-3" />}
-                        <span>{isActive ? 'Bloquear' : 'Ativar'}</span>
-                      </Button>
-                    )}
-
-                    {!isCoordinator ? (
-                      <Button
-                        size="sm"
-                        onClick={() => handlePromoteToCoordinator(user)}
-                        className="h-9 px-2.5 bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow-sm"
-                        title="Promover a Coordenador Geral"
-                      >
-                        <Award className="w-3 h-3 text-white" />
-                        <span>Promover a Coordenador</span>
-                      </Button>
-                    ) : (
-                      !isSelf && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleDemoteToLeader(user)}
-                          className="h-9 px-2 bg-[#17171d] hover:bg-[#22222a] border-[#292935] text-[#a1a1aa] hover:text-white text-[11px] font-semibold rounded-lg"
-                          title="Alterar para Líder de Produção"
-                        >
-                          <span>Tornar Líder</span>
-                        </Button>
-                      )
-                    )}
-
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleCopyConfirmEmailSql(user.email)}
-                      className="h-9 px-2 text-[#71717a] hover:text-emerald-400 hover:bg-emerald-950/20 text-[11px] rounded-lg flex items-center gap-1"
-                      title="Copiar SQL para validar/confirmar e-mail no Supabase"
-                    >
-                      <Mail className="w-3.5 h-3.5" />
-                      <span>SQL E-mail</span>
-                    </Button>
-
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleCopySqlForUser(user.email)}
-                      className="h-9 px-2 text-[#71717a] hover:text-blue-400 hover:bg-blue-950/20 text-[11px] rounded-lg flex items-center gap-1"
-                      title="Copiar SQL de Coordenador para Supabase"
-                    >
-                      {copiedSqlEmail === user.email ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>SQL Supabase</span>
-                    </Button>
-
-                    {!isSelf && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setDetailsModalUserId(null);
-                          handleOpenDeleteUserModal(user);
-                        }}
-                        className="h-9 px-2 text-red-400 hover:text-red-300 hover:bg-red-950/30 text-[11px] font-bold rounded-lg flex items-center gap-1"
-                        title="Remover Colaborador"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>Excluir</span>
-                      </Button>
-                    )}
-                  </div>
                 </div>
               </div>
 
-              <div className="px-5 pb-5 flex items-center justify-end shrink-0">
-                <button
-                  type="button"
+              <div className="flex justify-between items-center gap-2 pt-3 border-t border-white/5">
+                <Button
+                  onClick={() => {
+                    setDeleteUserModalData(user);
+                  }}
+                  variant="outline"
+                  className="h-9 px-3 text-xs font-bold rounded-xl border-rose-800/40 text-rose-400 hover:bg-rose-950/50"
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1" />
+                  Excluir Colaborador
+                </Button>
+
+                <Button
                   onClick={() => setDetailsModalUserId(null)}
-                  className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
+                  className="h-9 px-4 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white"
                 >
                   Fechar
-                </button>
+                </Button>
               </div>
             </div>
           </div>
         );
       })()}
 
-      {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE COLABORADOR ---------------- */}
-      {deleteUserModalData && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-[#121217] border border-red-900/40 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
-            
-            {/* Header */}
-            <div className="p-5 border-b border-[#222228] bg-red-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-red-600/20 border border-red-500/30 text-red-400 flex items-center justify-center shrink-0">
-                  <Trash2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                    Excluir Colaborador
-                  </h3>
-                  <p className="text-xs text-[#71717a] mt-0.5">
-                    Confirme a remoção definitiva do colaborador
-                  </p>
-                </div>
-              </div>
+      {/* ---------------- MODAL: CADASTRAR NOVO COLABORADOR ---------------- */}
+      <Dialog open={showAuthorizeModal} onOpenChange={setShowAuthorizeModal}>
+        <DialogContent className="bg-[#121216] border-[#272733] text-white max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black uppercase tracking-wider text-white">
+              Cadastrar Novo Colaborador
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-400">
+              Gere uma credencial de acesso pré-autorizada para os líderes de produção.
+            </DialogDescription>
+          </DialogHeader>
 
-              <button
-                onClick={() => !isDeletingUser && setDeleteUserModalData(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors"
-                disabled={isDeletingUser}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo */}
-            <div className="p-5 space-y-4">
-              {/* Card de Detalhes do Usuário */}
-              <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-4 space-y-2.5">
-                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                  <span className="text-[#71717a] font-semibold">Nome:</span>
-                  <span className="font-bold text-[#f4f4f5]">{deleteUserModalData.name}</span>
+          {userCreatedPassword ? (
+            <div className="space-y-4 py-2">
+              <div className="p-4 bg-emerald-950/30 border border-emerald-800/40 rounded-xl space-y-2">
+                <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Colaborador Cadastrado!</span>
                 </div>
-
-                <div className="flex items-center justify-between text-xs pb-2 border-b border-[#1c1c22]">
-                  <span className="text-[#71717a] font-semibold">E-mail:</span>
-                  <span className="font-mono text-blue-400 font-bold">{deleteUserModalData.email}</span>
-                </div>
-
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-[#71717a] font-semibold">Função / Cargo:</span>
-                  <span className="text-[#d4d4d8] font-semibold">
-                    {deleteUserModalData.cargo || (deleteUserModalData.role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção')}
-                  </span>
-                </div>
-              </div>
-
-              {/* Mensagem de Aviso */}
-              <div className="bg-red-950/30 border border-red-900/40 p-3.5 rounded-xl flex items-start gap-2.5 text-xs text-red-200">
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                <p className="leading-relaxed">
-                  Tem certeza de que deseja remover permanentemente o colaborador <strong>{deleteUserModalData.name}</strong>? Essa ação revogará o acesso ao sistema, removerá sua escala e apagará o cadastro.
+                <p className="text-xs text-zinc-300">
+                  Compartilhe a senha temporária abaixo com o colaborador para o primeiro acesso:
                 </p>
+                <div className="flex items-center justify-between p-2.5 bg-black/40 rounded-lg border border-emerald-800/30">
+                  <span className="font-mono text-sm font-black text-white tracking-widest">
+                    {userCreatedPassword}
+                  </span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(userCreatedPassword);
+                      showToast('Senha copiada com sucesso!');
+                    }}
+                    className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white"
+                    title="Copiar senha"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
-              {/* Ações */}
-              <div className="pt-3 border-t border-[#222228] flex items-center justify-end gap-2">
+              <DialogFooter>
+                <Button
+                  onClick={() => {
+                    setShowAuthorizeModal(false);
+                    setUserCreatedPassword(null);
+                  }}
+                  className="w-full h-9 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white"
+                >
+                  Concluir
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <form onSubmit={handleCreateUser} className="space-y-3.5 mt-2">
+              <div>
+                <Label className="text-[11px] text-zinc-300">Nome Completo *</Label>
+                <Input
+                  required
+                  placeholder="Ex: Carlos Silva"
+                  value={newUserFormData.name}
+                  onChange={(e) => setNewUserFormData({ ...newUserFormData, name: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white mt-1"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-zinc-300">E-mail Corporativo *</Label>
+                <Input
+                  required
+                  type="email"
+                  placeholder="Ex: carlos@fabrica.com"
+                  value={newUserFormData.email}
+                  onChange={(e) => setNewUserFormData({ ...newUserFormData, email: e.target.value })}
+                  className="h-9 text-xs bg-[#181822] border-[#272733] text-white mt-1"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-[11px] text-zinc-300">Cargo</Label>
+                  <Input
+                    placeholder="Ex: Líder de Envase"
+                    value={newUserFormData.cargo}
+                    onChange={(e) => setNewUserFormData({ ...newUserFormData, cargo: e.target.value })}
+                    className="h-9 text-xs bg-[#181822] border-[#272733] text-white mt-1"
+                  />
+                </div>
+
+                <div>
+                  <Label className="text-[11px] text-zinc-300">Área</Label>
+                  <select
+                    value={newUserFormData.area}
+                    onChange={(e) => setNewUserFormData({ ...newUserFormData, area: e.target.value as any })}
+                    className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+                  >
+                    <option value="Envase">Envase</option>
+                    <option value="Pesagem">Pesagem</option>
+                    <option value="Manipulação">Manipulação</option>
+                    <option value="Coordenação">Coordenação</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <Label className="text-[11px] text-zinc-300">Regra de Acesso Inicial</Label>
+                <select
+                  value={newUserFormData.rule}
+                  onChange={(e) => setNewUserFormData({ ...newUserFormData, rule: e.target.value as any })}
+                  className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+                >
+                  <option value="envase">Líder de Envase (Home + Chão de Fábrica)</option>
+                  <option value="pesagem">Líder de Pesagem (Home + Pesagem)</option>
+                  <option value="manipulacao">Líder de Manipulação (Home + Manipulação)</option>
+                  <option value="admin">Coordenador Geral (Acesso Total)</option>
+                </select>
+              </div>
+
+              <DialogFooter className="mt-4 pt-3 border-t border-white/5">
                 <Button
                   type="button"
-                  variant="ghost"
-                  disabled={isDeletingUser}
-                  onClick={() => setDeleteUserModalData(null)}
-                  className="h-9 text-xs text-[#a1a1aa] hover:text-white"
+                  variant="outline"
+                  onClick={() => setShowAuthorizeModal(false)}
+                  className="h-9 px-4 text-xs rounded-xl border-[#272733] bg-[#181820] text-zinc-300"
                 >
                   Cancelar
                 </Button>
-                
                 <Button
-                  disabled={isDeletingUser}
-                  onClick={handleConfirmDeleteUser}
-                  className="h-9 px-4 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-[0_0_12px_rgba(220,38,38,0.35)]"
+                  type="submit"
+                  disabled={isCreatingUser}
+                  className="h-9 px-4 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-500 text-white"
                 >
-                  {isDeletingUser ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>Excluindo...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Sim, Excluir Colaborador</span>
-                    </>
-                  )}
+                  {isCreatingUser ? 'Cadastrando...' : 'Gerar Acesso'}
                 </Button>
-              </div>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
 
+      {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE COLABORADOR ---------------- */}
+      <Dialog open={!!deleteUserModalData} onOpenChange={(open) => !open && setDeleteUserModalData(null)}>
+        <DialogContent className="bg-[#121216] border-[#272733] text-white max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black uppercase tracking-wider text-rose-400 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-rose-500" />
+              Excluir Colaborador
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-300">
+              Tem certeza que deseja excluir o acesso de{' '}
+              <strong className="text-white">{deleteUserModalData?.name}</strong> ({deleteUserModalData?.email})?
+              Esta ação removerá a conta e suas permissões industriais.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogFooter className="mt-4 pt-3 border-t border-white/5">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteUserModalData(null)}
+              className="h-9 px-4 text-xs rounded-xl border-[#272733] bg-[#181820] text-zinc-300"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              disabled={isDeletingUser}
+              onClick={handleDeleteUser}
+              className="h-9 px-4 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white"
+            >
+              {isDeletingUser ? 'Excluindo...' : 'Sim, Excluir'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------------- MODAL: CONFIRMAR EXCLUSÃO DE OP ---------------- */}
+      <Dialog open={!!deleteModalOp} onOpenChange={(open) => !open && setDeleteModalOp(null)}>
+        <DialogContent className="bg-[#121216] border-[#272733] text-white max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black uppercase tracking-wider text-rose-400 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5 text-rose-500" />
+              Excluir Ordem de Produção
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-300">
+              Tem certeza que deseja excluir a OP{' '}
+              <strong className="text-white">{deleteModalOp?.number}</strong> ({deleteModalOp?.product})?
+              Esta ação é permanente e remove todos os apontamentos vinculados.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogFooter className="mt-4 pt-3 border-t border-white/5">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteModalOp(null)}
+              className="h-9 px-4 text-xs rounded-xl border-[#272733] bg-[#181820] text-zinc-300"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              disabled={isDeletingOp}
+              onClick={handleDeleteOp}
+              className="h-9 px-4 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-500 text-white"
+            >
+              {isDeletingOp ? 'Excluindo...' : 'Sim, Excluir OP'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------------- MODAL: PAUSAR OP ---------------- */}
+      <Dialog open={!!pauseModalData} onOpenChange={(open) => !open && setPauseModalData(null)}>
+        <DialogContent className="bg-[#121216] border-[#272733] text-white max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-black uppercase tracking-wider text-amber-400 flex items-center gap-2">
+              <Pause className="w-5 h-5 text-amber-500" />
+              Pausar Produção da OP {pauseModalData?.opNumber}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-zinc-400">
+              Selecione o motivo da parada para alimentar o cálculo de Disponibilidade e OEE.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 mt-2">
+            <div>
+              <Label className="text-[11px] text-zinc-300">Motivo da Parada *</Label>
+              <select
+                value={selectedPauseReason}
+                onChange={(e) => setSelectedPauseReason(e.target.value)}
+                className="w-full h-9 text-xs bg-[#181822] border border-[#272733] rounded-xl px-2.5 text-zinc-200 mt-1"
+              >
+                <option value="">Selecione um motivo...</option>
+                {pauseReasons.map((pr) => (
+                  <option key={pr.id} value={pr.name}>{pr.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <Label className="text-[11px] text-zinc-300">Observação Técnica</Label>
+              <Input
+                placeholder="Ex: Ajuste mecânico no bico dosador"
+                value={pauseObs}
+                onChange={(e) => setPauseObs(e.target.value)}
+                className="h-9 text-xs bg-[#181822] border-[#272733] text-white mt-1"
+              />
             </div>
           </div>
-        </div>
-      )}
 
-      {/* Modal: Link de visualização pública do Dashboard Geral */}
-      <ShareDashboardModal
-        isOpen={isShareModalOpen}
-        onClose={() => setIsShareModalOpen(false)}
-      />
+          <DialogFooter className="mt-4 pt-3 border-t border-white/5">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPauseModalData(null)}
+              className="h-9 px-4 text-xs rounded-xl border-[#272733] bg-[#181820] text-zinc-300"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              disabled={isPausingOp || !selectedPauseReason}
+              onClick={handleConfirmPause}
+              className="h-9 px-4 text-xs font-bold rounded-xl bg-amber-600 hover:bg-amber-500 text-white"
+            >
+              {isPausingOp ? 'Registrando...' : 'Confirmar Pausa'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      {/* Modal: Metas de Produção (mensal única da fábrica + diária por linha) */}
+      {/* ---------------- MODAL: METAS (Sidebar) ---------------- */}
       <GoalsModal
         isOpen={showGoalsModal}
         onClose={() => setShowGoalsModal(false)}
@@ -3527,9 +2039,57 @@ WHERE email IN (
         factoryMonthlyGoal={factoryMonthlyGoal}
         factoryMonthlyGoals={factoryMonthlyGoals}
         lineDailyGoals={lineDailyGoals}
-        onGoalsSaved={loadData}
+        onGoalsSaved={async () => {
+          await loadData(true);
+        }}
       />
 
+      {/* ---------------- MODAL: COMPARTILHAR DASHBOARD (Sidebar) ---------------- */}
+      <ShareDashboardModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+      />
+
+      {/* ---------------- MODAL: IMPORTAR CSV (Estoque & Cronograma) ---------------- */}
+      <CsvImportModal
+        isOpen={showCsvModal}
+        onClose={() => setShowCsvModal(false)}
+        onSuccess={async () => {
+          showToast('Importação de OPs concluída com sucesso!');
+          await loadData(true);
+        }}
+      />
+
+      {/* ---------------- MODAL: ATRIBUIR LINHA À OP ---------------- */}
+      <AssignLineModal
+        isOpen={!!assignModalOp}
+        onClose={() => setAssignModalOp(null)}
+        op={assignModalOp}
+        lines={lines}
+        allOps={ops}
+        onSave={async (opId, updates) => {
+          await updateOP(opId, updates);
+          showToast('Linha e agendamento da OP atualizados.');
+          setAssignModalOp(null);
+          await loadData(true);
+        }}
+      />
+
+      {/* ---------------- MODAL: VINCULAR OP DO ESTOQUE À LINHA ("+" no Kanban) ---------------- */}
+      <AssignStockOpToLineModal
+        isOpen={!!assignStockLine}
+        onClose={() => setAssignStockLine(null)}
+        targetLine={assignStockLine}
+        ops={ops}
+        onAssignAndStart={async (opId, lineId) => {
+          await handleAssignToQueue(opId, lineId);
+          setAssignStockLine(null);
+        }}
+        onAssignToQueue={async (opId, lineId) => {
+          await handleAssignToQueue(opId, lineId);
+          setAssignStockLine(null);
+        }}
+      />
     </div>
   );
 }
