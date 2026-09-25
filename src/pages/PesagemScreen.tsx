@@ -205,15 +205,51 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
     return `${y}-${m}-${day}` === todayStr;
   }, [todayStr]);
 
-  const todayPesagemOps = useMemo(() => {
+  // Conjunto de números/lotes de OSM que já foram encaminhados adiante —
+  // seja pelo fluxo normal (Manipulação inicia a partir da OSM de Pesagem)
+  // seja por Saída Manual (que também cria sua própria linha com
+  // setor 'Manipulação', ver handleConfirmManualExit). Mesma lógica já usada
+  // na tela de Manipulação (availablePesagemOps) — serve pra saber quando uma
+  // OSM de Pesagem deixou de estar pendente.
+  const manipulatedOsmNumbers = useMemo(() => {
+    const set = new Set<string>();
+    ops.forEach(op => {
+      if (op.setor === 'Manipulação') {
+        if (op.number) set.add(op.number);
+        if (op.lote) set.add(op.lote);
+      }
+    });
+    return set;
+  }, [ops]);
+
+  // Estoque/fila de Pesagem: TODAS as OSMs ainda pendentes (setor 'Pesagem',
+  // sem uma OSM de Manipulação correspondente ainda), independente do dia em
+  // que foram registradas.
+  //
+  // Bug corrigido: antes essa lista só mostrava as OSMs de HOJE
+  // (isOpFromToday) — assim que o dia virava, uma OSM que ainda não tinha
+  // sido levada adiante pela Manipulação (nem tinha recebido Saída Manual)
+  // simplesmente sumia da tela, e o líder de Pesagem perdia o acesso pra
+  // editar, excluir ou dar Saída Manual nela. Agora ela só sai da lista
+  // quando de fato deixa de estar pendente — vira um estoque de verdade, não
+  // um registro "só de hoje".
+  const pesagemQueueOps = useMemo(() => {
     return ops.filter(op => {
+      // OPs importadas do histórico (id "imp-...") nunca devem virar backlog
+      // "pendente pra sempre": o número/lote delas quase nunca bate com o de
+      // uma OSM de Manipulação histórica (a importação leu as duas abas da
+      // planilha separadamente, com granularidade diferente), então ficariam
+      // acumuladas aqui como se estivessem pendentes, sem nunca ter estado de
+      // verdade. Mesma regra já usada na tela de Manipulação.
+      if (op.id && op.id.startsWith('imp-')) return false;
+
       // Uma OSM só deve continuar aparecendo na lista principal da Pesagem
       // enquanto o setor dela ainda for 'Pesagem' (ou não tiver setor
       // definido, para compatibilidade com registros antigos que não tinham
       // essa coluna preenchida).
       //
-      // Bug corrigido: antes, `op.tipoDocumento === 'OSM'` sozinho já era
-      // suficiente para passar nesse filtro — só que a OSM criada na
+      // Bug corrigido antes deste: `op.tipoDocumento === 'OSM'` sozinho já
+      // era suficiente para passar nesse filtro — só que a OSM criada na
       // Manipulação (ao iniciar/finalizar) também nasce com
       // tipoDocumento 'OSM' (só o setor muda para 'Manipulação'). Então,
       // sempre que o leaderId dessa nova linha batesse com o usuário logado
@@ -227,16 +263,21 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       const isLegacyOsmSemSetor = !op.setor && op.tipoDocumento === 'OSM';
       if (!isPesagemSetor && !isLegacyOsmSemSetor) return false;
 
-      if (!isOpFromToday(op)) return false;
-
-      if (isPesagemSetor) return true;
+      if (isPesagemSetor) {
+        // Já foi encaminhada adiante (Manipulação iniciou, ou já recebeu
+        // Saída Manual)? Se sim, não é mais pendente — sai da fila.
+        return !manipulatedOsmNumbers.has(op.number) && !manipulatedOsmNumbers.has(op.lote || '');
+      }
 
       // Registro antigo sem setor: mantém a regra anterior (mostra se foi
-      // criado pelo próprio líder logado, ou sem líder definido).
+      // criado pelo próprio líder logado, ou sem líder definido) — e continua
+      // restrito ao dia, já que esse formato legado nunca teve "setor" pra
+      // marcar quando foi encaminhado, então não dá pra saber com segurança
+      // se ainda está pendente ou já foi resolvido há muito tempo.
       const matchesLeader = !op.leaderId || op.leaderId === profile?.uid;
-      return matchesLeader;
+      return matchesLeader && isOpFromToday(op);
     }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [ops, isOpFromToday, profile]);
+  }, [ops, manipulatedOsmNumbers, isOpFromToday, profile]);
 
   // Mini Histórico: OSMs registradas pela Pesagem que já foram finalizadas —
   // seja pela Manipulação (fluxo normal) ou por "saída manual" dada pelo
@@ -251,12 +292,11 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
     }).sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime());
   }, [ops, isOpFromToday]);
 
-  // Resumo do dia — a Pesagem não registra mais Kg (isso só é preenchido pelo
-  // líder de Manipulação ao finalizar), então o resumo do dia agora conta
-  // quantas OSMs foram registradas, não uma soma de Kg (que ficaria sempre 0).
-  const totalOsmsHoje = useMemo(() => {
-    return todayPesagemOps.length;
-  }, [todayPesagemOps]);
+  // Total em estoque — quantas OSMs de Pesagem estão pendentes agora,
+  // registradas hoje ou em dias anteriores.
+  const totalOsmsEstoque = useMemo(() => {
+    return pesagemQueueOps.length;
+  }, [pesagemQueueOps]);
 
   // Criar nova Ordem de Produção / OSM
   const handleOpenModal = () => {
@@ -551,7 +591,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                   ? 'bg-purple-800 text-white'
                   : 'bg-[#27272a] text-[#a1a1aa]'
               }`}>
-                {todayPesagemOps.length}
+                {pesagemQueueOps.length}
               </span>
             </button>
 
@@ -579,9 +619,9 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
           </div>
 
           <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">
-            <span className="text-[#71717a]">Hoje na Pesagem:</span>
+            <span className="text-[#71717a]">Em estoque na Pesagem:</span>
             <span className="font-mono font-bold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-lg border border-purple-800/40 whitespace-nowrap">
-              {totalOsmsHoje.toLocaleString('pt-BR')} OP{totalOsmsHoje !== 1 ? 's' : ''}
+              {totalOsmsEstoque.toLocaleString('pt-BR')} OP{totalOsmsEstoque !== 1 ? 's' : ''}
             </span>
           </div>
         </div>
@@ -609,10 +649,10 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2.5">
                   <FileSpreadsheet className="w-5 h-5 text-purple-400 shrink-0" />
-                  <h1 className="text-base sm:text-xl font-bold text-white tracking-tight">Registro de OPs do Dia</h1>
+                  <h1 className="text-base sm:text-xl font-bold text-white tracking-tight">Estoque de OPs de Pesagem</h1>
                 </div>
                 <p className="text-xs text-[#a1a1aa] mt-1 line-clamp-2 sm:line-clamp-none">
-                  Registre as bateladas pesadas de granel para disponibilização à equipe de Manipulação.
+                  Registre as bateladas pesadas de granel para disponibilização à equipe de Manipulação. OPs pendentes ficam aqui até serem encaminhadas, mesmo de dias anteriores.
                 </p>
               </div>
 
@@ -642,12 +682,12 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                 <RefreshCw className="w-8 h-8 text-purple-500 animate-spin mb-3" />
                 <span className="text-xs font-bold uppercase tracking-wider">Carregando ordens de pesagem...</span>
               </div>
-            ) : todayPesagemOps.length === 0 ? (
+            ) : pesagemQueueOps.length === 0 ? (
               <div className="bg-[#18181b] border border-[#27272a] border-dashed rounded-2xl p-12 text-center flex flex-col items-center justify-center">
                 <div className="w-16 h-16 rounded-2xl bg-purple-950/40 border border-purple-800/40 flex items-center justify-center text-purple-400 mb-4">
                   <Scale className="w-8 h-8" />
                 </div>
-                <h3 className="text-base font-bold text-white mb-1">Nenhuma OP registrada hoje</h3>
+                <h3 className="text-base font-bold text-white mb-1">Nenhuma OP em estoque</h3>
                 <p className="text-xs text-[#a1a1aa] max-w-md mb-6">
                   Inicie os registros do turno clicando no botão abaixo para adicionar as bateladas pesadas.
                 </p>
@@ -671,9 +711,17 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {todayPesagemOps.map((op) => {
-                  const formattedTime = op.createdAt
-                    ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                {pesagemQueueOps.map((op) => {
+                  const opDate = op.createdAt ? new Date(op.createdAt) : null;
+                  const isFromToday = isOpFromToday(op);
+                  // Enquanto for de hoje, mostra só o horário (como antes). Uma
+                  // vez que vira "estoque" de dia anterior, mostra a data junto
+                  // — o líder precisa saber há quanto tempo essa OP está
+                  // parada, já que agora ela não some mais sozinha.
+                  const formattedTime = opDate
+                    ? isFromToday
+                      ? opDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                      : `${opDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${opDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
                     : '--:--';
 
                   return (
@@ -694,6 +742,12 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                             <span>Registrado</span>
                           </span>
+                          {!isFromToday && (
+                            <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-950/70 text-amber-300 border border-amber-800/50 flex items-center gap-1.5 shadow-sm">
+                              <Calendar className="w-3 h-3" />
+                              <span>Desde {opDate ? opDate.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0">
