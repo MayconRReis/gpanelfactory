@@ -23,6 +23,15 @@ interface AssignStockOpToLineModalProps {
   ops: ProductionOrder[];
   onAssignAndStart: (opId: string, lineId: string) => Promise<void>;
   onAssignToQueue: (opId: string, lineId: string) => Promise<void>;
+  /**
+   * Esconde o botão "Iniciar Agora", deixando só "Colocar na Fila". Usado
+   * para os reatores de Manipulação: o fluxo de início real de produção lá
+   * é outro (feito na própria tela de Manipulação, que cria um novo registro
+   * de OP), então esse modal — usado só para ORGANIZAR o cronograma dos
+   * reatores — deve apenas atribuir a OP à fila do reator, nunca "iniciar"
+   * direto por aqui.
+   */
+  hideStartNow?: boolean;
 }
 
 export function AssignStockOpToLineModal({
@@ -32,6 +41,7 @@ export function AssignStockOpToLineModal({
   ops,
   onAssignAndStart,
   onAssignToQueue,
+  hideStartNow,
 }: AssignStockOpToLineModalProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedOpId, setSelectedOpId] = useState<string | null>(null);
@@ -227,7 +237,7 @@ export function AssignStockOpToLineModal({
                             <span className="text-blue-400">
                               {isAlreadyInThisLine
                                 ? 'Já vinculada a esta linha'
-                                : `Vinculada a ${op.lineId === 'line-1' ? 'Envase 1' : op.lineId === 'line-2' ? 'Envase 2' : op.lineId === 'line-sleeve' ? 'Sleev' : op.lineId}`}
+                                : `Vinculada a ${op.lineId === 'line-1' ? 'Envase 1' : op.lineId === 'line-2' ? 'Envase 2' : op.lineId === 'line-sleeve' ? 'Sleev' : op.lineId === 'reator-1' ? 'Reator 1' : op.lineId === 'reator-2' ? 'Reator 2' : op.lineId === 'reator-3' ? 'Reator 3' : op.lineId}`}
                             </span>
                           </>
                         )}
@@ -251,18 +261,20 @@ export function AssignStockOpToLineModal({
                       <span>Colocar na Fila</span>
                     </Button>
 
-                    <Button
-                      size="sm"
-                      disabled={isProcessing}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleStartNow(op);
-                      }}
-                      className="h-8 px-3.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Iniciar Agora</span>
-                    </Button>
+                    {!hideStartNow && (
+                      <Button
+                        size="sm"
+                        disabled={isProcessing}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartNow(op);
+                        }}
+                        className="h-8 px-3.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Iniciar Agora</span>
+                      </Button>
+                    )}
                   </div>
                 </div>
               );

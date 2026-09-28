@@ -5,9 +5,11 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '../components/ui/select';
 import {
   FlaskConical,
   Play,
+  Pause,
   CheckCircle2,
   Clock,
   Boxes,
@@ -16,19 +18,24 @@ import {
   AlertCircle,
   Sun,
   Moon,
-  Layers,
-  ArrowRight,
   Sparkles,
-  Scale,
   History,
-  Check,
   BarChart3,
-  TrendingUp,
-  FileSpreadsheet,
   XCircle
 } from 'lucide-react';
-import { getAllOPs, createOP, finishOP, deleteOP } from '../services/db';
-import { ProductionOrder } from '../types';
+import {
+  getAllOPs,
+  createOP,
+  startOP,
+  pauseOP,
+  resumeOP,
+  finishOP,
+  deleteOP,
+  getLines,
+  getPauseReasons,
+  DEFAULT_PAUSE_REASONS,
+} from '../services/db';
+import { ProductionOrder, ProductionLine, PauseReason } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
 
@@ -39,16 +46,26 @@ interface ManipulacaoScreenProps {
   hideDashboardTabs?: boolean;
 }
 
+// Os 3 reatores físicos da Manipulação — mesmas linhas ('reator-1'/'reator-2'/
+// 'reator-3') criadas pela migração SQL e usadas pelo Cronograma de
+// Manipulação do Coordenador. Serve de fallback caso a migração ainda não
+// tenha sido rodada (ou getLines() falhe), pra tela nunca ficar sem nenhum
+// reator pra mostrar.
+const DEFAULT_REACTOR_LINES: ProductionLine[] = [
+  { id: 'reator-1', name: 'Reator 1', status: 'idle', currentOpId: null },
+  { id: 'reator-2', name: 'Reator 2', status: 'idle', currentOpId: null },
+  { id: 'reator-3', name: 'Reator 3', status: 'idle', currentOpId: null },
+];
+
 export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false }: ManipulacaoScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [ops, setOps] = useState<ProductionOrder[]>([]);
+  const [lines, setLines] = useState<ProductionLine[]>(DEFAULT_REACTOR_LINES);
+  const [pauseReasonsList, setPauseReasonsList] = useState<PauseReason[]>(DEFAULT_PAUSE_REASONS);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
-
-  // Estado para inputs de Kg manipulados em andamento: map de opId -> string
-  const [kgInputs, setKgInputs] = useState<Record<string, string>>({});
 
   // Sub-abas de visualização: Operação em Tempo Real vs Dashboard de Produção (Diária & Semanal)
   const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('operacao');
@@ -61,6 +78,12 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     }
   }, [hideDashboardTabs, activeViewTab]);
 
+  // Modal de Pausa
+  const [pausingOp, setPausingOp] = useState<ProductionOrder | null>(null);
+  const [pauseReason, setPauseReason] = useState('');
+  const [pauseObs, setPauseObs] = useState('');
+  const [isPauseSubmitting, setIsPauseSubmitting] = useState(false);
+
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
   const [cancellingOp, setCancellingOp] = useState<ProductionOrder | null>(null);
@@ -69,10 +92,14 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   const [finalKg, setFinalKg] = useState<string>('');
   const [isFinishingSubmitting, setIsFinishingSubmitting] = useState(false);
 
-  // Toast
-  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  // opId da ação (iniciar/pausar/retomar) em andamento agora — só pra
+  // desabilitar o botão clicado e evitar duplo-clique, nunca a tela toda.
+  const [actionBusyOpId, setActionBusyOpId] = useState<string | null>(null);
 
-  const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
+  // Toast
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 3500);
   };
@@ -107,12 +134,14 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
         setLoading(true);
       }
 
-      const allOps = await getAllOPs();
+      const [allOps, allLines] = await Promise.all([getAllOPs(), getLines()]);
 
       // Uma chamada mais nova já assumiu — descarta esta resposta desatualizada.
       if (requestId !== fetchRequestIdRef.current) return;
 
       setOps(allOps);
+      const reactorLinesFromDb = allLines.filter(l => l.id.startsWith('reator-'));
+      if (reactorLinesFromDb.length > 0) setLines(reactorLinesFromDb);
     } catch (err) {
       console.error('Erro ao carregar dados de manipulação:', err);
       showToast('Erro ao carregar dados.', 'error');
@@ -123,6 +152,13 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       }
     }
   }, [profile]);
+
+  // Motivos de pausa (mesma tabela/fallback usados no Envase).
+  useEffect(() => {
+    getPauseReasons()
+      .then(list => { if (list && list.length > 0) setPauseReasonsList(list); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchDataRef.current = fetchData;
@@ -155,16 +191,20 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     };
   }, [profile]);
 
-  // Separar as categorias de OSMs:
-  // 1. OSMs criadas pela Pesagem (setor='Pesagem', status='completed')
-  // 2. OSMs de Manipulação (setor='Manipulação') em andamento (status='in_progress')
-  // 3. OSMs de Manipulação finalizadas (status='completed')
+  // Linhas dos reatores já ordenadas por nome (vem de `lines`, que já cai
+  // pro fallback DEFAULT_REACTOR_LINES se a migração ainda não rodou).
+  const reactorLines = useMemo(
+    () => [...lines].sort((a, b) => a.name.localeCompare(b.name)),
+    [lines]
+  );
 
-  const manipulacaoOps = useMemo(() => {
-    return ops.filter(op => op.setor === 'Manipulação');
-  }, [ops]);
+  // Todas as OPs de Manipulação (o "espaço de trabalho" real desta tela —
+  // uma por OSM de Pesagem organizada num reator, ver materialização abaixo).
+  const manipulacaoOps = useMemo(() => ops.filter(op => op.setor === 'Manipulação'), [ops]);
 
-  // Conjunto de números de OSM ou lotes que já foram iniciados/manipulados
+  // Conjunto de números de OSM ou lotes que já viraram uma OP de Manipulação
+  // (em qualquer status) — é isso que tira uma OSM da fila do Cronograma e
+  // desta tela: ela só volta a ficar "livre" se essa OP for excluída.
   const manipulatedOsmNumbers = useMemo(() => {
     const set = new Set<string>();
     manipulacaoOps.forEach(op => {
@@ -174,37 +214,112 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     return set;
   }, [manipulacaoOps]);
 
-  // OSMs disponíveis da Pesagem (ainda não iniciadas na Manipulação)
-  const availablePesagemOps = useMemo(() => {
+  // --------------------------------------------------------------------
+  // MATERIALIZAÇÃO: o Cronograma de Manipulação (tela do Coordenador) só
+  // organiza OSMs de Pesagem dentro das colunas dos 3 reatores (mexendo no
+  // `lineId`/`scheduledDate` da própria OSM) — ele nunca cria a OP de
+  // Manipulação em si. É aqui, na tela de operação, que cada OSM organizada
+  // num reator e ainda não manipulada vira uma OP de Manipulação real, já
+  // com status 'pending' (fila do reator), na ordem que o Coordenador
+  // definiu (mesmo `sequence`). A partir daí ela segue o mesmo ciclo do
+  // Envase: iniciar → pausar/retomar → finalizar, com o próximo item da
+  // fila ficando disponível sozinho assim que o atual é finalizado.
+  // --------------------------------------------------------------------
+  const materializationCandidates = useMemo(() => {
     return ops.filter(op => {
-      // OPs importadas do histórico (id "imp-...") nunca devem aparecer aqui:
-      // a importação leu a aba de Pesagem e a aba de Manipulação da planilha
-      // separadamente (fluxos com granularidade diferente, não 1 pra 1), então
-      // o número/lote de uma OSM de Pesagem histórica quase nunca bate com o
-      // de uma OP de Manipulação histórica — mesmo com as duas etapas já
-      // concluídas de verdade no histórico, essa tela as tratava como um
-      // backlog real "aguardando manipulação", que nunca existiu.
       if (op.id && op.id.startsWith('imp-')) return false;
-
-      const isPesagemCompleted = (op.setor === 'Pesagem' || op.tipoDocumento === 'OSM') && op.status === 'completed' && op.setor !== 'Manipulação';
+      if (!op.lineId || !reactorLines.some(r => r.id === op.lineId)) return false;
+      const isPesagemCompleted = (op.setor === 'Pesagem' || (!op.setor && op.tipoDocumento === 'OSM')) && op.status === 'completed';
       if (!isPesagemCompleted) return false;
-      // Não deve ter correspondente na Manipulação
-      return !manipulatedOsmNumbers.has(op.number) && !manipulatedOsmNumbers.has(op.lote || '');
-    }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [ops, manipulatedOsmNumbers]);
+      if (manipulatedOsmNumbers.has(op.number) || manipulatedOsmNumbers.has(op.lote || '')) return false;
+      return true;
+    });
+  }, [ops, reactorLines, manipulatedOsmNumbers]);
 
-  // OSMs de Manipulação em Andamento
-  const inProgressManipulacaoOps = useMemo(() => {
-    return manipulacaoOps
-      .filter(op => op.status === 'in_progress' || op.status === 'pending')
-      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [manipulacaoOps]);
+  // Evita materializar a mesma OSM duas vezes por causa de fetches
+  // concorrentes (realtime + polling de 15s) enquanto o createOP ainda não
+  // voltou e a lista local ainda não reflete a nova OP de Manipulação.
+  const materializingRef = useRef<Set<string>>(new Set());
 
-  // OSMs de Manipulação Concluídas Hoje
+  useEffect(() => {
+    if (materializationCandidates.length === 0) return;
+    const toCreate = materializationCandidates.filter(op => !materializingRef.current.has(op.id));
+    if (toCreate.length === 0) return;
+
+    toCreate.forEach(op => materializingRef.current.add(op.id));
+
+    (async () => {
+      let anyCreated = false;
+      for (const pesagemOp of toCreate) {
+        try {
+          // A OSM de Pesagem já registra plannedQuantity/producedQuantity em
+          // Kg — não é uma contagem de bateladas, então NÃO multiplicar por
+          // 1000 aqui (isso já inflou o Kg planejado da Manipulação antes).
+          const plannedKg = Number(pesagemOp.producedQuantity) || Number(pesagemOp.plannedQuantity) || 0;
+          await createOP({
+            tipoDocumento: 'OSM',
+            setor: 'Manipulação',
+            unidade: 'Kg',
+            number: pesagemOp.number,
+            product: pesagemOp.product,
+            lote: pesagemOp.lote,
+            plannedQuantity: plannedKg,
+            producedQuantity: 0,
+            status: 'pending',
+            priority: 'Normal',
+            lineId: pesagemOp.lineId as string,
+            // Mesma ordem que o Coordenador já definiu ao organizar a fila
+            // do reator no Cronograma (arrastar / setas ▲▼).
+            sequence: pesagemOp.sequence || 0,
+            scheduledDate: pesagemOp.scheduledDate || new Date().toISOString().split('T')[0],
+            // Propaga a indústria da OSM de origem (Ybera/Carvalho/Macpaul).
+            industria: pesagemOp.industria,
+          });
+          anyCreated = true;
+        } catch (err) {
+          console.error('Erro ao organizar fila de manipulação para a OSM', pesagemOp.number, err);
+        } finally {
+          materializingRef.current.delete(pesagemOp.id);
+        }
+      }
+      if (anyCreated) await fetchDataRef.current?.(true);
+    })();
+  }, [materializationCandidates]);
+
+  // --------------------------------------------------------------------
+  // ESTADO OPERACIONAL POR REATOR — mesmo padrão do Envase (LeaderScreen):
+  // OP ativa = em andamento, senão pausada, senão a próxima pendente por
+  // sequence; fila = as demais pendentes.
+  // --------------------------------------------------------------------
+  const reactorState = useMemo(() => {
+    const map: Record<string, { activeOp: ProductionOrder | null; queuedOps: ProductionOrder[] }> = {};
+    reactorLines.forEach(reactor => {
+      const reactorOps = manipulacaoOps.filter(op => op.lineId === reactor.id && op.status !== 'completed');
+      const inProgress = reactorOps.find(o => o.status === 'in_progress');
+      const paused = !inProgress ? reactorOps.find(o => o.status === 'paused') : undefined;
+      const pendingSorted = reactorOps
+        .filter(o => o.status === 'pending')
+        .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+      const activeOp = inProgress || paused || pendingSorted[0] || null;
+      const queuedOps = pendingSorted.filter(o => o.id !== activeOp?.id);
+      map[reactor.id] = { activeOp, queuedOps };
+    });
+    return map;
+  }, [reactorLines, manipulacaoOps]);
+
+  // OPs de Manipulação em andamento/pausadas em reatores que não existem
+  // mais na lista atual de `lines` (ex.: linha renomeada/removida) — só pra
+  // não sumirem silenciosamente da tela.
+  const orphanOps = useMemo(
+    () => manipulacaoOps.filter(op => op.status !== 'completed' && (!op.lineId || !reactorLines.some(r => r.id === op.lineId))),
+    [manipulacaoOps, reactorLines]
+  );
+
+  // OSMs de Manipulação Concluídas
   const completedManipulacaoOps = useMemo(() => {
     return manipulacaoOps
       .filter(op => op.status === 'completed')
-      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime());
   }, [manipulacaoOps]);
 
   // Data de hoje e total de Kg produzidos hoje na Manipulação
@@ -219,70 +334,75 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       .reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
   }, [manipulacaoOps, todayStr]);
 
-  // 1. Iniciar Manipulação a partir de uma OSM da Pesagem
-  const [startingOpId, setStartingOpId] = useState<string | null>(null);
+  const emAndamentoCount = useMemo(
+    () => manipulacaoOps.filter(op => op.status !== 'completed').length,
+    [manipulacaoOps]
+  );
 
-  const handleStartManipulacao = async (pesagemOp: ProductionOrder) => {
-    if (!profile) return;
-    setStartingOpId(pesagemOp.id);
-
+  // --------------------------------------------------------------------
+  // AÇÕES OPERACIONAIS — mesmas funções do Envase (startOP/pauseOP/
+  // resumeOP/finishOP), só que operando sobre a OP de Manipulação do
+  // reator em vez da OP de Envase de uma linha.
+  // --------------------------------------------------------------------
+  const handleStart = async (op: ProductionOrder) => {
+    if (!profile || !op.lineId) return;
+    setActionBusyOpId(op.id);
     try {
-      // A OSM de Pesagem já registra plannedQuantity/producedQuantity em Kg
-      // (ver PesagemScreen: "A quantidade deve ser maior que zero (Kg)" e
-      // unidade: 'Kg') — não é uma contagem de bateladas, então NÃO deve ser
-      // multiplicada por 1000 aqui (isso inflava o Kg planejado da Manipulação
-      // em ~1000x).
-      const plannedKg = Number(pesagemOp.producedQuantity) || Number(pesagemOp.plannedQuantity) || 0;
-
-      // Cria OSM de Manipulação já com status in_progress e leaderId — sem updateOP
-      await createOP({
-        tipoDocumento: 'OSM',
-        setor: 'Manipulação',
-        unidade: 'Kg',
-        number: pesagemOp.number,
-        product: pesagemOp.product,
-        lote: pesagemOp.lote,
-        plannedQuantity: plannedKg,
-        producedQuantity: 0,
-        status: 'in_progress',
-        leaderId: profile.uid,
-        priority: 'Normal',
-        lineId: 'area-manipulacao',
-        scheduledShift: detectedShift,
-        scheduledDate: new Date().toISOString().split('T')[0],
-        // Propaga a indústria da OSM de origem (Ybera/Carvalho/Macpaul) —
-        // sem isso, a OSM de Manipulação perdia a marcação de indústria
-        // assim que a manipulação era iniciada, e o selo colorido por
-        // indústria desaparecia do card em andamento e do histórico.
-        industria: pesagemOp.industria,
-      });
-
-      showToast(`Manipulação da OP ${pesagemOp.number} iniciada com sucesso!`, 'success');
+      await startOP(op.id, op.lineId, profile.uid);
       await fetchData(true);
     } catch (err) {
       console.error('Erro ao iniciar manipulação:', err);
       showToast('Erro ao iniciar manipulação.', 'error');
     } finally {
-      setStartingOpId(null);
+      setActionBusyOpId(null);
     }
   };
 
-  // 2. Abrir modal para finalizar OP com seleção de turno
+  const handleOpenPauseModal = (op: ProductionOrder) => {
+    setPausingOp(op);
+    setPauseReason('');
+    setPauseObs('');
+  };
+
+  const handleConfirmPause = async () => {
+    if (!profile || !pausingOp || !pausingOp.lineId || !pauseReason) return;
+    setIsPauseSubmitting(true);
+    try {
+      await pauseOP(pausingOp.id, pausingOp.lineId, profile.uid, pauseReason, pauseObs);
+      showToast(`OP ${pausingOp.number} pausada.`);
+      setPausingOp(null);
+      await fetchData(true);
+    } catch (err) {
+      console.error('Erro ao pausar manipulação:', err);
+      showToast('Erro ao pausar esta OP.', 'error');
+    } finally {
+      setIsPauseSubmitting(false);
+    }
+  };
+
+  const handleResume = async (op: ProductionOrder) => {
+    if (!profile || !op.lineId) return;
+    setActionBusyOpId(op.id);
+    try {
+      await resumeOP(op.id, op.lineId, profile.uid);
+      await fetchData(true);
+    } catch (err) {
+      console.error('Erro ao retomar manipulação:', err);
+      showToast('Erro ao retomar esta OP.', 'error');
+    } finally {
+      setActionBusyOpId(null);
+    }
+  };
+
   const handleOpenFinishModal = (op: ProductionOrder) => {
-    // Não há mais "quantidade planejada" para Manipulação (isso ficou zerado
-    // desde que a Pesagem parou de informar Kg) — não usar `plannedQuantity`
-    // como valor-padrão aqui, ou toda finalização viria pré-preenchida com um
-    // valor arbitrário (ex.: 1000) em vez de forçar o líder a digitar o Kg real.
-    const inputVal = kgInputs[op.id] || '';
     setFinishingOp(op);
-    setFinalKg(inputVal);
+    setFinalKg('');
     setSelectedShift(detectedShift);
   };
 
-  // 3. Confirmar finalização da OP
   const handleConfirmFinish = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profile || !finishingOp) return;
+    if (!profile || !finishingOp || !finishingOp.lineId) return;
 
     const kgNum = parseFloat(finalKg);
     if (isNaN(kgNum) || kgNum <= 0) {
@@ -292,8 +412,10 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
 
     setIsFinishingSubmitting(true);
     try {
-      // Passa producedQuantity direto para finishOP — grava tudo em uma operação
-      await finishOP(finishingOp.id, 'area-manipulacao', profile.uid, selectedShift, kgNum);
+      // Usa o reator real da OP (lineId) — assim que finalizada, ela some
+      // desta lista de "não concluídas" e a próxima da fila do MESMO reator
+      // vira a nova OP ativa automaticamente (ver reactorState acima).
+      await finishOP(finishingOp.id, finishingOp.lineId, profile.uid, selectedShift, kgNum);
 
       showToast(`OP ${finishingOp.number} finalizada no turno da ${selectedShift}!`, 'success');
       setFinishingOp(null);
@@ -306,17 +428,17 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     }
   };
 
-  // Cancelar OSM de Manipulação iniciada por engano — como ela nasce
-  // diretamente "em andamento" a partir da OSM de Pesagem (sem nunca ter
-  // existido um estado "pendente" pra voltar), cancelar aqui significa
-  // excluir a OSM recém-criada. A OSM de Pesagem de origem não é afetada —
-  // ela volta a aparecer em "OPs Disponíveis" pra iniciar a manipulação de novo.
+  // Cancelar uma manipulação já iniciada por engano — exclui a OP de
+  // Manipulação. Como a OSM de Pesagem de origem continua organizada no
+  // mesmo reator pelo Cronograma, ela é remontada automaticamente como uma
+  // nova OP 'pending' (materialização acima) — ou seja, volta pra fila do
+  // reator pronta pra ser iniciada de novo, em vez de desaparecer.
   const handleConfirmCancel = async () => {
     if (!cancellingOp) return;
     setIsCancellingSubmitting(true);
     try {
       await deleteOP(cancellingOp.id);
-      showToast(`Início da OP ${cancellingOp.number} cancelado.`, 'info');
+      showToast(`OP ${cancellingOp.number} cancelada — voltou para a fila do reator.`);
       setCancellingOp(null);
       await fetchData(true);
     } catch (err) {
@@ -325,6 +447,152 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     } finally {
       setIsCancellingSubmitting(false);
     }
+  };
+
+  // Card da OP ativa de um reator — Iniciar / Pausar / Retomar / Finalizar,
+  // no mesmo estilo visual usado antes (bloco de observação/horário etc.).
+  const renderActiveCard = (op: ProductionOrder) => {
+    const isBusy = actionBusyOpId === op.id;
+    const formattedTime = op.startedAt
+      ? new Date(op.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : op.createdAt
+      ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : '--:--';
+
+    return (
+      <div
+        className={`rounded-2xl p-4 flex flex-col gap-3 transition-all border-2 ${
+          op.status === 'in_progress'
+            ? 'bg-[#18181b] border-cyan-500/50 shadow-lg shadow-cyan-950/20'
+            : op.status === 'paused'
+            ? 'bg-[#18181b] border-amber-500/50 shadow-lg shadow-amber-950/20'
+            : 'bg-[#18181b] border-[#27272a]'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {op.industria && (
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
+                {op.industria}
+              </span>
+            )}
+            {op.status === 'in_progress' ? (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-cyan-950/90 text-cyan-300 border border-cyan-800/60 flex items-center gap-1 shadow-sm">
+                <FlaskConical className="w-3 h-3 text-cyan-400 animate-pulse" />
+                <span>Em Processo</span>
+              </span>
+            ) : op.status === 'paused' ? (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-amber-950/90 text-amber-300 border border-amber-800/60 flex items-center gap-1 shadow-sm">
+                <Pause className="w-3 h-3 text-amber-400" />
+                <span>Pausada</span>
+              </span>
+            ) : (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-[#1a1a22] text-[#a1a1aa] border border-[#2c2c3c] flex items-center gap-1 shadow-sm">
+                <Clock className="w-3 h-3" />
+                <span>Pronta pra Iniciar</span>
+              </span>
+            )}
+          </div>
+          <Button
+            onClick={() => setCancellingOp(op)}
+            title="Cancelar"
+            className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-rose-950/30 text-rose-400/70 hover:text-rose-300 border border-rose-500/20 flex items-center justify-center transition-all p-0"
+          >
+            <XCircle className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="font-mono text-xl font-black text-white tracking-tight">{op.number}</h3>
+          {op.lote ? (
+            <span className="text-[11px] font-mono font-bold text-cyan-200 bg-cyan-950/80 border border-cyan-800/60 px-2 py-0.5 rounded-lg shadow-sm">
+              Lote: {op.lote}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="space-y-0.5">
+          <div className="text-[11px] text-[#a1a1aa] font-medium">Nome:</div>
+          <div className="text-xs font-bold text-white uppercase tracking-tight leading-snug">{op.product}</div>
+        </div>
+
+        <div className="bg-[#121215] border border-[#27272a]/80 rounded-xl p-2.5 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-300 shrink-0">
+              <Boxes className="w-3.5 h-3.5" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[10px] text-[#a1a1aa] font-medium leading-none">Observação</div>
+              <div className={`text-[11px] font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
+                {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
+              </div>
+            </div>
+          </div>
+          {op.status !== 'pending' && (
+            <div className="text-right shrink-0">
+              <div className="text-[10px] text-[#a1a1aa] font-medium leading-none">Início</div>
+              <div className="font-mono text-[11px] font-bold text-white flex items-center gap-1 justify-end mt-1">
+                <Clock className="w-3 h-3 text-[#71717a]" />
+                <span>{formattedTime}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {op.status === 'pending' && (
+            <Button
+              onClick={() => handleStart(op)}
+              disabled={isBusy}
+              className="flex-1 h-10 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
+            >
+              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+              <span>Iniciar Manipulação</span>
+            </Button>
+          )}
+          {op.status === 'in_progress' && (
+            <>
+              <Button
+                onClick={() => handleOpenPauseModal(op)}
+                disabled={isBusy}
+                className="h-10 px-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-md shadow-amber-950/40 flex items-center justify-center gap-1.5 transition-all"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                <span>Pausar</span>
+              </Button>
+              <Button
+                onClick={() => handleOpenFinishModal(op)}
+                disabled={isBusy}
+                className="flex-1 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Finalizar</span>
+              </Button>
+            </>
+          )}
+          {op.status === 'paused' && (
+            <>
+              <Button
+                onClick={() => handleResume(op)}
+                disabled={isBusy}
+                className="h-10 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-1.5 transition-all"
+              >
+                {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                <span>Retomar</span>
+              </Button>
+              <Button
+                onClick={() => handleOpenFinishModal(op)}
+                disabled={isBusy}
+                className="flex-1 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Finalizar</span>
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -449,7 +717,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
                   ? 'bg-cyan-800 text-white'
                   : 'bg-[#27272a] text-[#a1a1aa]'
               }`}>
-                {inProgressManipulacaoOps.length + availablePesagemOps.length}
+                {emAndamentoCount}
               </span>
             </button>
 
@@ -495,330 +763,233 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
           />
         ) : (
           <>
-            {/* SEÇÃO 1: OPS EM ANDAMENTO (DA MANIPULAÇÃO) */}
-            {inProgressManipulacaoOps.length > 0 && (
-          <section className="space-y-4">
-            <div className="flex items-center justify-between border-b border-[#27272a] pb-3">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
-                <h2 className="text-lg font-bold text-white tracking-tight">
-                  OPs em Andamento ({inProgressManipulacaoOps.length})
-                </h2>
+            {/* OS 3 REATORES — cada um com sua OP ativa (iniciar/pausar/
+                finalizar) e a fila do que o Coordenador já organizou pelo
+                Cronograma. Qualquer líder de plantão mexe em qualquer um. */}
+            <section className="space-y-4">
+              <div className="flex items-center justify-between border-b border-[#27272a] pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <h2 className="text-lg font-bold text-white tracking-tight">Reatores</h2>
+                </div>
+                <span className="text-xs text-cyan-400 font-medium">Processo de Mistura / Homogeneização</span>
               </div>
-              <span className="text-xs text-cyan-400 font-medium">Processo de Mistura / Homogeneização</span>
-            </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {inProgressManipulacaoOps.map((op) => {
-                const currentKgValue = kgInputs[op.id] !== undefined ? kgInputs[op.id] : '';
-                const formattedTime = op.startedAt
-                  ? new Date(op.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-                  : op.createdAt
-                  ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-                  : '--:--';
-
-                return (
-                  <div
-                    key={op.id}
-                    className="bg-[#18181b] border-2 border-cyan-500/50 shadow-lg shadow-cyan-950/20 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all"
-                  >
-                    {/* Linha 1: Badges (indústria + status) à esquerda */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {op.industria && (
-                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
-                            {op.industria}
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-12 text-[#a1a1aa]">
+                  <RefreshCw className="w-6 h-6 text-cyan-500 animate-spin mb-2" />
+                  <span className="text-xs">Carregando reatores...</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+                  {reactorLines.map((reactor) => {
+                    const { activeOp, queuedOps } = reactorState[reactor.id] || { activeOp: null, queuedOps: [] };
+                    return (
+                      <div key={reactor.id} className="bg-[#121215] border border-[#27272a] rounded-2xl p-3.5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <FlaskConical className="w-4 h-4 text-cyan-400" />
+                            <h3 className="text-sm font-black text-white uppercase tracking-wide">{reactor.name}</h3>
+                          </div>
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-cyan-950/70 text-cyan-300 border border-cyan-800/40">
+                            {queuedOps.length + (activeOp ? 1 : 0)}
                           </span>
-                        )}
-                        <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-cyan-950/90 text-cyan-300 border border-cyan-800/60 flex items-center gap-1.5 shadow-sm">
-                          <FlaskConical className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                          <span>Em Processo</span>
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Linha 2: Número da OP (esquerda) + Lote (direita) */}
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="font-mono text-2xl font-black text-white tracking-tight">
-                        {op.number}
-                      </h3>
-                      {op.lote ? (
-                        <span className="text-xs font-mono font-bold text-cyan-200 bg-cyan-950/80 border border-cyan-800/60 px-2.5 py-1 rounded-lg shadow-sm">
-                          Lote: {op.lote}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {/* Linha 3: Nome / Produto */}
-                    <div className="space-y-1">
-                      <div className="text-xs text-[#a1a1aa] font-medium">Nome:</div>
-                      <div className="text-sm font-bold text-white uppercase tracking-tight leading-snug">
-                        {op.product}
-                      </div>
-                    </div>
-
-                    {/* Bloco de Observação e Horário */}
-                    <div className="bg-[#121215] border border-[#27272a]/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-300 shrink-0 shadow-sm">
-                          <Boxes className="w-4 h-4" />
                         </div>
-                        <div className="min-w-0">
-                          <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Observação</div>
-                          <div className={`text-xs font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
-                            {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
+
+                        {!activeOp ? (
+                          <p className="text-[11px] text-[#52525b] text-center py-8">
+                            Reator livre — nenhuma OSM organizada aqui no Cronograma.
+                          </p>
+                        ) : (
+                          renderActiveCard(activeOp)
+                        )}
+
+                        {queuedOps.length > 0 && (
+                          <div className="space-y-1.5 pt-1">
+                            <p className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wide">
+                              Próximas na fila ({queuedOps.length})
+                            </p>
+                            {queuedOps.map((op) => (
+                              <div
+                                key={op.id}
+                                className="flex items-center justify-between gap-2 bg-[#0e0e12] border border-[#1f1f26] rounded-lg px-2.5 py-1.5"
+                              >
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="font-mono font-bold text-[11px] text-white shrink-0">{op.number}</span>
+                                  <span className="text-[10px] text-[#71717a] truncate">{op.product}</span>
+                                </div>
+                                {op.industria && (
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border shrink-0 ${getIndustriaBadgeClass(op.industria)}`}>
+                                    {op.industria}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {orphanOps.length > 0 && (
+                <div className="pt-2 space-y-2">
+                  <p className="text-[11px] text-[#71717a]">
+                    OPs de Manipulação sem reator válido (linha renomeada/removida):
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {orphanOps.map((op) => renderActiveCard(op))}
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* HISTÓRICO DE OPS FINALIZADAS NA MANIPULAÇÃO */}
+            {completedManipulacaoOps.length > 0 && (
+              <section className="space-y-4 pt-4 border-t border-[#27272a]">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <History className="w-5 h-5 text-emerald-400" />
+                    <h3 className="text-base font-bold text-white">OPs Finalizadas na Manipulação</h3>
+                  </div>
+                  <span className="text-xs text-[#a1a1aa] font-mono">
+                    {completedManipulacaoOps.length} concluídas
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {completedManipulacaoOps.map((op) => {
+                    const finishedKg = Number(op.producedQuantity) || 0;
+                    const shift = op.finishedShift || op.scheduledShift || 'Manhã';
+                    const reactorName = reactorLines.find(r => r.id === op.lineId)?.name;
+
+                    return (
+                      <div
+                        key={op.id}
+                        className="bg-[#141418] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono font-bold text-sm text-white">{op.number}</span>
+                            <span
+                              className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${
+                                shift === 'Manhã'
+                                  ? 'bg-blue-950/60 text-blue-300 border-blue-800/40'
+                                  : 'bg-amber-950/60 text-amber-300 border-amber-800/40'
+                              }`}
+                            >
+                              {shift}
+                            </span>
+                            {op.industria && (
+                              <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>
+                                {op.industria}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-[#a1a1aa] truncate max-w-[180px] mt-0.5">
+                            {op.product}
+                          </div>
+                          {reactorName && (
+                            <div className="text-[10px] text-cyan-500/80 mt-0.5">{reactorName}</div>
+                          )}
+                        </div>
+
+                        <div className="text-right">
+                          <div className="font-mono font-black text-sm text-emerald-400">
+                            {finishedKg.toLocaleString('pt-BR')} Kg
+                          </div>
+                          <div className="text-[10px] text-emerald-500 flex items-center gap-1 justify-end font-semibold">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Concluído</span>
                           </div>
                         </div>
                       </div>
-
-                      <div className="text-right shrink-0">
-                        <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Horário</div>
-                        <div className="font-mono text-xs font-bold text-white flex items-center gap-1 justify-end mt-1">
-                          <Clock className="w-3.5 h-3.5 text-[#71717a]" />
-                          <span>{formattedTime}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Entrada de Kg manipulados */}
-                    <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3.5 space-y-2">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-[#d4d4d8] font-semibold">Quantidade Manipulada (Kg):</span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <Input
-                          type="number"
-                          step="10"
-                          min="1"
-                          value={currentKgValue}
-                          onChange={(e) =>
-                            setKgInputs((prev) => ({
-                              ...prev,
-                              [op.id]: e.target.value,
-                            }))
-                          }
-                          className="bg-[#18181b] border-[#3f3f46] text-white font-mono font-bold text-base h-10 rounded-xl focus:border-cyan-500"
-                        />
-                        <span className="text-xs font-black text-cyan-400 px-2">Kg</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <Button
-                        onClick={() => handleOpenFinishModal(op)}
-                        className="flex-1 h-11 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>Finalizar OP</span>
-                      </Button>
-                      <Button
-                        onClick={() => setCancellingOp(op)}
-                        title="Cancelar (iniciada por engano)"
-                        className="h-11 w-11 shrink-0 rounded-xl bg-[#18181b] hover:bg-rose-950/30 text-rose-400/80 hover:text-rose-300 border border-rose-500/30 flex items-center justify-center transition-all"
-                      >
-                        <XCircle className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {/* SEÇÃO 2: OPS DISPONÍVEIS (DA PESAGEM) */}
-        <section className="space-y-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-[#27272a] pb-3">
-            <div className="min-w-0 flex-1">
-              <h2 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                <Scale className="w-5 h-5 text-amber-400 shrink-0" />
-                <span>OPs Disponíveis da Pesagem</span>
-              </h2>
-              <p className="text-xs text-[#a1a1aa] mt-0.5">
-                Ordens pesadas aguardando início da manipulação e mistura.
-              </p>
-            </div>
-
-            <span className="text-xs text-amber-400 font-mono font-semibold bg-amber-950/60 border border-amber-800/40 px-2.5 py-1 rounded-lg shrink-0 self-start sm:self-auto whitespace-nowrap">
-              {availablePesagemOps.length} disponíveis
-            </span>
-          </div>
-
-          {loading ? (
-            <div className="flex flex-col items-center justify-center py-12 text-[#a1a1aa]">
-              <RefreshCw className="w-6 h-6 text-cyan-500 animate-spin mb-2" />
-              <span className="text-xs">Buscando ordens da pesagem...</span>
-            </div>
-          ) : availablePesagemOps.length === 0 ? (
-            <div className="bg-[#18181b] border border-[#27272a] border-dashed rounded-2xl p-8 text-center flex flex-col items-center justify-center">
-              <div className="w-12 h-12 rounded-xl bg-amber-950/30 border border-amber-800/30 flex items-center justify-center text-amber-400 mb-3">
-                <Check className="w-6 h-6" />
-              </div>
-              <h4 className="text-sm font-bold text-white mb-1">Nenhuma OP aguardando manipulação</h4>
-              <p className="text-xs text-[#a1a1aa] max-w-sm">
-                Assim que o líder de Pesagem registrar uma nova OP, ela aparecerá aqui automaticamente.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {availablePesagemOps.map((op) => {
-                const isStarting = startingOpId === op.id;
-                const formattedTime = op.createdAt
-                  ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-                  : '--:--';
-
-                return (
-                  <div
-                    key={op.id}
-                    className="bg-[#18181b] border border-[#27272a] hover:border-amber-700/50 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all hover:shadow-lg hover:shadow-amber-950/10"
-                  >
-                    {/* Linha 1: Badges à esquerda e à direita (indústria + status) */}
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {op.industria && (
-                          <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg font-sans shadow-sm border ${getIndustriaBadgeClass(op.industria)}`}>
-                            {op.industria}
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-950/80 text-amber-300 border border-amber-800/50 flex items-center gap-1 shrink-0 shadow-sm">
-                        <Clock className="w-3 h-3 text-amber-400" />
-                        <span>Aguardando Manipulação</span>
-                      </span>
-                    </div>
-
-                    {/* Linha 2: Número da OSM (esquerda) + Lote (direita) */}
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="font-mono text-2xl font-black text-white tracking-tight">
-                        {op.number}
-                      </h3>
-                      {op.lote ? (
-                        <span className="text-xs font-mono font-bold text-amber-200 bg-amber-950/80 border border-amber-800/60 px-2.5 py-1 rounded-lg shadow-sm">
-                          Lote: {op.lote}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {/* Linha 3: Nome / Produto */}
-                    <div className="space-y-1">
-                      <div className="text-xs text-[#a1a1aa] font-medium">Nome:</div>
-                      <div className="text-sm font-bold text-white uppercase tracking-tight leading-snug">
-                        {op.product}
-                      </div>
-                    </div>
-
-                    {/* Linha 4: Bloco de Observação e Horário */}
-                    <div className="bg-[#121215] border border-[#27272a]/80 rounded-2xl p-3.5 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="w-8 h-8 rounded-xl bg-amber-950/80 border border-amber-800/60 flex items-center justify-center text-amber-300 shrink-0 shadow-sm">
-                          <Boxes className="w-4 h-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Observação</div>
-                          <div className={`text-xs font-bold truncate mt-1 ${(op.granel || op.observation) ? 'text-white' : 'text-[#71717a]'}`}>
-                            {(op.granel && op.granel !== op.number) ? op.granel : (op.observation || 'Sem observação')}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="text-right shrink-0">
-                        <div className="text-[11px] text-[#a1a1aa] font-medium leading-none">Horário</div>
-                        <div className="font-mono text-xs font-bold text-white flex items-center gap-1 justify-end mt-1">
-                          <Clock className="w-3.5 h-3.5 text-[#71717a]" />
-                          <span>{formattedTime}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <Button
-                      onClick={() => handleStartManipulacao(op)}
-                      disabled={isStarting}
-                      className="h-10 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-1.5 transition-all transform active:scale-95"
-                    >
-                      {isStarting ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Iniciando...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>Iniciar Manipulação</span>
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* SEÇÃO 3: HISTÓRICO DE OPS FINALIZADAS NA MANIPULAÇÃO */}
-        {completedManipulacaoOps.length > 0 && (
-          <section className="space-y-4 pt-4 border-t border-[#27272a]">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <History className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-white">OPs Finalizadas na Manipulação</h3>
-              </div>
-              <span className="text-xs text-[#a1a1aa] font-mono">
-                {completedManipulacaoOps.length} concluídas
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              {completedManipulacaoOps.map((op) => {
-                const finishedKg = Number(op.producedQuantity) || 0;
-                const shift = op.finishedShift || op.scheduledShift || 'Manhã';
-
-                return (
-                  <div
-                    key={op.id}
-                    className="bg-[#141418] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3"
-                  >
-                    <div>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-mono font-bold text-sm text-white">{op.number}</span>
-                        <span
-                          className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${
-                            shift === 'Manhã'
-                              ? 'bg-blue-950/60 text-blue-300 border-blue-800/40'
-                              : 'bg-amber-950/60 text-amber-300 border-amber-800/40'
-                          }`}
-                        >
-                          {shift}
-                        </span>
-                        {op.industria && (
-                          <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>
-                            {op.industria}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-xs text-[#a1a1aa] truncate max-w-[180px] mt-0.5">
-                        {op.product}
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="font-mono font-black text-sm text-emerald-400">
-                        {finishedKg.toLocaleString('pt-BR')} Kg
-                      </div>
-                      <div className="text-[10px] text-emerald-500 flex items-center gap-1 justify-end font-semibold">
-                        <CheckCircle2 className="w-3 h-3" />
-                        <span>Concluído</span>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+                    );
+                  })}
+                </div>
+              </section>
+            )}
           </>
         )}
       </main>
+
+      {/* MODAL: PAUSAR OP */}
+      <Dialog open={!!pausingOp} onOpenChange={(open) => !open && setPausingOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <div className="w-10 h-10 rounded-xl bg-amber-950/80 border border-amber-800/60 flex items-center justify-center text-amber-400 mb-2">
+              <Pause className="w-5 h-5" />
+            </div>
+            <DialogTitle className="text-lg font-bold text-white">
+              Pausar OP {pausingOp?.number}
+            </DialogTitle>
+            <p className="text-xs text-[#a1a1aa]">Selecione o motivo da parada desta manipulação.</p>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
+                Motivo da Parada *
+              </Label>
+              <Select onValueChange={setPauseReason} value={pauseReason}>
+                <SelectTrigger className="bg-[#121215] border-[#27272a] rounded-xl h-11 text-xs font-medium">
+                  <SelectValue placeholder="Escolha o motivo da pausa..." />
+                </SelectTrigger>
+                <SelectContent className="bg-[#121215] border-[#27272a] text-[#f4f4f5] max-h-60">
+                  {pauseReasonsList.map(r => (
+                    <SelectItem key={r.id || r.name} value={r.name} className="text-xs">
+                      {r.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
+                Observação (Opcional)
+              </Label>
+              <Input
+                value={pauseObs}
+                onChange={(e) => setPauseObs(e.target.value)}
+                placeholder="Ex: Aguardando liberação do técnico..."
+                className="bg-[#121215] border-[#27272a] rounded-xl text-xs"
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="pt-1 gap-2 flex-col sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPausingOp(null)}
+              disabled={isPauseSubmitting}
+              className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
+            >
+              Voltar
+            </Button>
+            <Button
+              type="button"
+              onClick={handleConfirmPause}
+              disabled={isPauseSubmitting || !pauseReason}
+              className="h-10 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-lg shadow-amber-950/50 flex items-center justify-center gap-1.5 w-full sm:w-auto"
+            >
+              {isPauseSubmitting ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Pausando...</span>
+                </>
+              ) : (
+                <>
+                  <Pause className="w-3.5 h-3.5" />
+                  <span>Confirmar Pausa</span>
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* MODAL DE FINALIZAÇÃO E ESCOLHA DE TURNO */}
       <Dialog open={!!finishingOp} onOpenChange={(open) => !open && setFinishingOp(null)}>
@@ -930,23 +1101,23 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
         </DialogContent>
       </Dialog>
 
-      {/* MODAL: CANCELAR OSM DE MANIPULAÇÃO INICIADA POR ENGANO */}
+      {/* MODAL: CANCELAR OP DE MANIPULAÇÃO */}
       <Dialog open={!!cancellingOp} onOpenChange={(open) => !open && setCancellingOp(null)}>
         <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
           <DialogHeader>
             <DialogTitle className="text-sm font-black uppercase tracking-wider text-rose-400 flex items-center gap-2">
               <XCircle className="w-5 h-5" />
-              Cancelar Início da Manipulação
+              Cancelar Manipulação
             </DialogTitle>
           </DialogHeader>
 
           {cancellingOp && (
             <div className="space-y-3 py-2">
               <p className="text-sm text-[#d4d4d8]">
-                Tem certeza que deseja cancelar o início da manipulação da OP <strong className="text-white">{cancellingOp.number}</strong>?
+                Tem certeza que deseja cancelar a manipulação da OP <strong className="text-white">{cancellingOp.number}</strong>?
               </p>
               <p className="text-xs text-[#a1a1aa]">
-                Esta OSM de Manipulação é excluída e a OP volta a aparecer em "OPs Disponíveis" pra iniciar a manipulação de novo, quando for a hora certa.
+                A OP de Manipulação é excluída, mas a OSM continua organizada neste reator pelo Cronograma — ela volta pra fila pronta pra ser iniciada de novo.
               </p>
             </div>
           )}
@@ -975,7 +1146,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
               ) : (
                 <>
                   <XCircle className="w-3.5 h-3.5" />
-                  <span>Sim, Cancelar Início</span>
+                  <span>Sim, Cancelar</span>
                 </>
               )}
             </Button>

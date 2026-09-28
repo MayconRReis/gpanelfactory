@@ -24,6 +24,34 @@ interface CronogramaBoardProps {
   onOpenAssignModal: (line: ProductionLine) => void;
   /** Clique em um card de OP para editar seus dados. */
   onOpenEditOpModal?: (op: ProductionOrder) => void;
+  /**
+   * Filtro customizado para definir quais OPs aparecem na coluna "Estoque"
+   * deste quadro. Por padrão (Envase): OPs sem linha atribuída e não
+   * concluídas. Usado para o quadro de Manipulação, cujo "estoque" são as
+   * OPs de Pesagem disponíveis (setor === 'Pesagem', ainda não manipuladas)
+   * em vez de "sem linha".
+   */
+  backlogFilter?: (op: ProductionOrder) => boolean;
+  /** Rótulo exibido no cabeçalho da coluna "Estoque" (padrão: "Estoque / Sem Linha"). */
+  backlogLabel?: string;
+  /** Texto do estado vazio da coluna Estoque (padrão: "Nenhuma OP em estoque"). */
+  backlogEmptyLabel?: string;
+  /**
+   * Filtro extra aplicado às OPs de uma coluna de LINHA (além de `lineId`
+   * === id da linha e `scheduledDate` === dia selecionado). Por padrão
+   * (Envase): `op.status !== 'completed'` — faz sentido lá, onde "completed"
+   * significa produção realmente finalizada.
+   *
+   * Usado pelo quadro de Manipulação, cujas OPs são as OSMs de Pesagem —
+   * essas já nascem com `status: 'completed'` (significa "pesagem concluída",
+   * não "produção finalizada"), então o filtro padrão as escondia de
+   * qualquer coluna de reator assim que o Coordenador as organizava lá: o
+   * card sumia do quadro em vez de aparecer na coluna do reator. Nesse caso
+   * o filtro certo é outro: esconder só quando a OSM já virou de fato uma OP
+   * de Manipulação em andamento (ver `manipulatedOsmNumbers` em
+   * CoordinatorDashboard).
+   */
+  lineOpsFilter?: (op: ProductionOrder, line: ProductionLine) => boolean;
 }
 
 export const BACKLOG_COLUMN_ID = '__estoque__';
@@ -74,6 +102,10 @@ export function CronogramaBoard({
   onReorderColumn,
   onOpenAssignModal,
   onOpenEditOpModal,
+  backlogFilter,
+  backlogLabel,
+  backlogEmptyLabel,
+  lineOpsFilter,
 }: CronogramaBoardProps) {
   const [draggingOpId, setDraggingOpId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
@@ -136,8 +168,8 @@ export function CronogramaBoard({
   // TODAS as OPs pendentes de linha, independente do dia selecionado nas
   // abas — elas ainda não têm uma data de produção "travada".
   const backlogOps = useMemo(
-    () => ops.filter(o => !o.lineId && o.status !== 'completed'),
-    [ops]
+    () => ops.filter(backlogFilter || (o => !o.lineId && o.status !== 'completed')),
+    [ops, backlogFilter]
   );
 
   // Lista exibida na coluna Estoque, já filtrada pela busca (o contador no
@@ -155,14 +187,15 @@ export function CronogramaBoard({
 
   // Colunas de linha mostram só as OPs agendadas para o dia selecionado.
   const opsByLine = useMemo(() => {
+    const extraFilter = lineOpsFilter || ((o: ProductionOrder) => o.status !== 'completed');
     const map: Record<string, ProductionOrder[]> = {};
     for (const line of lines) {
       map[line.id] = ops
-        .filter(o => o.lineId === line.id && o.status !== 'completed' && o.scheduledDate === selectedDate)
+        .filter(o => o.lineId === line.id && o.scheduledDate === selectedDate && extraFilter(o, line))
         .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     }
     return map;
-  }, [lines, ops, selectedDate]);
+  }, [lines, ops, selectedDate, lineOpsFilter]);
 
   const columnOps = (columnId: string): ProductionOrder[] =>
     columnId === BACKLOG_COLUMN_ID ? backlogOps : (opsByLine[columnId] || []);
@@ -384,11 +417,30 @@ export function CronogramaBoard({
           {/* Setas para reordenar a fila dentro da mesma coluna — troca de
               lugar com o vizinho imediato acima/abaixo. Substitui o antigo
               arrastar-sobre-outro-card, que dava problema. Mais largas que
-              o resto do card pra facilitar o clique. */}
+              o resto do card pra facilitar o clique.
+
+              Bug corrigido: o card inteiro é `draggable` (pro recurso de
+              arrastar pra OUTRA coluna), e isso é nativo do navegador — não
+              tem relação com o React, então só `e.stopPropagation()` no
+              onClick não impede o navegador de "sequestrar" um clique rápido
+              na seta como se fosse o início de um arraste (basta o mouse
+              tremer 1px durante o clique). O resultado, na prática: clicar
+              na seta às vezes desatribuía a OP e jogava ela de volta pro
+              Estoque, em vez de só reordenar. Agora o wrapper das setas e
+              os dois botões têm `draggable={false}` explícito, que tem
+              prioridade sobre o `draggable` do card ancestral e faz o
+              navegador nunca iniciar um arraste a partir daqui. */}
           {!isLocked && (
-            <div className="flex flex-col shrink-0 -my-1 -mr-1">
+            <div
+              draggable={false}
+              onDragStart={(e) => e.preventDefault()}
+              className="flex flex-col shrink-0 -my-1 -mr-1"
+            >
               <button
                 type="button"
+                draggable={false}
+                onMouseDown={(e) => e.stopPropagation()}
+                onDragStart={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (canMoveUp) handleMoveInColumn(columnId, op.id, 'up');
@@ -403,6 +455,9 @@ export function CronogramaBoard({
               </button>
               <button
                 type="button"
+                draggable={false}
+                onMouseDown={(e) => e.stopPropagation()}
+                onDragStart={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (canMoveDown) handleMoveInColumn(columnId, op.id, 'down');
@@ -543,7 +598,7 @@ export function CronogramaBoard({
           <div className="p-3 border-b border-[#1f1f26] flex items-center justify-between gap-2 sticky top-0 bg-[#0e0e12] rounded-t-2xl z-10">
             <div className="flex items-center gap-1.5 min-w-0">
               <Package className="w-3.5 h-3.5 text-[#71717a] shrink-0" />
-              <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">Estoque / Sem Linha</span>
+              <span className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wide truncate">{backlogLabel || 'Estoque / Sem Linha'}</span>
             </div>
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa] shrink-0">
               {backlogOps.length}
@@ -575,7 +630,7 @@ export function CronogramaBoard({
           <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
             {visibleBacklogOps.length === 0 ? (
               <p className="text-[11px] text-[#52525b] text-center py-6">
-                {backlogOps.length === 0 ? 'Nenhuma OP em estoque' : 'Nenhuma OP encontrada para essa busca'}
+                {backlogOps.length === 0 ? (backlogEmptyLabel || 'Nenhuma OP em estoque') : 'Nenhuma OP encontrada para essa busca'}
               </p>
             ) : (
               visibleBacklogOps.map((op) => renderCard(op, BACKLOG_COLUMN_ID))
