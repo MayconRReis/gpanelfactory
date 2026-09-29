@@ -99,10 +99,7 @@ export function UpdateNotifier() {
             Nova versão do app
           </h2>
           <p className="text-sm text-[#d4d4d8] leading-relaxed">
-            O sistema foi atualizado. Para continuar, atualize a página — assim todos usam a mesma versão e nada é gravado do jeito antigo.
-          </p>
-          <p className="text-[11px] text-[#71717a]">
-            Se estava preenchendo algo, anote antes de atualizar.
+            O sistema foi atualizado. Para continuar utilizando, por favor, atualize a página. Dessa forma, todos estarão utilizando a mesma versão e evitamos que informações sejam gravadas no formato antigo.
           </p>
         </div>
         <button
