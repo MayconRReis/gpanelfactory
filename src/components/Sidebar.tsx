@@ -14,8 +14,9 @@ import {
   BarChart3,
   Scale,
   FlaskConical,
+  Boxes,
   Kanban,
-  GraduationCap,
+  FileText,
 } from 'lucide-react';
 import { UserProfile, DashboardTab } from '../types';
 import { getUserAllowedTabs, getUserRule, ACCESS_RULES } from '../lib/permissions';
@@ -95,19 +96,27 @@ export function Sidebar({
     },
     {
       id: 'envase' as DashboardTab,
-      label: 'Chão de Fábrica',
-      icon: Factory,
+      label: 'Envase',
+      icon: Boxes,
       badge: null,
       description: 'Linhas & Apontamento',
       section: 'PROCESSOS',
     },
     {
       id: 'cronograma' as DashboardTab,
-      label: 'Cronograma de Envase',
+      label: 'Cronograma',
       icon: Kanban,
       badge: linesCount > 0 ? `${linesCount}` : null,
       subBadge: activeLinesCount > 0 ? `${activeLinesCount} ativas` : null,
-      description: 'Quadro Kanban por Linha',
+      description: 'Programação das linhas',
+      section: 'GESTÃO & PCP',
+    },
+    {
+      id: 'relatorio' as DashboardTab,
+      label: 'Relatório do Dia',
+      icon: FileText,
+      badge: null,
+      description: 'Relatório diário de produção',
       section: 'GESTÃO & PCP',
     },
     {
@@ -141,14 +150,6 @@ export function Sidebar({
       icon: History,
       badge: null,
       description: 'Log de Eventos & Paradas',
-      section: 'ADMINISTRAÇÃO',
-    },
-    {
-      id: 'training' as DashboardTab,
-      label: 'Treinamento',
-      icon: GraduationCap,
-      badge: null,
-      description: 'Simulação das telas dos líderes',
       section: 'ADMINISTRAÇÃO',
     },
   ];

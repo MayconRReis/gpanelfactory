@@ -33,6 +33,7 @@ import {
   Sunset,
   Users,
   RefreshCcw,
+  Wrench,
 } from 'lucide-react';
 import {
   getLines,
@@ -65,6 +66,9 @@ import {
   getOpenChangeover,
   startChangeover,
   endChangeover,
+  sendOpToRework,
+  finishReworkOP,
+  getReworkInfoByOp,
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
@@ -118,13 +122,9 @@ function leaderLineStorageKey(leaderUid: string): string {
 
 interface LeaderScreenProps {
   embedded?: boolean;
-  /** Usado pelo Simulador de Treinamento (ver TrainingSimulator.tsx) para
-   * mostrar só a aba operacional (Controle da Linha), sem os dashboards
-   * diário/mensal — que não fazem sentido sobre dados fictícios. */
-  hideDashboardTabs?: boolean;
 }
 
-export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: LeaderScreenProps = {}) {
+export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   // State principal
@@ -175,6 +175,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [finishLostQty, setFinishLostQty] = useState('');
   const [finishProductionType, setFinishProductionType] = useState<'total' | 'parcial'>('total');
   const [finishSendToSleeve, setFinishSendToSleeve] = useState(false);
+  // Envasada mas aguardando material (ex.: divisória) — retrabalho depois
+  const [finishAwaitRework, setFinishAwaitRework] = useState(false);
+  const [finishReworkReason, setFinishReworkReason] = useState('');
+  // Concluir o retrabalho de uma OP que voltou do estoque
+  const [isReworkFinishOpen, setIsReworkFinishOpen] = useState(false);
+  const [reworkFinishObs, setReworkFinishObs] = useState('');
+  const [reworkFinishing, setReworkFinishing] = useState(false);
   const [isCancelFinishConfirmOpen, setIsCancelFinishConfirmOpen] = useState(false);
   const [isLineSelectOpen, setIsLineSelectOpen] = useState(false);
   const [isAssignStockOpen, setIsAssignStockOpen] = useState(false);
@@ -201,14 +208,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
-
-  // Em modo treinamento (hideDashboardTabs) só existe a aba operacional —
-  // garante que nunca fique "preso" numa aba de dashboard escondida.
-  useEffect(() => {
-    if (hideDashboardTabs && activeTab !== 'operation') {
-      setActiveTab('operation');
-    }
-  }, [hideDashboardTabs, activeTab]);
 
   // Ref para manter o selectedLineId sincronizado sem invalidar o useCallback do fetchData
   const selectedLineIdRef = useRef<string | null>(null);
@@ -394,6 +393,11 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   }, [lineOps]);
 
   // Próximas OPs na fila da linha (exceto a OP ativa atual)
+  // OPs com retrabalho (derivado dos eventos de conclusão)
+  const reworkByOp = useMemo(() => getReworkInfoByOp(recentEvents), [recentEvents]);
+  const activeRework = activeOp ? reworkByOp.get(activeOp.id) : undefined;
+  const isActiveRework = !!activeRework && !activeRework.done;
+
   const queuedOps = useMemo(() => {
     if (!lineOps.length) return [];
     return lineOps
@@ -609,10 +613,41 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     await fetchData(true);
   };
 
+  const resetFinishForm = () => {
+    setIsFinishOpen(false);
+    setFinishShift(null);
+    setFinishProducedQty('');
+    setFinishLostQty('');
+    setFinishProductionType('total');
+    setFinishSendToSleeve(false);
+    setFinishAwaitRework(false);
+    setFinishReworkReason('');
+  };
+
   const handleFinish = async () => {
     if (!currentLine || !activeOp || !profile) return;
     const parsedQty = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : undefined;
     const parsedLostQty = finishLostQty.trim() !== '' ? parseInt(finishLostQty, 10) : undefined;
+
+    if (finishAwaitRework) {
+      if (!finishReworkReason.trim()) return;
+      const res = await sendOpToRework(
+        activeOp.id,
+        currentLine.id,
+        profile.uid,
+        parsedQty !== undefined ? parsedQty : (activeOp.producedQuantity || 0),
+        finishReworkReason,
+        parsedLostQty,
+        finishProductionType === 'parcial'
+      );
+      if (!res.ok) {
+        await fetchData(true);
+        return;
+      }
+      resetFinishForm();
+      await fetchData(true);
+      return;
+    }
 
     const res = await finishOP(
       activeOp.id,
@@ -635,6 +670,23 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     setFinishProductionType('total');
     setFinishSendToSleeve(false);
     await fetchData(true);
+  };
+
+  const handleFinishRework = async () => {
+    if (!currentLine || !activeOp || !profile) return;
+    setReworkFinishing(true);
+    try {
+      const res = await finishReworkOP(activeOp.id, currentLine.id, profile.uid, reworkFinishObs);
+      if (!res.ok) {
+        await fetchData(true);
+        return;
+      }
+      setIsReworkFinishOpen(false);
+      setReworkFinishObs('');
+      await fetchData(true);
+    } finally {
+      setReworkFinishing(false);
+    }
   };
 
   const handleCancelOp = async () => {
@@ -1062,7 +1114,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             }`}
           >
             <Zap className="w-3.5 h-3.5" />
-            <span>Controle da Linha & Produção</span>
+            <span>Produção</span>
             {activeOp && (
               <span className={`w-2 h-2 rounded-full ${
                 activeOp.status === 'in_progress' ? 'bg-emerald-400 animate-ping' :
@@ -1071,33 +1123,29 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             )}
           </button>
 
-          {!hideDashboardTabs && (
-            <>
-              <button
-                onClick={() => setActiveTab('daily_dash')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-                  activeTab === 'daily_dash'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
-                }`}
-              >
-                <Activity className="w-3.5 h-3.5" />
-                <span>Dashboard Diário ({dailyMetrics.progressPercent}%)</span>
-              </button>
+          <button
+            onClick={() => setActiveTab('daily_dash')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'daily_dash'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <span>Dashboard Diário ({dailyMetrics.progressPercent}%)</span>
+          </button>
 
-              <button
-                onClick={() => setActiveTab('monthly_dash')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-                  activeTab === 'monthly_dash'
-                    ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                <span>Dashboard Mensal ({monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')} un)</span>
-              </button>
-            </>
-          )}
+          <button
+            onClick={() => setActiveTab('monthly_dash')}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+              activeTab === 'monthly_dash'
+                ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
+                : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Dashboard Mensal ({monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')} un)</span>
+          </button>
 
         </div>
       </header>
@@ -1324,11 +1372,15 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
 
                       <div className="text-left sm:text-right">
                         <span className="text-xs font-bold text-[#71717a] uppercase tracking-wider block">
-                          Faltam para Concluir
+                          {isActiveRework ? 'Situação' : 'Faltam para Concluir'}
                         </span>
+                        {isActiveRework ? (
+                          <span className="text-lg font-bold text-orange-300">Envase concluído · retrabalho</span>
+                        ) : (
                         <span className="text-lg font-bold text-blue-400 font-mono">
                           {missingQty.toLocaleString('pt-BR')} {displayUnit} ({opProgress}%)
                         </span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1351,6 +1403,24 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   </div>
                 </div>
 
+                {/* Retrabalho: OP já envasada, voltou do estoque só para o acabamento */}
+                {isActiveRework && activeRework && (
+                  <div className="p-3.5 rounded-2xl bg-orange-950/30 border border-orange-700/50 flex items-start gap-3">
+                    <Wrench className="w-5 h-5 text-orange-400 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5 text-xs">
+                      <p className="font-black text-orange-300 uppercase tracking-wider">Retrabalho</p>
+                      <p className="text-[#d4d4d8]">
+                        Faltava: <strong className="text-white">{activeRework.reason}</strong>
+                      </p>
+                      <p className="text-[#a1a1aa]">
+                        {activeRework.quantity.toLocaleString('pt-BR')} {displayUnit} envasadas em{' '}
+                        {new Date(activeRework.since).toLocaleDateString('pt-BR')} — já contam na produção daquele dia.
+                        Aqui conta só o tempo do retrabalho; ao terminar, use <strong className="text-white">Concluir retrabalho</strong>.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {/* ========================================================= */}
                 {/* BOTÕES DE CONTROLE OPERACIONAL (INICIAR, PAUSAR, APONTAR, FINALIZAR) */}
                 {/* ========================================================= */}
@@ -1363,14 +1433,15 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                       className="col-span-full h-14 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm uppercase tracking-wider rounded-2xl shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-2.5 transition-all"
                     >
                       <Play className="w-5 h-5 fill-current" />
-                      <span>INICIAR PRODUÇÃO DESTA {docTypeLabel}</span>
+                      <span>{isActiveRework ? 'INICIAR RETRABALHO' : `INICIAR PRODUÇÃO DESTA ${docTypeLabel}`}</span>
                     </Button>
                   )}
 
                   {/* Se Em Produção -> Apontar, Pausar e Finalizar */}
                   {activeOp.status === 'in_progress' && (
                     <>
-                      {/* Apontar Produção */}
+                      {/* Apontar Produção — no retrabalho não há apontamento (a quantidade já contou no envase) */}
+                      {!isActiveRework && (
                       <Button
                         onClick={() => setIsReportOpen(true)}
                         className="h-14 bg-blue-600 hover:bg-blue-500 text-white font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl shadow-lg shadow-blue-950/50 flex items-center justify-center gap-2 transition-all col-span-1 sm:col-span-2"
@@ -1378,13 +1449,14 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                         <Package className="w-5 h-5" />
                         <span>{reportButtonLabel}</span>
                       </Button>
+                      )}
 
                       {/* Pausar Linha */}
                       <Button
                         onClick={() => {
                           setIsPauseOpen(true);
                         }}
-                        className="h-14 bg-[#181820] hover:bg-amber-950/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
+                        className={`h-14 bg-[#181820] hover:bg-amber-950/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all ${isActiveRework ? 'sm:col-span-2' : ''}`}
                       >
                         <Pause className="w-5 h-5" />
                         <span>PAUSAR LINHA</span>
@@ -1393,17 +1465,24 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                       {/* Finalizar OP */}
                       <Button
                         onClick={() => {
+                          if (isActiveRework) {
+                            setReworkFinishObs('');
+                            setIsReworkFinishOpen(true);
+                            return;
+                          }
                           setFinishShift(null);
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setFinishSendToSleeve(false);
+                          setFinishAwaitRework(false);
+                          setFinishReworkReason('');
                           setFinishConfirmLower(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
                       >
                         <CheckCircle2 className="w-5 h-5" />
-                        <span>CONCLUIR {docTypeLabel}</span>
+                        <span>{isActiveRework ? 'CONCLUIR RETRABALHO' : `CONCLUIR ${docTypeLabel}`}</span>
                       </Button>
                     </>
                   )}
@@ -1421,17 +1500,24 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
 
                       <Button
                         onClick={() => {
+                          if (isActiveRework) {
+                            setReworkFinishObs('');
+                            setIsReworkFinishOpen(true);
+                            return;
+                          }
                           setFinishShift(null);
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setFinishSendToSleeve(false);
+                          setFinishAwaitRework(false);
+                          setFinishReworkReason('');
                           setFinishConfirmLower(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 border border-emerald-500/30 font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2"
                       >
                         <CheckCircle2 className="w-5 h-5" />
-                        <span>CONCLUIR {docTypeLabel}</span>
+                        <span>{isActiveRework ? 'CONCLUIR RETRABALHO' : `CONCLUIR ${docTypeLabel}`}</span>
                       </Button>
                     </>
                   )}
@@ -1441,7 +1527,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 {/* Cancelar OP iniciada por engano — só aparece enquanto nada
                     foi produzido/apontado nela ainda, pra nunca descartar
                     produção real por engano. */}
-                {(activeOp.status === 'in_progress' || activeOp.status === 'paused') && activeOp.producedQuantity === 0 && (
+                {(activeOp.status === 'in_progress' || activeOp.status === 'paused') && (activeOp.producedQuantity === 0 || isActiveRework) && (
                   <div className="flex justify-center pt-1">
                     <button
                       type="button"
@@ -1515,6 +1601,15 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                             #{idx + 1} • {docTypeLabel} {op.number}
                           </span>
                           <div className="flex items-center gap-1">
+                            {reworkByOp.get(op.id) && !reworkByOp.get(op.id)!.done && (
+                              <span
+                                className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-orange-950 text-orange-300 border border-orange-700/60 flex items-center gap-1"
+                                title={`Faltava: ${reworkByOp.get(op.id)!.reason}`}
+                              >
+                                <Wrench className="w-2.5 h-2.5" />
+                                Retrabalho
+                              </span>
+                            )}
                             {op.isSleeve && (
                               <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-700/60 flex items-center gap-1 shadow-sm">
                                 <Sparkles className="w-2.5 h-2.5 text-purple-400" />
@@ -2546,7 +2641,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             {/* Checkbox Sleev */}
             <div
               id="card-sleeve-option"
-              onClick={() => setFinishSendToSleeve(!finishSendToSleeve)}
+              onClick={() => { setFinishSendToSleeve(!finishSendToSleeve); if (!finishSendToSleeve) setFinishAwaitRework(false); }}
               className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex items-start gap-3 select-none ${
                 finishSendToSleeve
                   ? 'bg-purple-950/25 border-purple-500/60 text-white shadow-md shadow-purple-950/30 ring-1 ring-purple-500/30'
@@ -2557,7 +2652,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 type="checkbox"
                 id="checkbox-sleeve"
                 checked={finishSendToSleeve}
-                onChange={e => setFinishSendToSleeve(e.target.checked)}
+                onChange={e => { setFinishSendToSleeve(e.target.checked); if (e.target.checked) setFinishAwaitRework(false); }}
                 onClick={e => e.stopPropagation()}
                 className="mt-0.5 w-4 h-4 rounded border-[#383848] text-purple-600 focus:ring-purple-500 focus:ring-offset-0 bg-[#121218] cursor-pointer"
               />
@@ -2584,10 +2679,57 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               </div>
             </div>
 
+            {/* Aguardando material — envasada, retrabalho depois (ex.: divisória) */}
+            <div
+              className={`p-3.5 rounded-2xl border transition-all select-none space-y-2.5 ${
+                finishAwaitRework
+                  ? 'bg-orange-950/25 border-orange-500/60 ring-1 ring-orange-500/30'
+                  : 'bg-[#181822] border-[#27272a] hover:border-[#383848]'
+              }`}
+            >
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={finishAwaitRework}
+                  onChange={e => { setFinishAwaitRework(e.target.checked); if (e.target.checked) setFinishSendToSleeve(false); }}
+                  className="mt-0.5 w-4 h-4 rounded border-[#383848] text-orange-600 focus:ring-orange-500 focus:ring-offset-0 bg-[#121218] cursor-pointer"
+                />
+                <div className="space-y-1 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                      <Wrench className="w-3.5 h-3.5 text-orange-400" />
+                      Aguardando material
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-orange-500/20 text-orange-300 font-semibold border border-orange-500/30">
+                      Retrabalho depois
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+                    Envasada e encaixotada, mas falta algum material para finalizar (ex.: divisória). A quantidade conta hoje e a OP volta ao estoque para o retrabalho.
+                  </p>
+                </div>
+              </label>
+              {finishAwaitRework && (
+                <div className="space-y-1.5 pl-7">
+                  <Label className="text-[10px] uppercase text-orange-300 font-bold tracking-wider">O que está faltando? *</Label>
+                  <Input
+                    value={finishReworkReason}
+                    onChange={e => setFinishReworkReason(e.target.value)}
+                    placeholder="Ex: divisórias das caixas"
+                    className="bg-[#121218] border-orange-900/60 rounded-xl text-xs focus:border-orange-500"
+                  />
+                </div>
+              )}
+            </div>
+
             {/* Descrição do resultado — muda conforme Total/Parcial × Sleev,
                 pra deixar claro o que vai acontecer com a OP ao confirmar. */}
             <p className="text-xs text-[#a1a1aa] leading-relaxed">
-              {finishProductionType === 'total'
+              {finishAwaitRework
+                ? finishProductionType === 'parcial'
+                  ? 'A quantidade apontada conta como produção hoje e a OP volta ao estoque aguardando o material para o retrabalho. O saldo que não foi envasado vira uma nova OP, pronta para um novo envase.'
+                  : 'A quantidade apontada conta como produção hoje e a OP volta ao estoque aguardando o material. Quando chegar, inicie a OP numa linha para o retrabalho — conta só o tempo, a quantidade não soma de novo.'
+                : finishProductionType === 'total'
                 ? finishSendToSleeve
                   ? 'Ao concluir, o envase nesta linha é finalizado com a quantidade apontada e a linha fica livre. A OP inteira volta ao estoque já pronta para acabamento no Sleev.'
                   : 'Esta é a quantidade final desta OP. Ao concluir, ela é encerrada definitivamente e a linha fica livre — não será mais possível envasar essa OP novamente.'
@@ -2609,7 +2751,8 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               onClick={handleFinish}
               disabled={
                 !finishProducedQty || isNaN(parseInt(finishProducedQty, 10)) || parseInt(finishProducedQty, 10) < 0 ||
-                (!!activeOp && parseInt(finishProducedQty, 10) < (activeOp.producedQuantity || 0) && !finishConfirmLower)
+                (!!activeOp && parseInt(finishProducedQty, 10) < (activeOp.producedQuantity || 0) && !finishConfirmLower) ||
+                (finishAwaitRework && !finishReworkReason.trim())
               }
               className={
                 finishSendToSleeve
@@ -2617,7 +2760,54 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   : 'bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider'
               }
             >
-              Concluir
+              {finishAwaitRework ? 'Concluir envase' : 'Concluir'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: CONCLUIR RETRABALHO */}
+      <Dialog open={isReworkFinishOpen} onOpenChange={setIsReworkFinishOpen}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-orange-300 flex items-center gap-2">
+              <Wrench className="w-5 h-5" />
+              Concluir Retrabalho
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2 text-xs text-[#a1a1aa] leading-relaxed">
+            {activeRework && (
+              <p>
+                OP <strong className="text-white font-mono">{activeOp?.number}</strong> — faltava{' '}
+                <strong className="text-white">{activeRework.reason}</strong>. As{' '}
+                {activeRework.quantity.toLocaleString('pt-BR')} {displayUnit} já contaram na produção de{' '}
+                {new Date(activeRework.since).toLocaleDateString('pt-BR')}; ao concluir, a OP é finalizada e a linha fica livre.
+              </p>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">Observação (opcional)</Label>
+              <Input
+                value={reworkFinishObs}
+                onChange={e => setReworkFinishObs(e.target.value)}
+                placeholder="Ex: divisórias colocadas em todas as caixas"
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-xs"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setIsReworkFinishOpen(false)}
+              className="border-[#27272a] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={handleFinishRework}
+              disabled={reworkFinishing}
+              className="bg-orange-600 hover:bg-orange-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              Concluir retrabalho
             </Button>
           </DialogFooter>
         </DialogContent>

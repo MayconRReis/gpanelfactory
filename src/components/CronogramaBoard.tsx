@@ -38,6 +38,13 @@ interface CronogramaBoardProps {
   /** Texto do estado vazio da coluna Estoque (padrão: "Nenhuma OP em estoque"). */
   backlogEmptyLabel?: string;
   /**
+   * Somente leitura (líderes): sem arrastar, sem reordenar, sem editar e sem
+   * vincular OP. A coluna de Estoque some — o líder vê só a fila das linhas.
+   */
+  readOnly?: boolean;
+  /** OPs aguardando/em retrabalho (derivado dos eventos) — mostra o selo "Retrabalho" com o que falta. */
+  reworkByOp?: Map<string, { reason: string; quantity: number; done: boolean }>;
+  /**
    * Filtro extra aplicado às OPs de uma coluna de LINHA (além de `lineId`
    * === id da linha e `scheduledDate` === dia selecionado). Por padrão
    * (Envase): `op.status !== 'completed'` — faz sentido lá, onde "completed"
@@ -106,6 +113,8 @@ export function CronogramaBoard({
   backlogFilter,
   backlogLabel,
   backlogEmptyLabel,
+  readOnly = false,
+  reworkByOp,
   lineOpsFilter,
 }: CronogramaBoardProps) {
   const [draggingOpId, setDraggingOpId] = useState<string | null>(null);
@@ -365,7 +374,8 @@ export function CronogramaBoard({
     // Disponibilidade/Ociosidade (ver cancelOP/calculateProductionTime), então
     // trava o card nesses dois status: só dá pra pausar/retomar/concluir pela
     // tela de operação da linha.
-    const isLocked = op.status === 'in_progress' || op.status === 'paused';
+    const isStatusLocked = op.status === 'in_progress' || op.status === 'paused';
+    const isLocked = readOnly || isStatusLocked;
 
     // Posição do card dentro da coluna (pra saber se mostra/desabilita as
     // setas ▲▼ de reordenar — não dá pra subir o primeiro nem descer o
@@ -382,11 +392,11 @@ export function CronogramaBoard({
         draggable={!isLocked}
         onDragStart={(e) => (isLocked ? e.preventDefault() : handleDragStart(e, op.id))}
         onDragEnd={handleDragEnd}
-        onDragOver={(e) => handleDragOverCard(e, columnId, op.id)}
-        onDrop={(e) => handleDropOnCard(e, columnId, op.id)}
+        onDragOver={(e) => !readOnly && handleDragOverCard(e, columnId, op.id)}
+        onDrop={(e) => !readOnly && handleDropOnCard(e, columnId, op.id)}
         onClick={() => !isLocked && onOpenEditOpModal && onOpenEditOpModal(op)}
         className={`p-2.5 rounded-xl border text-xs transition-all shadow-sm select-none ${
-          isLocked ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'
+          readOnly ? 'cursor-default' : isLocked ? 'cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'
         } ${
           draggingOpId === op.id ? 'opacity-30' : 'opacity-100'
         } ${
@@ -413,14 +423,16 @@ export function CronogramaBoard({
             : 'border-[#2c2c3c]'
         }`}
         title={
-          isLocked
+          readOnly
+            ? `OP ${op.number} — ${op.product}`
+            : isLocked
             ? `Esta OP está ${op.status === 'in_progress' ? 'em produção' : 'pausada'} — não é possível mover ou editar por aqui enquanto estiver assim. Use a tela de operação da linha.`
             : 'Use as setas ▲▼ para reordenar dentro desta coluna, ou arraste para outra coluna para reatribuir'
         }
       >
         <div className="flex items-center justify-between gap-1.5 mb-1">
           <div className="flex items-center gap-1 min-w-0 flex-wrap">
-            {isLocked ? (
+            {readOnly ? null : isLocked ? (
               <Lock className="w-3 h-3 text-[#52525b] shrink-0" />
             ) : (
               <GripVertical className="w-3 h-3 text-[#52525b] shrink-0" />
@@ -440,6 +452,14 @@ export function CronogramaBoard({
                 Pausada
               </span>
             ) : null}
+            {reworkByOp?.get(op.id) && !reworkByOp.get(op.id)!.done && (
+              <span
+                className="text-[9px] font-black px-1.5 py-0.2 rounded bg-orange-950 text-orange-300 border border-orange-700/60 uppercase"
+                title={`Envasada (${reworkByOp.get(op.id)!.quantity.toLocaleString('pt-BR')} un) — aguardando: ${reworkByOp.get(op.id)!.reason}`}
+              >
+                Retrabalho
+              </span>
+            )}
             {columnId !== BACKLOG_COLUMN_ID && isOverdue(op) && (
               <span
                 className="text-[9px] font-black px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-700/60 uppercase"
@@ -635,7 +655,8 @@ export function CronogramaBoard({
       </div>
 
       <div className="flex items-start gap-3 min-w-max">
-        {/* Coluna: Estoque / Fila Geral (OPs sem linha) */}
+        {/* Coluna: Estoque / Fila Geral (OPs sem linha) — oculta no modo somente leitura */}
+        {!readOnly && (
         <div
           onDragOver={(e) => handleDragOverColumn(e, BACKLOG_COLUMN_ID)}
           onDrop={(e) => handleDropOnColumn(e, BACKLOG_COLUMN_ID)}
@@ -685,6 +706,7 @@ export function CronogramaBoard({
             )}
           </div>
         </div>
+        )}
 
         {/* Uma coluna por linha de produção */}
         {lines.map((line) => {
@@ -693,8 +715,8 @@ export function CronogramaBoard({
           return (
             <div
               key={line.id}
-              onDragOver={(e) => handleDragOverColumn(e, line.id)}
-              onDrop={(e) => handleDropOnColumn(e, line.id)}
+              onDragOver={(e) => !readOnly && handleDragOverColumn(e, line.id)}
+              onDrop={(e) => !readOnly && handleDropOnColumn(e, line.id)}
               className={`w-[260px] shrink-0 bg-[#121216] border rounded-2xl flex flex-col max-h-[calc(100vh-260px)] transition-colors ${
                 isOver ? 'border-blue-500' : 'border-[#222228]'
               }`}
@@ -713,6 +735,9 @@ export function CronogramaBoard({
                   <span className="text-xs font-bold text-[#f4f4f5] truncate">{line.name}</span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
+                  {readOnly ? (
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#1a1a22] text-[#a1a1aa]">{lineOps.length}</span>
+                  ) : (
                   <button
                     type="button"
                     onClick={() => onOpenAssignModal(line)}
@@ -721,12 +746,13 @@ export function CronogramaBoard({
                   >
                     <Plus className="w-3.5 h-3.5" />
                   </button>
+                  )}
                 </div>
               </div>
               <div className="p-2.5 space-y-2 overflow-y-auto flex-1 min-h-[80px]">
                 {lineOps.length === 0 ? (
                   <p className="text-[11px] text-[#52525b] text-center py-6 px-2">
-                    Nenhuma OP agendada para {weekDays.find(d => d.dateStr === selectedDate)?.weekdayLabel}. Arraste uma OP aqui.
+                    Nenhuma OP agendada para {weekDays.find(d => d.dateStr === selectedDate)?.weekdayLabel}.{readOnly ? '' : ' Arraste uma OP aqui.'}
                   </p>
                 ) : (
                   lineOps.map((op) => renderCard(op, line.id))

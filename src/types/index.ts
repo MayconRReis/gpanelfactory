@@ -17,7 +17,7 @@ export type DashboardTab =
   | 'ops'
   | 'users'
   | 'events'
-  | 'training';
+  | 'relatorio';
 
 export interface UserProfile {
   uid: string;
@@ -211,4 +211,18 @@ export interface PesagemHistoryEntry {
     exitDate?: string;
     note?: string;
   } | null;
+}
+
+/** Parte digitada pelo Coordenador no Relatório do Dia (tabela daily_reports). */
+export interface DailyReportManual {
+  date: string; // 'AAAA-MM-DD'
+  atestados: number;
+  faltas: number;
+  atrasos: number;
+  saidasAntecipadas: number;
+  /** Principais pontos do dia: tópico + texto (vazios não aparecem no relatório) */
+  pontos: { titulo: string; texto: string }[];
+  seguranca: string;
+  updatedAt?: string | null;
+  updatedBy?: string | null;
 }

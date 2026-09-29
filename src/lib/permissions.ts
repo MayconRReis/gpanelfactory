@@ -22,11 +22,11 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'manipulacao',
       'envase',
       'cronograma',
+      'relatorio',
       'daily_production',
       'ops',
       'users',
       'events',
-      'training',
     ],
   },
   pesagem: {
@@ -35,7 +35,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     shortName: 'Pesagem',
     description: 'Acesso ao Dashboard Geral e módulo de Balança & Fracionamento (OP)',
     badgeClass: 'bg-purple-950/90 text-purple-300 border border-purple-800/50',
-    tabs: ['home', 'pesagem'],
+    tabs: ['home', 'pesagem', 'cronograma'],
   },
   manipulacao: {
     id: 'manipulacao',
@@ -43,7 +43,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     shortName: 'Manipulação',
     description: 'Acesso ao Dashboard Geral e módulo de Fabricação de Granéis & Reatores',
     badgeClass: 'bg-cyan-950/90 text-cyan-300 border border-cyan-800/50',
-    tabs: ['home', 'manipulacao'],
+    tabs: ['home', 'manipulacao', 'cronograma'],
   },
   envase: {
     id: 'envase',
@@ -51,7 +51,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     shortName: 'Envase',
     description: 'Acesso ao Dashboard Geral e Chão de Fábrica das Linhas de Envase',
     badgeClass: 'bg-emerald-950/90 text-emerald-300 border border-emerald-800/50',
-    tabs: ['home', 'envase'],
+    tabs: ['home', 'envase', 'cronograma'],
   },
   custom: {
     id: 'custom',
@@ -80,14 +80,19 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     description: 'Produção de granéis, reatores e misturas',
   },
   envase: {
-    label: 'Chão de Fábrica (Envase)',
+    label: 'Envase',
     group: 'Processos Produtivos',
     description: 'Painel operacional do líder da linha de envase',
   },
   cronograma: {
-    label: 'Cronograma de Envase',
+    label: 'Cronograma',
     group: 'Gestão & PCP',
-    description: 'Quadro estilo Kanban para atribuir e mover OPs entre as linhas de envase',
+    description: 'Quadro Kanban das linhas de envase e reatores (líderes só visualizam o da sua área)',
+  },
+  relatorio: {
+    label: 'Relatório do Dia',
+    group: 'Gestão & PCP',
+    description: 'Relatório diário de produção (indicadores, quadro do dia, pontos do dia e evolução do mês)',
   },
   daily_production: {
     label: 'Histórico & Gráficos',
@@ -108,11 +113,6 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     label: 'Auditoria',
     group: 'Administração',
     description: 'Registro de paradas, inícios e finalizações',
-  },
-  training: {
-    label: 'Treinamento (Simulação)',
-    group: 'Administração',
-    description: 'Simula as telas dos líderes com dados fictícios para treinamento, sem afetar a produção real',
   },
 };
 
@@ -184,4 +184,21 @@ export function canUserAccessTab(profile: UserProfile | null, tab: DashboardTab)
   if (tab === 'home') return true; // Todos têm acesso irrestrito ao Dashboard Geral
   const allowed = getUserAllowedTabs(profile);
   return allowed.includes(tab);
+}
+
+/**
+ * Acesso ao Cronograma: o Coordenador (e perfis personalizados que tenham a
+ * tela) editam os dois quadros; os líderes só VISUALIZAM o quadro da sua área
+ * — Envase vê o de Envase; Manipulação e Pesagem veem o de Manipulação.
+ */
+export function getCronogramaAccess(profile: UserProfile | null): {
+  editable: boolean;
+  modes: Array<'envase' | 'manipulacao'>;
+} {
+  if (!canUserAccessTab(profile, 'cronograma')) return { editable: false, modes: [] };
+  const hasCustomScreens = !!(profile?.allowedScreens && Array.isArray(profile.allowedScreens) && profile.allowedScreens.length > 0);
+  const rule = getUserRule(profile);
+  if (rule === 'admin' || (rule === 'custom' && hasCustomScreens)) return { editable: true, modes: ['envase', 'manipulacao'] };
+  if (rule === 'manipulacao' || rule === 'pesagem') return { editable: false, modes: ['manipulacao'] };
+  return { editable: false, modes: ['envase'] };
 }

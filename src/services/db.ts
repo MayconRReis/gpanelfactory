@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction, DailyReportManual } from '../types';
 import { calculateProductionTime } from '../lib/productionTime';
 
 /**
@@ -235,6 +235,70 @@ export function getGranelStatus(granel: string | undefined | null, ops: Producti
   return 'nao_separado';
 }
 
+
+// ---------------- RETRABALHO (envasada, aguardando material) ----------------
+// OP envasada e encaixotada que não pode ser finalizada porque falta algum
+// material (ex.: divisória). O líder conclui o ENVASE com a quantidade real
+// ("Aguardar retrabalho"): a produção conta no dia do envase e a OP volta pro
+// estoque; quando o material chega, a OP é iniciada numa linha só para o
+// retrabalho — o tempo conta normalmente, mas a quantidade NÃO soma de novo.
+//
+// Tudo sai dos eventos FINISHED (sem coluna nova no banco):
+//   "Aguardando retrabalho: <o que falta> | ..."  → envase concluído, aguardando
+//   "Retrabalho concluído | ..."                  → OP finalizada de vez
+
+const REWORK_MARKER_RE = /^aguardando retrabalho/i;
+const REWORK_DONE_RE = /^retrabalho conclu/i;
+
+export function isReworkMarkerEvent(ev?: ProductionEvent | null): boolean {
+  return !!ev && ev.type === 'FINISHED' && REWORK_MARKER_RE.test(String(ev.observation || '').trim());
+}
+export function isReworkDoneEvent(ev?: ProductionEvent | null): boolean {
+  return !!ev && ev.type === 'FINISHED' && REWORK_DONE_RE.test(String(ev.observation || '').trim());
+}
+
+export interface ReworkInfo {
+  /** O que está faltando (texto do líder) */
+  reason: string;
+  /** Quantidade envasada que aguarda retrabalho */
+  quantity: number;
+  /** Quando o envase foi concluído */
+  since: string;
+  /** Retrabalho já concluído (OP finalizada de vez) */
+  done: boolean;
+}
+
+/** OPs com retrabalho (aguardando, em retrabalho ou já concluído), por id. */
+export function getReworkInfoByOp(events: ProductionEvent[]): Map<string, ReworkInfo> {
+  const out = new Map<string, ReworkInfo>();
+  const sorted = [...(events || [])]
+    .filter(e => e?.opId && e.type === 'FINISHED')
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  for (const ev of sorted) {
+    const key = String(ev.opId);
+    if (isReworkMarkerEvent(ev)) {
+      const text = String(ev.observation || '').trim();
+      const m = text.match(/^aguardando retrabalho:\s*(.*?)\s*(\||$)/i);
+      out.set(key, {
+        reason: (m?.[1] || '').trim() || 'Material pendente',
+        quantity: Number(ev.quantity) || 0,
+        since: ev.createdAt,
+        done: false,
+      });
+    } else if (isReworkDoneEvent(ev)) {
+      const cur = out.get(key);
+      if (cur) out.set(key, { ...cur, done: true });
+    }
+  }
+  return out;
+}
+
+/** A OP está aguardando retrabalho ou em retrabalho (ainda não finalizada)? */
+export function isOpInRework(opId: string, events: ProductionEvent[]): boolean {
+  const info = getReworkInfoByOp((events || []).filter(e => String(e.opId) === String(opId))).get(String(opId));
+  return !!info && !info.done;
+}
+
 // ---------------- CONCLUSÕES PARCIAIS ----------------
 // Numa conclusão Parcial (sem Sleev) a OP volta pro estoque com o saldo como
 // novo planejado e produzido ZERADO — a quantidade envasada até ali só fica
@@ -350,7 +414,11 @@ export function computeProductionByLineAndDay(
     list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     const op = opById.get(opId);
     let cumulative = 0;
+    // Depois do "Aguardando retrabalho" a quantidade já foi contada no dia
+    // do envase — o retrabalho só gasta tempo, não soma produção de novo.
+    let reworkPhase = false;
     for (const ev of list) {
+      if (reworkPhase) continue;
       const lineId = ev.lineId || op?.lineId || undefined;
       const q = ev.quantity !== undefined && ev.quantity !== null && !isNaN(Number(ev.quantity)) ? Number(ev.quantity) : undefined;
       if (ev.type === 'QUANTITY_REPORTED') {
@@ -369,6 +437,7 @@ export function computeProductionByLineAndDay(
           credit(lineId, ev.createdAt, q - cumulative);
         }
         cumulative = 0;
+        if (isReworkMarkerEvent(ev)) reworkPhase = true;
       }
     }
   }
@@ -4236,6 +4305,166 @@ export const finishOP = async (
 };
 
 /**
+ * RETRABALHO — conclui o ENVASE de uma OP que ainda não pode ser finalizada
+ * (falta material, ex.: divisória). A quantidade envasada conta como produção
+ * AGORA; a OP volta pro estoque (sem linha) aguardando o retrabalho, com o
+ * produzido e a data do envase preservados. Com "Parcial", o saldo que não
+ * foi envasado vira uma OP nova, pronta para um novo envase.
+ */
+export const sendOpToRework = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  producedQuantity: number,
+  reason: string,
+  lostQuantity?: number,
+  isPartial?: boolean
+): Promise<{ ok: boolean; error?: string }> => {
+  const cleanReason = String(reason || '').trim().replace(/\|/g, '/');
+  if (!cleanReason) return { ok: false, error: 'Informe o que está faltando.' };
+  if (trainingModeActive) return { ok: false, error: 'Retrabalho não está disponível no modo treinamento.' };
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  if (!currentOp) return { ok: false, error: 'OP não encontrada.' };
+  const localSnapshot = snapshotLocalState();
+  const nowIso = new Date().toISOString();
+  const qty = Math.max(0, Math.floor(Number(producedQuantity) || 0));
+  const lost = lostQuantity !== undefined ? Math.max(0, Math.floor(Number(lostQuantity) || 0)) : (currentOp.rejectedQuantity || 0);
+  const planned = currentOp.plannedQuantity || 0;
+  const remainderQty = isPartial ? Math.max(0, planned - qty) : 0;
+  const effectivePartial = Boolean(isPartial) && remainderQty > 0;
+
+  const observation =
+    `Aguardando retrabalho: ${cleanReason} | Envase concluído com ${qty.toLocaleString('pt-BR')} un` +
+    `${lost > 0 ? `, ${lost.toLocaleString('pt-BR')} perdida(s)` : ''}` +
+    `${effectivePartial ? `; saldo de ${remainderQty.toLocaleString('pt-BR')} un liberado em uma nova OP` : ''}.`;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId
+      ? {
+          ...op,
+          status: 'pending',
+          lineId: null,
+          leaderId: null,
+          producedQuantity: qty,
+          rejectedQuantity: lost,
+          plannedQuantity: effectivePartial ? qty : op.plannedQuantity,
+          completedAt: nowIso,
+          finishedShift: undefined,
+        }
+      : op
+  );
+  inMemoryLines = inMemoryLines.map(l => (l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l));
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'FINISHED',
+    quantity: qty,
+    observation,
+    createdAt: nowIso,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistOps();
+  persistLines();
+  persistEvents();
+
+  const payload: any = {
+    status: 'pending',
+    line_id: null,
+    leader_id: null,
+    produced_quantity: qty,
+    rejected_quantity: lost,
+    finished_shift: null,
+    completed_at: nowIso,
+  };
+  if (effectivePartial) payload.planned_quantity = qty;
+  const opWrite = await updateOpVerified(opId, payload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Aguardar retrabalho', opWrite, opId, currentOp.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  if (effectivePartial) {
+    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[sendOpToRework] Não foi possível criar a OP de saldo:', err);
+      notifyDbWriteFailure('Criar OP de saldo', String(err?.message || err), currentOp.number);
+    });
+  }
+
+  try {
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({ opId, lineId, leaderId, type: 'FINISHED', quantity: qty, observation, createdAt: nowIso });
+  } catch (error) {
+    console.error('[sendOpToRework] Erro ao registrar evento:', error);
+  }
+  return { ok: true };
+};
+
+/**
+ * Conclui o RETRABALHO: a OP é finalizada de vez. Produzido, rejeitos e a
+ * data do envase NÃO mudam (a produção já contou no dia do envase) — só o
+ * status. O evento não traz quantidade, então não soma produção de novo.
+ */
+export const finishReworkOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  observationExtra?: string
+): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) return { ok: false, error: 'Retrabalho não está disponível no modo treinamento.' };
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  if (!currentOp) return { ok: false, error: 'OP não encontrada.' };
+  const localSnapshot = snapshotLocalState();
+  const nowIso = new Date().toISOString();
+  const info = getReworkInfoByOp(inMemoryEvents.filter(e => e.opId === opId)).get(opId);
+  const extra = String(observationExtra || '').trim();
+  const observation = `Retrabalho concluído | ${info?.reason || 'material pendente'}${extra ? ` — ${extra}` : ''}`;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId ? { ...op, status: 'completed', leaderId: leaderId || op.leaderId, completedAt: op.completedAt || nowIso } : op
+  );
+  inMemoryLines = inMemoryLines.map(l => (l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l));
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'FINISHED',
+    observation,
+    createdAt: nowIso,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistOps();
+  persistLines();
+  persistEvents();
+
+  const payload: any = { status: 'completed', leader_id: leaderId || null };
+  if (!currentOp.completedAt) payload.completed_at = nowIso;
+  const opWrite = await updateOpVerified(opId, payload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Concluir retrabalho', opWrite, opId, currentOp.number);
+    return { ok: false, error: opWrite.error };
+  }
+  try {
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({ opId, lineId, leaderId, type: 'FINISHED', observation, createdAt: nowIso });
+  } catch (error) {
+    console.error('[finishReworkOP] Erro ao registrar evento:', error);
+  }
+  return { ok: true };
+};
+
+/**
  * Cancela uma OP iniciada por engano — devolve para "Aguardando" (pending)
  * e remove os eventos (STARTED/PAUSED/RESUMED) desta sessão errada, pra não
  * contaminar o cálculo real de Disponibilidade/Ociosidade com um horário de
@@ -4279,7 +4508,7 @@ export const cancelOP = async (
   if (!currentOp) {
     return { success: false, message: 'OP não encontrada.' };
   }
-  if ((currentOp.producedQuantity || 0) > 0) {
+  if ((currentOp.producedQuantity || 0) > 0 && !isOpInRework(opId, inMemoryEvents)) {
     return { success: false, message: 'Esta OP já tem quantidade produzida registrada — não pode ser cancelada, apenas pausada ou finalizada.' };
   }
 
@@ -4698,3 +4927,90 @@ export const getPesagemHistory = async (fromDateStr: string, toDateStr: string):
 function resetTrainingPesagemHistory(): void {
   trainingPesagemHistory = [];
 }
+
+
+// ---------------- RELATÓRIO DO DIA (daily_reports) ----------------
+// Parte digitada pelo Coordenador (quadro do dia, principais pontos,
+// segurança). Tabela criada por sql/add_daily_reports.sql. Os números de
+// produção, tempos e equipe NÃO ficam aqui — saem dos registros do app.
+
+const mapDailyReportRow = (r: any): DailyReportManual => ({
+  date: String(r.report_date).slice(0, 10),
+  atestados: Number(r.atestados) || 0,
+  faltas: Number(r.faltas) || 0,
+  atrasos: Number(r.atrasos) || 0,
+  saidasAntecipadas: Number(r.saidas_antecipadas) || 0,
+  pontos: Array.isArray(r.pontos) ? r.pontos.map((p: any) => ({ titulo: String(p?.titulo || ''), texto: String(p?.texto || '') })) : [],
+  seguranca: String(r.seguranca || ''),
+  updatedAt: r.updated_at || null,
+  updatedBy: r.updated_by || null,
+});
+
+let trainingDailyReports: DailyReportManual[] = [];
+
+/** Relatórios salvos entre duas datas ('AAAA-MM-DD', inclusivo). */
+export const getDailyReports = async (fromDate: string, toDate: string): Promise<{ reports: DailyReportManual[]; error: string | null }> => {
+  if (trainingModeActive) {
+    return { reports: trainingDailyReports.filter(r => r.date >= fromDate && r.date <= toDate).map(r => ({ ...r })), error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .gte('report_date', fromDate)
+      .lte('report_date', toDate)
+      .order('report_date', { ascending: true });
+    if (error) {
+      console.warn('[getDailyReports] Não foi possível ler daily_reports (rodou sql/add_daily_reports.sql?):', error.message);
+      return { reports: [], error: error.message };
+    }
+    return { reports: (data || []).map(mapDailyReportRow), error: null };
+  } catch (err: any) {
+    return { reports: [], error: String(err?.message || err) };
+  }
+};
+
+/** Salva (cria ou substitui) a parte digitada do relatório de um dia. */
+export const saveDailyReport = async (report: DailyReportManual, userId?: string | null): Promise<{ error: string | null }> => {
+  const clean: DailyReportManual = {
+    ...report,
+    atestados: Math.max(0, Math.floor(Number(report.atestados) || 0)),
+    faltas: Math.max(0, Math.floor(Number(report.faltas) || 0)),
+    atrasos: Math.max(0, Math.floor(Number(report.atrasos) || 0)),
+    saidasAntecipadas: Math.max(0, Math.floor(Number(report.saidasAntecipadas) || 0)),
+    pontos: (report.pontos || []).map(p => ({ titulo: String(p.titulo || '').trim(), texto: String(p.texto || '').trim() })),
+    seguranca: String(report.seguranca || '').trim(),
+  };
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingDailyReports = [...trainingDailyReports.filter(r => r.date !== clean.date), { ...clean, updatedAt: nowIso, updatedBy: userId || null }];
+    return { error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('daily_reports')
+      .upsert({
+        report_date: clean.date,
+        atestados: clean.atestados,
+        faltas: clean.faltas,
+        atrasos: clean.atrasos,
+        saidas_antecipadas: clean.saidasAntecipadas,
+        pontos: clean.pontos,
+        seguranca: clean.seguranca,
+        updated_at: nowIso,
+        updated_by: userId && isUUID(userId) ? userId : null,
+      }, { onConflict: 'report_date' })
+      .select('report_date');
+    if (error) {
+      notifyDbWriteFailure('Salvar relatório do dia', error.message);
+      return { error: error.message };
+    }
+    if (!data || data.length === 0) {
+      notifyDbWriteFailure('Salvar relatório do dia', 'o banco não gravou (sem permissão)');
+      return { error: 'o banco não gravou (sem permissão)' };
+    }
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};

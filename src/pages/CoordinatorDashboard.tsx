@@ -69,6 +69,7 @@ import {
   finishOP, 
   getRecentEvents, 
   getPauseReasons,
+  getReworkInfoByOp,
   resetProductionDatabase,
   generateTemporaryPassword,
   generateLeaderEmail,
@@ -90,13 +91,13 @@ import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
 import { LeaderScreen } from './LeaderScreen';
-import { TrainingSimulator } from './TrainingSimulator';
-import { canUserAccessTab, getUserAllowedTabs, getUserRule, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
+import { canUserAccessTab, getUserAllowedTabs, getUserRule, getCronogramaAccess, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, GraduationCap } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, Eye, FileText } from 'lucide-react';
+import { DailyReport } from '../components/DailyReport';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -264,6 +265,16 @@ export function CoordinatorDashboard() {
   // reatores da Manipulação — mesma tela, dois quadros separados, nunca
   // exibidos ao mesmo tempo.
   const [cronogramaMode, setCronogramaMode] = useState<'envase' | 'manipulacao'>('envase');
+  // Líderes só VISUALIZAM o cronograma, e só o quadro da sua área.
+  const cronogramaAccess = React.useMemo(() => getCronogramaAccess(profile), [profile]);
+  const cronogramaReadOnly = !cronogramaAccess.editable;
+  // OPs envasadas aguardando material (retrabalho) — selo no cronograma
+  const reworkByOp = React.useMemo(() => getReworkInfoByOp(events), [events]);
+  useEffect(() => {
+    if (cronogramaAccess.modes.length > 0 && !cronogramaAccess.modes.includes(cronogramaMode)) {
+      setCronogramaMode(cronogramaAccess.modes[0]);
+    }
+  }, [cronogramaAccess, cronogramaMode]);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
@@ -1326,14 +1337,21 @@ WHERE email IN (
       icon: FlaskConical,
     },
     envase: {
-      title: 'Chão de Fábrica (Envase)',
-      subtitle: 'Controle de linhas de envase',
-      icon: Factory,
+      title: 'Envase',
+      subtitle: 'Controle de linhas de envase e apontamento em tempo real',
+      icon: Boxes,
     },
     cronograma: {
-      title: 'Cronograma de Envase',
-      subtitle: 'Quadro Kanban para atribuir e mover OPs entre as linhas de envase',
+      title: 'Cronograma',
+      subtitle: cronogramaReadOnly
+        ? 'Programação das linhas (somente visualização)'
+        : 'Quadro Kanban para atribuir e mover OPs entre as linhas e reatores',
       icon: Layers,
+    },
+    relatorio: {
+      title: 'Relatório do Dia',
+      subtitle: 'Relatório diário de produção para envio',
+      icon: FileText,
     },
     daily_production: {
       title: 'Histórico & Gráficos',
@@ -1354,11 +1372,6 @@ WHERE email IN (
       title: 'Auditoria Operacional',
       subtitle: 'Histórico detalhado de paradas, apontamentos e eventos',
       icon: History,
-    },
-    training: {
-      title: 'Treinamento (Simulação)',
-      subtitle: 'Simula as telas dos líderes com OPs fictícias para treinamento, sem afetar a produção real',
-      icon: GraduationCap,
     },
   };
 
@@ -1487,14 +1500,6 @@ WHERE email IN (
               <LeaderScreen embedded={true} />
             )}
 
-            {/* ---------------- TELA: TREINAMENTO (SIMULAÇÃO DAS TELAS DOS LÍDERES) ----------------
-                Só aparece pra quem tem a Rule "admin" (Coordenador Geral) — ver
-                ACCESS_RULES.admin.tabs em lib/permissions.ts. 100% dados fictícios,
-                nenhuma chamada a services/db.ts ou ao Supabase. */}
-            {activeTab === 'training' && (
-              <TrainingSimulator />
-            )}
-
             {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
             {activeTab === 'daily_production' && (
               <DailyProductionHistory
@@ -1503,6 +1508,19 @@ WHERE email IN (
                 leaders={leaders}
                 goals={goals}
                 events={events}
+              />
+            )}
+
+            {/* ---------------- TELA: RELATÓRIO DO DIA (Coordenação) ---------------- */}
+            {activeTab === 'relatorio' && (
+              <DailyReport
+                lines={lines}
+                ops={ops}
+                events={events}
+                goals={goals}
+                factoryMonthlyGoals={factoryMonthlyGoals}
+                lineDailyGoals={lineDailyGoals}
+                userId={profile?.uid || null}
               />
             )}
 
@@ -1519,14 +1537,25 @@ WHERE email IN (
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                       Tempo Real
                     </span>
+                    {cronogramaReadOnly && (
+                      <span className="text-[10px] bg-[#1a1a22] text-[#a1a1aa] border border-[#2c2c3c] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                        <Eye className="w-3 h-3" />
+                        Somente visualização
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-[#71717a] mt-0.5">
-                    {cronogramaMode === 'envase'
+                    {cronogramaReadOnly
+                      ? cronogramaMode === 'envase'
+                        ? 'Fila de OPs programadas para cada linha de envase. Selecione o dia nas abas abaixo. Mudanças na programação são feitas pela coordenação.'
+                        : 'Fila de OSMs programadas para cada reator da Manipulação. Selecione o dia nas abas abaixo. Mudanças na programação são feitas pela coordenação.'
+                      : cronogramaMode === 'envase'
                       ? 'Selecione o dia da semana nas abas abaixo e arraste as OPs entre as colunas para atribuí-las às linhas de envase naquele dia, ou use o "+" de cada coluna.'
                       : 'Organize aqui as OSMs de Pesagem entre os 3 reatores da Manipulação. Selecione o dia da semana e arraste as OPs entre as colunas, ou use o "+" de cada coluna.'}
                   </p>
                 </div>
 
+                {cronogramaAccess.modes.length > 1 && (
                 <div className="flex items-center gap-1 bg-[#0e0e12] border border-[#222228] rounded-xl p-1 shrink-0">
                   <button
                     type="button"
@@ -1547,6 +1576,7 @@ WHERE email IN (
                     Manipulação
                   </button>
                 </div>
+                )}
               </div>
 
               {cronogramaMode === 'envase' ? (
@@ -1558,6 +1588,8 @@ WHERE email IN (
                   onReorderColumn={handleReorderColumn}
                   onOpenAssignModal={(line) => setAssignStockModalTargetLine(line)}
                   onOpenEditOpModal={(op) => handleOpenEditOPModal(op)}
+                  readOnly={cronogramaReadOnly}
+                  reworkByOp={reworkByOp}
                 />
               ) : (
                 <CronogramaBoard
@@ -1572,6 +1604,8 @@ WHERE email IN (
                   backlogLabel="Estoque / Pesagem"
                   backlogEmptyLabel="Nenhuma OSM de Pesagem disponível"
                   lineOpsFilter={isReactorColumnOp}
+                  readOnly={cronogramaReadOnly}
+                  reworkByOp={reworkByOp}
                 />
               )}
             </div>
@@ -1599,22 +1633,6 @@ WHERE email IN (
 
                 {/* Botões no canto superior direito */}
                 <div className="flex items-center gap-2 w-full md:w-auto shrink-0 flex-wrap sm:flex-nowrap">
-                  {ops.length > 0 && (
-                    <button
-                      type="button"
-                      id="btn-limpar-base"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowResetModal(true);
-                      }}
-                      className="h-9 px-3.5 bg-[#181216] hover:bg-[#25181e] border border-red-900/40 hover:border-red-700/60 text-red-400 hover:text-red-300 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer active:scale-95 whitespace-nowrap flex-1 sm:flex-initial"
-                      title="Limpar todas as OPs e resetar a base de dados"
-                    >
-                      <Trash2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
-                      <span>Limpar Base</span>
-                    </button>
-                  )}
-
                   <Button
                     onClick={() => setShowCsvImportModal(true)}
                     className="h-9 px-3.5 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-blue-400 hover:text-blue-300 text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all whitespace-nowrap flex-1 sm:flex-initial cursor-pointer"

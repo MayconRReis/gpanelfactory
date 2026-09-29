@@ -48,30 +48,24 @@ function formatDateBr(dateStr?: string | null): string {
 
 interface PesagemScreenProps {
   embedded?: boolean;
-  /** Usado pelo Simulador de Treinamento — esconde a aba "Histórico &
-   * Gráficos", que não faz sentido sobre dados fictícios da simulação. */
-  hideDashboardTabs?: boolean;
 }
 
-export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: PesagemScreenProps = {}) {
+export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [activeViewTab, setActiveViewTab] = useState<'registro' | 'historico' | 'movimentacoes'>('registro');
 
   // Histórico de movimentações: quem fez cada ação é o nome do usuário
-  // logado. A aba "Movimentações" só aparece para a Coordenação.
+  // logado. A aba "Movimentações" aparece para a Coordenação e para os líderes da Pesagem.
   const isCoordinatorUser = getUserRule(profile) === 'admin';
+  // Aba Movimentações: Coordenação e líderes da Pesagem
+  const canSeeMovimentacoes = isCoordinatorUser || getUserRule(profile) === 'pesagem';
 
-  // Em modo treinamento (hideDashboardTabs) só existe a aba de registro —
-  // garante que nunca fique "preso" na aba de histórico escondida.
   useEffect(() => {
-    if ((hideDashboardTabs || !isCoordinatorUser) && activeViewTab === 'movimentacoes') {
+    if (!canSeeMovimentacoes && activeViewTab === 'movimentacoes') {
       setActiveViewTab('registro');
     }
-    if (hideDashboardTabs && activeViewTab !== 'registro') {
-      setActiveViewTab('registro');
-    }
-  }, [hideDashboardTabs, activeViewTab, isCoordinatorUser]);
+  }, [activeViewTab, canSeeMovimentacoes]);
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [lines, setLines] = useState<ProductionLine[]>([]);
   const [leaders, setLeaders] = useState<UserProfile[]>([]);
@@ -333,6 +327,14 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
   const totalOsmsEstoque = useMemo(() => {
     return pesagemQueueOps.length;
   }, [pesagemQueueOps]);
+
+  // Total de OSMs registradas hoje na Pesagem (indicador do cabeçalho "Hoje na Pesagem")
+  const totalOsmsHoje = useMemo(() => {
+    return ops.filter(op => {
+      const isPesagem = op.setor === 'Pesagem' || (!op.setor && op.tipoDocumento === 'OSM');
+      return isPesagem && isOpFromToday(op);
+    }).length;
+  }, [ops, isOpFromToday]);
 
   // Nome que vai para o histórico: o nome do usuário logado.
   const resolveActorName = (): string =>
@@ -742,8 +744,8 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                   : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
               }`}
             >
-              <FileSpreadsheet className="w-4 h-4 shrink-0" />
-              <span>Registro de OPs</span>
+              <Scale className="w-4 h-4 shrink-0" />
+              <span>OPERAÇÃO</span>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${
                 activeViewTab === 'registro'
                   ? 'bg-purple-800 text-white'
@@ -753,29 +755,27 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               </span>
             </button>
 
-            {!hideDashboardTabs && (
-              <button
-                type="button"
-                onClick={() => setActiveViewTab('historico')}
-                className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
-                  activeViewTab === 'historico'
-                    ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
-                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
-                }`}
-              >
-                <BarChart3 className="w-4 h-4 shrink-0" />
-                <span>Histórico & Gráficos</span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
-                  activeViewTab === 'historico'
-                    ? 'bg-purple-800 text-purple-200'
-                    : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
-                }`}>
-                  diário & mensal
-                </span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setActiveViewTab('historico')}
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                activeViewTab === 'historico'
+                  ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4 shrink-0" />
+              <span>DASHBOARD</span>
+              <span className={`text-[10px] px-2 py-0.5 rounded-full font-sans lowercase font-bold ${
+                activeViewTab === 'historico'
+                  ? 'bg-purple-800 text-purple-200'
+                  : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
+              }`}>
+                diária & semanal
+              </span>
+            </button>
 
-            {!hideDashboardTabs && isCoordinatorUser && (
+            {canSeeMovimentacoes && (
               <button
                 type="button"
                 onClick={() => setActiveViewTab('movimentacoes')}
@@ -786,23 +786,16 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                 }`}
               >
                 <ClipboardList className="w-4 h-4 shrink-0" />
-                <span>Movimentações</span>
+                <span>MOVIMENTAÇÕES</span>
               </button>
             )}
-          </div>
-
-          <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">
-            <span className="text-[#71717a]">Em estoque na Pesagem:</span>
-            <span className="font-mono font-bold text-purple-300 bg-purple-950/60 px-2.5 py-1 rounded-lg border border-purple-800/40 whitespace-nowrap">
-              {totalOsmsEstoque.toLocaleString('pt-BR')} OP{totalOsmsEstoque !== 1 ? 's' : ''}
-            </span>
           </div>
         </div>
       </div>
 
       {/* CORPO PRINCIPAL */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col gap-6">
-        {activeViewTab === 'movimentacoes' && isCoordinatorUser && !hideDashboardTabs ? (
+        {activeViewTab === 'movimentacoes' && canSeeMovimentacoes ? (
           <PesagemMovimentacoes />
         ) : activeViewTab === 'historico' ? (
           <div className="space-y-6">
@@ -823,7 +816,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
             <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 sm:p-5 rounded-2xl shadow-sm">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2.5">
-                  <FileSpreadsheet className="w-5 h-5 text-purple-400 shrink-0" />
+                  <Scale className="w-5 h-5 text-purple-400 shrink-0" />
                   <h1 className="text-base sm:text-xl font-bold text-white tracking-tight">Estoque de OPs de Pesagem</h1>
                 </div>
                 <p className="text-xs text-[#a1a1aa] mt-1 line-clamp-2 sm:line-clamp-none">
@@ -838,7 +831,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                   className="h-10 sm:h-11 px-3.5 sm:px-4 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-purple-300 hover:text-white text-xs font-bold flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap cursor-pointer"
                 >
                   <BarChart3 className="w-4 h-4 text-purple-400 shrink-0" />
-                  <span>Ver Histórico & Gráficos</span>
+                  <span>Ver Dashboard</span>
                 </Button>
 
                 <Button
