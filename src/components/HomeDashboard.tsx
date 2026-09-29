@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
 import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
-import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
+import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -891,8 +891,11 @@ export function HomeDashboard({
       .filter(ws => ws.lineId === line.id && toLocalDateStr(ws.startedAt) === todayDateStr)
       .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
     const hhmm = (iso?: string | null) => iso ? new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+    const autoSession = !openSession ? getAutoShiftNow(line.id, ops, workSessions, nowTick) : null;
     const sessionLabel = openSession
       ? `Expediente aberto desde ${hhmm(openSession.startedAt)}${toLocalDateStr(openSession.startedAt) !== todayDateStr ? ' (ontem ou antes — não foi encerrado)' : ''}`
+      : autoSession?.active && autoSession.startMs
+      ? `Expediente automático desde ${hhmm(new Date(autoSession.startMs).toISOString())}`
       : lastSessionToday
       ? `Expediente encerrado às ${hhmm(lastSessionToday.endedAt)}`
       : 'Expediente não iniciado';
@@ -901,6 +904,7 @@ export function HomeDashboard({
     const changeoverTodayMs = todayProductionTime.byLine[line.id]?.changeoverMs || 0;
     const sessionLabelClass = openSession
       ? (toLocalDateStr(openSession.startedAt) !== todayDateStr ? 'text-rose-400' : 'text-emerald-400')
+      : autoSession?.active ? 'text-emerald-400'
       : lastSessionToday ? 'text-[#a1a1aa]' : 'text-[#52525b]';
 
     const start = activeLineOp ? getOpStartTime(activeLineOp.id) : null;

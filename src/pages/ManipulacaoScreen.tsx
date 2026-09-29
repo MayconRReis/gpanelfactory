@@ -39,10 +39,12 @@ import {
   getOpenWorkSession,
   getRecentEvents,
   cancelOP,
+  logPesagemHistory,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
+import { getAutoShiftNow } from '../lib/productionTime';
 
 interface ManipulacaoScreenProps {
   embedded?: boolean;
@@ -409,9 +411,25 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       .filter((ws): ws is WorkSession => !!ws),
     [workSessions, reactorLines]
   );
-  const shiftOpenSince = openReactorShifts.length > 0
+  const explicitShiftSince = openReactorShifts.length > 0
     ? openReactorShifts.reduce((a, b) => (new Date(a.startedAt).getTime() < new Date(b.startedAt).getTime() ? a : b)).startedAt
     : null;
+
+  // Expediente automático: reator com OP no dia começa às 7h sozinho e
+  // termina no fim da jornada se ninguém encerrar.
+  const currentMinuteKey = Math.floor(currentTime.getTime() / 60000);
+  const autoReactorShifts = useMemo(
+    () => reactorLines
+      .filter(r => !getOpenWorkSession(workSessions, r.id))
+      .map(r => ({ lineId: r.id, ...getAutoShiftNow(r.id, ops, workSessions, currentMinuteKey * 60000) }))
+      .filter(a => a.active && a.startMs),
+    [reactorLines, ops, workSessions, currentMinuteKey]
+  );
+  const autoShiftStartMs = autoReactorShifts.length > 0 ? Math.min(...autoReactorShifts.map(a => a.startMs as number)) : null;
+  const shiftOpenSince: string | null = explicitShiftSince
+    ? (autoShiftStartMs && autoShiftStartMs < new Date(explicitShiftSince).getTime() ? new Date(autoShiftStartMs).toISOString() : explicitShiftSince)
+    : (autoShiftStartMs ? new Date(autoShiftStartMs).toISOString() : null);
+  const shiftIsAutomatic = !explicitShiftSince && !!autoShiftStartMs;
 
   const handleStartShift = async () => {
     if (!profile) return;
@@ -431,7 +449,14 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     for (const op of running) {
       await pauseOP(op.id, op.lineId as string, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
     }
-    const res = await endWorkSession(reactorLines.map(r => r.id), profile.uid);
+    // Reatores com expediente registrado: encerra. Reatores no expediente
+    // automático (sem registro): grava o trecho 7h → agora já encerrado.
+    const autoIds = autoReactorShifts.map(a => a.lineId);
+    const explicitIds = reactorLines.map(r => r.id).filter(id => !autoIds.includes(id));
+    let res = explicitIds.length > 0 ? await endWorkSession(explicitIds, profile.uid) : { error: null as string | null };
+    if (!res.error && autoIds.length > 0 && autoShiftStartMs) {
+      res = await endWorkSession(autoIds, profile.uid, { autoStartIso: new Date(autoShiftStartMs).toISOString() });
+    }
     setIsShiftBusy(false);
     if (res.error) {
       showToast(`Não foi possível encerrar o expediente: ${res.error}`, 'error');
@@ -449,12 +474,37 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     if (res.error) console.warn('[Manipulação] Expediente não aberto automaticamente:', res.error);
   };
 
+  // Histórico da Pesagem: a "saída" normal de uma OSM é quando a Manipulação
+  // a inicia no reator. Registra quem iniciou (login da Manipulação) — só
+  // para OSMs que vieram da Pesagem.
+  const logPesagemExit = async (op: ProductionOrder, action: 'manipulacao_started' | 'manipulacao_start_cancelled') => {
+    if (!profile) return;
+    const num = (op.number || '').trim();
+    const lot = (op.lote || '').trim();
+    const cameFromPesagem = ops.some(o =>
+      (o.setor === 'Pesagem' || (!o.setor && o.tipoDocumento === 'OSM')) &&
+      ((num && (o.number || '').trim() === num) || (lot && (o.lote || '').trim() === lot))
+    );
+    if (!cameFromPesagem) return;
+    const reactorName = reactorLines.find(r => r.id === op.lineId)?.name || op.lineId || '';
+    const res = await logPesagemHistory({
+      action,
+      op,
+      collaboratorName: (profile.name || '').trim() || 'Manipulação',
+      userId: profile.uid,
+      userName: profile.name || null,
+      details: { reactor: reactorName },
+    });
+    if (res.error) console.warn('[Manipulação] Histórico da Pesagem não gravado:', res.error);
+  };
+
   const handleStart = async (op: ProductionOrder) => {
     if (!profile || !op.lineId) return;
     setActionBusyOpId(op.id);
     try {
       await ensureShiftOpen(op.lineId);
       await startOP(op.id, op.lineId, profile.uid);
+      if (op.status === 'pending') await logPesagemExit(op, 'manipulacao_started');
       await fetchData(true);
     } catch (err) {
       console.error('Erro ao iniciar manipulação:', err);
@@ -548,6 +598,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
         showToast(res.message || 'Não foi possível cancelar o início desta OP.', 'error');
         return;
       }
+      await logPesagemExit(cancellingOp, 'manipulacao_start_cancelled');
       showToast(`Início da OP ${cancellingOp.number} cancelado — ela voltou para a fila do reator.`);
       setCancellingOp(null);
       await fetchData(true);
@@ -905,13 +956,14 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
                       <Sunset className="w-4 h-4 text-rose-400" />
                       Encerrar Expediente
                       <span className="font-mono text-[10px] text-rose-300/80">
-                        (desde {new Date(shiftOpenSince).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+                          (desde {new Date(shiftOpenSince).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}{shiftIsAutomatic ? ' · automático' : ''})
                       </span>
                     </button>
                   ) : (
                     <button
                       onClick={handleStartShift}
                       disabled={isShiftBusy}
+                      title="O expediente começa sozinho às 7h nos reatores com OP no dia. Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
                       className="px-3 py-2 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center gap-2 transition-all disabled:opacity-60"
                     >
                       <Sunrise className="w-4 h-4 text-emerald-400" />

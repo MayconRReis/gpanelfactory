@@ -63,6 +63,103 @@ export const WORK_SCHEDULE: Record<number, { start: number; end: number } | null
   6: null,
 };
 
+/**
+ * EXPEDIENTE AUTOMÁTICO
+ * A partir desta data, nos dias de jornada (seg–sex), toda linha que tem OP
+ * no dia começa o expediente sozinha no horário de início da jornada (7h) e,
+ * se o líder não encerrar, termina sozinha no fim da jornada (17h / 16h na
+ * sexta). Parada dentro desse horário conta como ociosa. O botão "Iniciar
+ * expediente" só é necessário para começar ANTES das 7h (hora extra).
+ * Dias passados em que NENHUMA linha da fábrica teve atividade (feriado,
+ * folga) não geram expediente automático.
+ */
+export const AUTO_SHIFT_START_DATE = '2026-09-30';
+
+function localDayStr(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Janela da jornada padrão de um dia (hora local), ou null em fim de semana. */
+export function getScheduledWindow(dayMs: number): [number, number] | null {
+  const d = new Date(dayMs);
+  const win = WORK_SCHEDULE[d.getDay()];
+  if (!win) return null;
+  const y = d.getFullYear(), m = d.getMonth(), dd = d.getDate();
+  return [new Date(y, m, dd, win.start, 0, 0, 0).getTime(), new Date(y, m, dd, win.end, 0, 0, 0).getTime()];
+}
+
+/**
+ * A linha "tem OP no dia"? — OP programada para o dia nesta linha, OP
+ * finalizada nesta linha no dia, ou (hoje) OP ainda aberta na fila da linha.
+ */
+export function lineHasOpOnDay(lineId: string, dayStr: string, ops: ProductionOrder[], todayStr: string): boolean {
+  return ops.some(op => {
+    if (!op || op.lineId !== lineId) return false;
+    if (op.id && String(op.id).startsWith('imp-')) return false;
+    if (op.isPartialRecord) return false;
+    if (op.scheduledDate === dayStr) return true;
+    if (op.completedAt && localDayStr(new Date(op.completedAt).getTime()) === dayStr) return true;
+    if (dayStr === todayStr && op.status !== 'completed') return true;
+    return false;
+  });
+}
+
+/**
+ * Trecho de expediente automático de uma linha num dia, ou null.
+ * `factoryHadActivity` = alguma linha trabalhou ou abriu expediente no dia
+ * (só é exigido para dias passados; hoje o ocioso aparece desde as 7h).
+ */
+export function getAutoShiftRange(
+  lineId: string,
+  dayMs: number,
+  ops: ProductionOrder[],
+  sessions: WorkSession[],
+  refTime: number,
+  factoryHadActivity: boolean
+): [number, number] | null {
+  const dayStr = localDayStr(dayMs);
+  if (dayStr < AUTO_SHIFT_START_DATE) return null;
+  const win = getScheduledWindow(dayMs);
+  if (!win) return null;
+  const todayStr = localDayStr(refTime);
+  if (dayStr > todayStr) return null;
+  if (dayStr < todayStr && !factoryHadActivity) return null;
+  if (!lineHasOpOnDay(lineId, dayStr, ops, todayStr)) return null;
+
+  let [start, end] = win;
+  // Encerrado pelo líder antes do fim da jornada (e sem outro expediente
+  // aberto depois): o automático termina ali.
+  const daySessions = sessions.filter(ss => ss.lineId === lineId && localDayStr(new Date(ss.startedAt).getTime()) === dayStr);
+  if (daySessions.length > 0 && daySessions.every(ss => !!ss.endedAt)) {
+    const lastEnd = Math.max(...daySessions.map(ss => new Date(ss.endedAt as string).getTime()).filter(n => !isNaN(n)));
+    if (isFinite(lastEnd) && lastEnd < end) end = lastEnd;
+  }
+  end = Math.min(end, refTime);
+  return end > start ? [start, end] : null;
+}
+
+/**
+ * Estado do expediente automático AGORA (para as telas): ativo quando é dia
+ * de jornada, já passou das 7h, ainda não deu o fim da jornada, a linha tem
+ * OP hoje e o líder não encerrou o expediente de hoje.
+ */
+export function getAutoShiftNow(
+  lineId: string,
+  ops: ProductionOrder[],
+  sessions: WorkSession[],
+  now: number = Date.now()
+): { active: boolean; startMs: number | null; endMs: number | null } {
+  const win = getScheduledWindow(now);
+  const none = { active: false, startMs: null as number | null, endMs: null as number | null };
+  if (!win || now < win[0] || now >= win[1]) return none;
+  const range = getAutoShiftRange(lineId, now, ops, sessions, now, true);
+  if (!range) return none;
+  // Ainda "vale" só se não foi encerrado agora há pouco (range termina em now)
+  if (range[1] < now) return none;
+  return { active: true, startMs: win[0], endMs: win[1] };
+}
+
 export interface FactoryTimeMetrics {
   workingMs: number;
   idleMs: number;
@@ -708,6 +805,37 @@ export function calculateProductionTime(
       ...sessionsOpt.map(ss => ss.lineId),
     ]);
 
+    // Expediente automático: dias do período a partir de AUTO_SHIFT_START_DATE
+    const autoDays: number[] = [];
+    {
+      const [ay, am, ad] = AUTO_SHIFT_START_DATE.split('-').map(Number);
+      let from = new Date(ay, am - 1, ad).getTime();
+      if (dateBoundaries && isFinite(dateBoundaries.startMs)) from = Math.max(from, dateBoundaries.startMs);
+      let to = refTime;
+      if (dateBoundaries && isFinite(dateBoundaries.endMs)) to = Math.min(to, dateBoundaries.endMs);
+      const cur = new Date(from);
+      cur.setHours(0, 0, 0, 0);
+      while (cur.getTime() <= to) {
+        autoDays.push(cur.getTime());
+        cur.setDate(cur.getDate() + 1);
+      }
+    }
+    // Dias com alguma atividade na fábrica (qualquer linha trabalhou ou abriu expediente)
+    const activeFactoryDays = new Set<string>();
+    for (const entry of rangesByLine.values()) {
+      for (const r of entry.working) activeFactoryDays.add(dayKey(r[0]));
+    }
+    for (const ss of sessionsOpt) {
+      const t = new Date(ss.startedAt).getTime();
+      if (!isNaN(t)) activeFactoryDays.add(dayKey(t));
+    }
+    if (autoDays.length > 0) {
+      for (const l of lines) {
+        if (options?.filterLineId && l.id !== options.filterLineId) continue;
+        if (ops.some(op => op && op.lineId === l.id)) lineIdsWithData.add(l.id);
+      }
+    }
+
     for (const lId of lineIdsWithData) {
       if (!byLine[lId]) {
         if (!lines.some(l => l.id === lId)) continue; // expediente de linha que não entra neste cálculo
@@ -728,13 +856,19 @@ export function calculateProductionTime(
         if (isNaN(startMs)) continue;
         let endMs = ws.endedAt ? new Date(ws.endedAt).getTime() : NaN;
         if (isNaN(endMs)) {
-          if (dayKey(startMs) === dayKey(refTime)) {
-            endMs = refTime; // aberto hoje: vai até agora
+          const sameDayWork = workingUnion.filter(r => dayKey(r[0]) === dayKey(startMs) && r[1] > startMs);
+          const lastWorkEnd = sameDayWork.length > 0 ? Math.max(...sameDayWork.map(r => r[1])) : startMs;
+          const sched = getScheduledWindow(startMs);
+          if (sched && startMs < sched[1] && localDayStr(startMs) >= AUTO_SHIFT_START_DATE) {
+            // Não encerrado: vale até o fim da jornada (ou até a última OP,
+            // se a produção passou do horário — isso é hora extra).
+            endMs = Math.min(refTime, Math.max(sched[1], lastWorkEnd));
+          } else if (dayKey(startMs) === dayKey(refTime)) {
+            endMs = refTime; // aberto hoje fora da jornada: vai até agora
           } else {
             // Esqueceram de encerrar num dia passado: termina no último
             // trabalho daquele dia (sem trabalho, o expediente não conta).
-            const sameDayWork = workingUnion.filter(r => dayKey(r[0]) === dayKey(startMs) && r[1] > startMs);
-            endMs = sameDayWork.length > 0 ? Math.max(...sameDayWork.map(r => r[1])) : startMs;
+            endMs = lastWorkEnd;
           }
         }
         const c = clampRange([startMs, endMs]);
@@ -751,8 +885,17 @@ export function calculateProductionTime(
         const cur = implicitByDay.get(k);
         implicitByDay.set(k, cur ? [Math.min(cur[0], r[0]), Math.max(cur[1], r[1])] : [r[0], r[1]]);
       }
+      // Expediente automático (7h até o fim da jornada, ou até o líder encerrar)
+      const autoRanges: Array<[number, number]> = [];
+      for (const dayMs of autoDays) {
+        const r = getAutoShiftRange(lId, dayMs, ops, sessionsOpt, refTime, activeFactoryDays.has(dayKey(dayMs)));
+        if (!r) continue;
+        const c = clampRange(r);
+        if (c) autoRanges.push(c);
+      }
+
       // O trabalho fora do expediente registrado também é coberto (conta como trabalhado, nunca como ocioso)
-      const coverage = mergeRanges([...explicitUnion, ...Array.from(implicitByDay.values()), ...workingUnion]);
+      const coverage = mergeRanges([...explicitUnion, ...autoRanges, ...Array.from(implicitByDay.values()), ...workingUnion]);
 
       // Intervalo tolerado (até 1h) não é ocioso nem conta na base do expediente
       const breaksUnion = subtractRanges(mergeRanges(breakRangesByLine.get(lId) || []), workingUnion);

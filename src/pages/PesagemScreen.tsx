@@ -27,12 +27,23 @@ import {
   FileText,
   Hash,
   Pencil,
-  Trash2
+  Trash2,
+  ClipboardList
 } from 'lucide-react';
-import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents } from '../services/db';
-import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
+import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory } from '../services/db';
+import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, PesagemHistoryChange } from '../types';
+import { getUserRule } from '../lib/permissions';
+import { PesagemMovimentacoes } from '../components/PesagemMovimentacoes';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { getIndustriaBadgeClass, isManualExitEligible } from '../lib/industria';
+
+// AAAA-MM-DD → DD/MM/AAAA (para o histórico)
+function formatDateBr(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  const [y, m, d] = String(dateStr).split('T')[0].split('-');
+  if (!y || !m || !d) return String(dateStr);
+  return `${d}/${m}/${y}`;
+}
 
 interface PesagemScreenProps {
   embedded?: boolean;
@@ -44,15 +55,22 @@ interface PesagemScreenProps {
 export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: PesagemScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
-  const [activeViewTab, setActiveViewTab] = useState<'registro' | 'historico'>('registro');
+  const [activeViewTab, setActiveViewTab] = useState<'registro' | 'historico' | 'movimentacoes'>('registro');
+
+  // Histórico de movimentações: quem fez cada ação é o nome do usuário
+  // logado. A aba "Movimentações" só aparece para a Coordenação.
+  const isCoordinatorUser = getUserRule(profile) === 'admin';
 
   // Em modo treinamento (hideDashboardTabs) só existe a aba de registro —
   // garante que nunca fique "preso" na aba de histórico escondida.
   useEffect(() => {
+    if ((hideDashboardTabs || !isCoordinatorUser) && activeViewTab === 'movimentacoes') {
+      setActiveViewTab('registro');
+    }
     if (hideDashboardTabs && activeViewTab !== 'registro') {
       setActiveViewTab('registro');
     }
-  }, [hideDashboardTabs, activeViewTab]);
+  }, [hideDashboardTabs, activeViewTab, isCoordinatorUser]);
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [lines, setLines] = useState<ProductionLine[]>([]);
   const [leaders, setLeaders] = useState<UserProfile[]>([]);
@@ -273,10 +291,11 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       // restrito ao dia, já que esse formato legado nunca teve "setor" pra
       // marcar quando foi encaminhado, então não dá pra saber com segurança
       // se ainda está pendente ou já foi resolvido há muito tempo.
-      const matchesLeader = !op.leaderId || op.leaderId === profile?.uid;
-      return matchesLeader && isOpFromToday(op);
+      // Todos os usuários da Pesagem veem a mesma lista (não filtra mais por
+      // quem registrou).
+      return isOpFromToday(op);
     }).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [ops, manipulatedOsmNumbers, isOpFromToday, profile]);
+  }, [ops, manipulatedOsmNumbers, isOpFromToday]);
 
   // Mini Histórico: OSMs registradas pela Pesagem que já foram finalizadas —
   // seja pela Manipulação (fluxo normal) ou por "saída manual" dada pelo
@@ -296,6 +315,24 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
   const totalOsmsEstoque = useMemo(() => {
     return pesagemQueueOps.length;
   }, [pesagemQueueOps]);
+
+  // Nome que vai para o histórico: o nome do usuário logado.
+  const resolveActorName = (): string =>
+    (profile?.name || '').trim() || (profile?.email || '').trim() || (isCoordinatorUser ? 'Coordenação' : 'Pesagem');
+
+  // Grava no histórico; se falhar, avisa (a ação em si já foi feita).
+  const recordHistory = async (params: Omit<Parameters<typeof logPesagemHistory>[0], 'collaboratorName' | 'userId' | 'userName'>) => {
+    const res = await logPesagemHistory({
+      ...params,
+      collaboratorName: resolveActorName(),
+      userId: profile?.uid || null,
+      userName: profile?.name || null,
+    });
+    if (res.error) {
+      console.warn('[Pesagem] Histórico não gravado:', res.error);
+      setTimeout(() => showToast(`Atenção: a ação foi feita, mas NÃO ficou registrada no histórico (${res.error}).`, 'error'), 1200);
+    }
+  };
 
   // Criar nova Ordem de Produção / OSM
   const handleOpenModal = () => {
@@ -337,6 +374,16 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
     setIsDeleting(true);
     try {
       await deleteOP(deleteModalOp.id);
+      await recordHistory({
+        action: 'deleted',
+        op: deleteModalOp,
+        details: {
+          note: [
+            deleteModalOp.scheduledDate ? `Data ${formatDateBr(deleteModalOp.scheduledDate)}` : '',
+            (deleteModalOp.granel || deleteModalOp.observation) ? `Obs.: ${deleteModalOp.granel || deleteModalOp.observation}` : '',
+          ].filter(Boolean).join(' · ') || undefined,
+        },
+      });
       showToast(`Ordem de Produção ${deleteModalOp.number} excluída com sucesso!`, 'success');
       setDeleteModalOp(null);
       await fetchData(true);
@@ -389,14 +436,34 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
           // a observação ao editar.
           granel: observation.trim(),
           industria: industria,
-        });
+        }, { verify: true });
+
+        // Só o que realmente mudou vai para o histórico
+        const oldDate = editingOp.scheduledDate || (editingOp.createdAt ? editingOp.createdAt.split('T')[0] : '');
+        const oldObs = (editingOp.granel || editingOp.observation || '').trim();
+        const candidates: PesagemHistoryChange[] = [
+          { field: 'Data', from: formatDateBr(oldDate), to: formatDateBr(targetDate) },
+          { field: 'Indústria', from: editingOp.industria || 'Ybera', to: industria },
+          { field: 'Ordem de produção', from: (editingOp.number || '').trim(), to: trimmedNumber },
+          { field: 'Nome', from: (editingOp.product || '').trim(), to: trimmedProduct },
+          { field: 'Lote', from: (editingOp.lote || '').trim(), to: trimmedLot },
+          { field: 'Observação', from: oldObs, to: observation.trim() },
+        ];
+        const changes = candidates.filter(c => c.from !== c.to);
+        if (changes.length > 0) {
+          await recordHistory({
+            action: 'edited',
+            op: { id: editingOp.id, number: trimmedNumber, product: trimmedProduct, lote: trimmedLot, industria },
+            details: { changes },
+          });
+        }
 
         showToast(`Ordem de Produção ${trimmedNumber} atualizada com sucesso!`, 'success');
       } else {
         // Criação de nova OSM já como completed — pesagem conclui no ato do registro.
         // A quantidade em Kg fica zerada por enquanto: quem preenche o Kg
         // manipulado é o líder de Manipulação, ao finalizar a OSM.
-        await createOP({
+        const createdOp = await createOP({
           tipoDocumento: 'OSM',
           setor: 'Pesagem',
           unidade: 'Kg',
@@ -413,6 +480,14 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
           scheduledDate: targetDate,
           granel: observation.trim() || undefined,
           industria: industria,
+        }, { verify: true });
+
+        await recordHistory({
+          action: 'created',
+          op: { id: createdOp?.id, number: trimmedNumber, product: trimmedProduct, lote: trimmedLot, industria },
+          details: {
+            note: [`Data ${formatDateBr(targetDate)}`, observation.trim() ? `Obs.: ${observation.trim()}` : ''].filter(Boolean).join(' · '),
+          },
         });
 
         showToast(`Ordem de Produção ${trimmedNumber} registrada com sucesso!`, 'success');
@@ -423,7 +498,12 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       await fetchData(true);
     } catch (err: any) {
       console.error('Erro ao salvar ordem:', err);
-      showToast(err?.isDuplicateOp ? err.message : (editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.'), 'error');
+      showToast(
+        err?.isDuplicateOp || err?.message?.startsWith('O banco')
+          ? err.message
+          : (editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.'),
+        'error'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -477,8 +557,13 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
         scheduledDate: manualExitDate,
         industria: manualExitOp.industria,
         granel: manualExitOp.granel || manualExitOp.observation,
-      });
+      }, { verify: true });
 
+      await recordHistory({
+        action: 'manual_exit',
+        op: manualExitOp,
+        details: { exitDate: manualExitDate },
+      });
       showToast(`Saída manual da OSM ${manualExitOp.number} registrada com sucesso!`, 'success');
       setManualExitOp(null);
       await fetchData(true);
@@ -487,7 +572,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       showToast(
         err?.isDuplicateOp
           ? `A OSM ${manualExitOp.number} já está na Manipulação (fila de um reator). Finalize por lá.`
-          : 'Erro ao registrar saída manual.',
+          : (err?.message?.startsWith('O banco') ? err.message : 'Erro ao registrar saída manual.'),
         'error'
       );
     } finally {
@@ -624,6 +709,21 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                 </span>
               </button>
             )}
+
+            {!hideDashboardTabs && isCoordinatorUser && (
+              <button
+                type="button"
+                onClick={() => setActiveViewTab('movimentacoes')}
+                className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                  activeViewTab === 'movimentacoes'
+                    ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/50'
+                    : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+                }`}
+              >
+                <ClipboardList className="w-4 h-4 shrink-0" />
+                <span>Movimentações</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0 w-full sm:w-auto pt-2 sm:pt-0 border-t sm:border-t-0 border-[#27272a]/60">
@@ -637,7 +737,9 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
 
       {/* CORPO PRINCIPAL */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col gap-6">
-        {activeViewTab === 'historico' ? (
+        {activeViewTab === 'movimentacoes' && isCoordinatorUser && !hideDashboardTabs ? (
+          <PesagemMovimentacoes />
+        ) : activeViewTab === 'historico' ? (
           <div className="space-y-6">
             <DailyProductionHistory
               ops={ops}

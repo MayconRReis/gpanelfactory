@@ -173,3 +173,40 @@ export interface LineChangeover {
   previousOpId?: string | null;
   nextOpId?: string | null;
 }
+
+// Histórico de movimentações da Pesagem (quem registrou, editou, excluiu
+// ou deu saída em cada OSM). Registro imutável: nunca é editado nem apagado.
+export type PesagemHistoryAction =
+  | 'created'                       // OSM registrada na Pesagem (entrada)
+  | 'edited'                        // OSM editada na Pesagem
+  | 'deleted'                       // OSM excluída na Pesagem
+  | 'manual_exit'                   // Saída Manual (Carvalho / Macpaul)
+  | 'manipulacao_started'           // Saída: Manipulação iniciou a OSM no reator
+  | 'manipulacao_start_cancelled';  // Manipulação cancelou o início (iniciado por engano)
+
+export interface PesagemHistoryChange {
+  field: string;
+  from: string;
+  to: string;
+}
+
+export interface PesagemHistoryEntry {
+  id: string;
+  createdAt: string;
+  action: PesagemHistoryAction;
+  opId?: string | null;
+  opNumber: string;
+  product?: string | null;
+  lote?: string | null;
+  industria?: string | null;
+  /** Nome do usuário logado que fez a ação. */
+  collaboratorName: string;
+  userId?: string | null;
+  userName?: string | null;
+  details?: {
+    changes?: PesagemHistoryChange[];
+    reactor?: string;
+    exitDate?: string;
+    note?: string;
+  } | null;
+}

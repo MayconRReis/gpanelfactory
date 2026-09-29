@@ -86,7 +86,7 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts';
-import { calculateProductionRatePerHour } from '../lib/productionTime';
+import { calculateProductionRatePerHour, getAutoShiftNow } from '../lib/productionTime';
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
 
@@ -426,6 +426,18 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     [workSessions, currentLine]
   );
 
+  // Expediente automático: nos dias de jornada, linha com OP no dia começa o
+  // expediente sozinha às 7h e termina no fim da jornada se ninguém encerrar.
+  const currentMinuteKey = Math.floor(currentTime.getTime() / 60000);
+  const autoShift = useMemo(
+    () => (currentLine && !openShift
+      ? getAutoShiftNow(currentLine.id, allOps, workSessions, currentMinuteKey * 60000)
+      : { active: false, startMs: null as number | null, endMs: null as number | null }),
+    [currentLine, openShift, allOps, workSessions, currentMinuteKey]
+  );
+  const shiftActive = !!openShift || autoShift.active;
+  const shiftStartedAtMs: number | null = openShift ? new Date(openShift.startedAt).getTime() : autoShift.startMs;
+
   // "Iniciar Expediente" abre o formulário da equipe (colaboradores e faltas);
   // o expediente só abre quando o líder confirma.
   const handleStartShift = () => {
@@ -494,7 +506,9 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       await pauseOP(activeOp.id, currentLine.id, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
     }
     if (openChangeover) await handleEndChangeover(null);
-    const res = await endWorkSession([currentLine.id], profile.uid);
+    const res = await endWorkSession([currentLine.id], profile.uid, {
+      autoStartIso: !openShift && autoShift.active && autoShift.startMs ? new Date(autoShift.startMs).toISOString() : null,
+    });
     setIsShiftBusy(false);
     if (res.error) {
       setShiftError(`Não foi possível encerrar o expediente: ${res.error}`);
@@ -1024,23 +1038,26 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
 
               <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2">
                 {/* Botão de Expediente da linha */}
-                {openShift ? (
+                {shiftActive && shiftStartedAtMs ? (
                   <button
                     onClick={() => { setShiftError(null); setIsEndShiftOpen(true); }}
                     disabled={isShiftBusy}
-                    title={`Expediente aberto desde ${new Date(openShift.startedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`}
+                    title={openShift
+                      ? `Expediente aberto desde ${new Date(shiftStartedAtMs).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                      : 'Expediente iniciado automaticamente no horário da jornada'}
                     className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/50 border border-rose-800/50 text-xs font-bold text-rose-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
                   >
                     <Sunset className="w-4 h-4 text-rose-400" />
                     <span>Encerrar Expediente</span>
                     <span className="font-mono text-[10px] text-rose-300/80">
-                      (desde {new Date(openShift.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+                      (desde {new Date(shiftStartedAtMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}{!openShift ? ' · automático' : ''})
                     </span>
                   </button>
                 ) : (
                   <button
                     onClick={handleStartShift}
                     disabled={isShiftBusy}
+                    title="O expediente começa sozinho às 7h nas linhas com OP no dia. Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
                     className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
                   >
                     <Sunrise className="w-4 h-4 text-emerald-400" />
@@ -1069,7 +1086,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               </div>
             )}
             {/* Equipe da linha hoje */}
-            {openShift && (
+            {shiftActive && (
               todayTeam ? (
                 <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121217] border border-[#22222b] rounded-2xl px-4 py-2.5">
                   <div className="flex items-center gap-2 text-xs text-[#d4d4d8]">
@@ -1139,7 +1156,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   </div>
                 );
               }
-              if (lineIdle && openShift && finishedToday) {
+              if (lineIdle && shiftActive && finishedToday) {
                 return (
                   <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121217] border border-orange-800/40 rounded-2xl px-4 py-3">
                     <p className="text-xs text-[#d4d4d8] flex items-center gap-2">
@@ -2253,8 +2270,8 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             <p className="text-sm text-[#d4d4d8]">
               O expediente desta linha começou às{' '}
               <strong className="text-white">
-                {openShift ? new Date(openShift.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-              </strong>. A partir de agora, o tempo parado não conta mais como ociosidade.
+                {shiftStartedAtMs ? new Date(shiftStartedAtMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+              </strong>{!openShift && autoShift.active ? ' (automático)' : ''}. A partir de agora, o tempo parado não conta mais como ociosidade.
             </p>
             {activeOp?.status === 'in_progress' && (
               <p className="text-xs text-amber-300 bg-amber-950/40 border border-amber-800/40 rounded-lg px-3 py-2">

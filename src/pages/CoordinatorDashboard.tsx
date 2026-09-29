@@ -61,6 +61,7 @@ import {
   createOP, 
   updateOP,
   deleteOP, 
+  logPesagemHistory,
   startOP, 
   pauseOP, 
   resumeOP, 
@@ -819,11 +820,50 @@ WHERE email IN (
         scheduledShift: newOpScheduledShift || undefined,
       };
 
+      const isPesagemOp = (editingOp ? editingOp.setor : newOpSetor) === 'Pesagem' || newOpSetor === 'Pesagem';
       if (editingOp) {
-        await updateOP(editingOp.id, opPayload);
+        await updateOP(editingOp.id, opPayload, isPesagemOp ? { verify: true } : {});
+        if (isPesagemOp) {
+          const fmt = (d?: string | null) => {
+            if (!d) return '';
+            const [y, m, dd] = String(d).split('T')[0].split('-');
+            return y && m && dd ? `${dd}/${m}/${y}` : String(d);
+          };
+          const changes = [
+            { field: 'Data', from: fmt(editingOp.scheduledDate), to: fmt(opPayload.scheduledDate) },
+            { field: 'Indústria', from: editingOp.industria || '', to: opPayload.industria || '' },
+            { field: 'Ordem de produção', from: (editingOp.number || '').trim(), to: opPayload.number },
+            { field: 'Nome', from: (editingOp.product || '').trim(), to: opPayload.product },
+            { field: 'Lote', from: (editingOp.lote || '').trim(), to: opPayload.lote || '' },
+            { field: 'Observação', from: (editingOp.granel || '').trim(), to: opPayload.granel || '' },
+            { field: 'Setor', from: editingOp.setor || '', to: opPayload.setor || '' },
+          ].filter(c => c.from !== c.to && !(c.field === 'Data' && !c.to));
+          if (changes.length > 0) {
+            const res = await logPesagemHistory({
+              action: 'edited',
+              op: { id: editingOp.id, number: opPayload.number, product: opPayload.product, lote: opPayload.lote, industria: opPayload.industria },
+              collaboratorName: (profile?.name || '').trim() || 'Coordenação',
+              userId: profile?.uid || null,
+              userName: profile?.name || null,
+              details: { changes, note: 'Alterado pela Coordenação' },
+            });
+            if (res.error) { const m = `OP salva, mas NÃO ficou registrada no histórico da Pesagem (${res.error}).`; setTimeout(() => showToast(m, 'error'), 1200); }
+          }
+        }
         showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
       } else {
-        await createOP(opPayload);
+        const created = await createOP(opPayload, isPesagemOp ? { verify: true } : {});
+        if (isPesagemOp) {
+          const res = await logPesagemHistory({
+            action: 'created',
+            op: { id: created?.id, number: opPayload.number, product: opPayload.product, lote: opPayload.lote, industria: opPayload.industria },
+            collaboratorName: (profile?.name || '').trim() || 'Coordenação',
+            userId: profile?.uid || null,
+            userName: profile?.name || null,
+            details: { note: 'Registrada pela Coordenação' },
+          });
+          if (res.error) { const m = `OP criada, mas NÃO ficou registrada no histórico da Pesagem (${res.error}).`; setTimeout(() => showToast(m, 'error'), 1200); }
+        }
         showToast(`${docLabel} ${newOpNumber} criada com sucesso no estoque!`);
       }
 
@@ -848,7 +888,7 @@ WHERE email IN (
       await loadData();
     } catch (err: any) {
       showToast(
-        err?.isDuplicateOp ? err.message : (editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.'),
+        err?.isDuplicateOp || String(err?.message || '').startsWith('O banco') ? err.message : (editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.'),
         'error'
       );
     } finally {
@@ -869,6 +909,17 @@ WHERE email IN (
     setDeleteModalOp(null);
     try {
       await deleteOP(targetOp.id);
+      if (targetOp.setor === 'Pesagem') {
+        const res = await logPesagemHistory({
+          action: 'deleted',
+          op: targetOp,
+          collaboratorName: (profile?.name || '').trim() || 'Coordenação',
+          userId: profile?.uid || null,
+          userName: profile?.name || null,
+          details: { note: 'Excluída pela Coordenação' },
+        });
+        if (res.error) console.warn('[Coordenação] Exclusão não registrada no histórico da Pesagem:', res.error);
+      }
       showToast(`OP ${targetOp.number} removida com sucesso do estoque.`);
       await loadData();
     } catch (err) {

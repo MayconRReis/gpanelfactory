@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction } from '../types';
 import { calculateProductionTime } from '../lib/productionTime';
 
 /**
@@ -755,6 +755,7 @@ export function setTrainingMode(active: boolean, seed?: { ops: ProductionOrder[]
     trainingLines = [];
     trainingEvents = [];
   }
+  resetTrainingPesagemHistory();
 }
 
 // Blacklist persistente de OPs excluídas (por id específico — não afeta OPs
@@ -1718,10 +1719,10 @@ export const createLine = async (name: string): Promise<ProductionLine> => {
  * banco sem data de conclusão, e o dashboard caía no dia PROGRAMADO (ou no dia
  * de criação) — uma OP programada pra ontem e fechada hoje não aparecia no Hoje.
  */
-async function runWithCompletedAtFallback(
-  run: (payload: any) => PromiseLike<{ error: any }>,
+async function runWithCompletedAtFallback<T extends { error: any }>(
+  run: (payload: any) => PromiseLike<T>,
   payload: any
-): Promise<{ error: any }> {
+): Promise<T> {
   const res = await run(payload);
   if (
     res?.error &&
@@ -1905,7 +1906,7 @@ export const createOP = async (newOpData: {
   producedQuantity?: number;
   status?: 'pending' | 'in_progress' | 'paused' | 'completed';
   leaderId?: string;
-}, options: { reuseExisting?: boolean } = {}): Promise<ProductionOrder> => {
+}, options: { reuseExisting?: boolean; verify?: boolean } = {}): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
 
   if (trainingModeActive) {
@@ -2007,6 +2008,11 @@ export const createOP = async (newOpData: {
   };
   if (newOp.completedAt) opsPayload.completed_at = newOp.completedAt;
 
+  // Com `verify`: se NENHUMA das duas tabelas aceitou a OP, lança erro em vez
+  // de deixá-la só no cache local do aparelho.
+  let insertErrors = 0;
+  let lastInsertError = '';
+
   // 1. production_orders (tabela que o app lê) — grava ANTES de mostrar na tela,
   // pra não exibir uma OP que o banco recusou.
   try {
@@ -2022,10 +2028,14 @@ export const createOP = async (newOpData: {
         if (options.reuseExisting && existing) return adoptExistingOp(existing.id, newOpData, existing.status);
         throw new DuplicateOpError(trimmedNumber, targetSetor);
       }
+      insertErrors++;
+      lastInsertError = resProductionOrders.error.message;
       console.error(`[createOP] Falha ao gravar em production_orders (OP ${newOp.id}):`, resProductionOrders.error.message);
     }
   } catch (err) {
     if (err instanceof DuplicateOpError) throw err;
+    insertErrors++;
+    lastInsertError = String((err as any)?.message || err);
     console.error(`[createOP] Erro inesperado ao gravar em production_orders (OP ${newOp.id}):`, err);
   }
 
@@ -2042,10 +2052,20 @@ export const createOP = async (newOpData: {
       opsPayload
     );
     if (resOps.error) {
+      insertErrors++;
+      lastInsertError = resOps.error.message;
       console.error(`[createOP] Falha ao gravar em ops (OP ${newOp.id}):`, resOps.error.message);
     }
   } catch (err) {
+    insertErrors++;
+    lastInsertError = String((err as any)?.message || err);
     console.error(`[createOP] Erro inesperado ao gravar em ops (OP ${newOp.id}):`, err);
+  }
+
+  if (options.verify && insertErrors >= 2) {
+    inMemoryOps = inMemoryOps.filter(op => op.id !== newOp.id);
+    persistOps();
+    throw new Error(`O banco não gravou a OP ${trimmedNumber} (${lastInsertError}). Nada foi registrado.`);
   }
 
   return newOp;
@@ -2214,7 +2234,11 @@ export const importOPsBatch = async (
   };
 };
 
-export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) => {
+export const updateOP = async (
+  opId: string,
+  updates: Partial<ProductionOrder>,
+  options: { verify?: boolean } = {}
+) => {
   if (updates.status === 'completed' && updates.completedAt === undefined) {
     updates.completedAt = new Date().toISOString();
   }
@@ -2225,6 +2249,7 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   }
 
   // 1. Update in memory and localStorage immediately
+  const previousInMemoryOp = inMemoryOps.find(op => op.id === opId);
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, ...updates } : op);
   persistOps();
 
@@ -2272,28 +2297,54 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   delete opsPayload.scheduled_days;
   // completed_at agora vai pras duas tabelas (com fallback se a coluna não existir).
 
+  // Com `verify`, confere se o banco realmente gravou (RLS sem permissão
+  // não dá erro — só não altera nenhuma linha) e lança erro se nenhuma das
+  // duas tabelas foi alterada.
+  let savedSomewhere = false;
+  let lastError = '';
+
   try {
-    const resProductionOrders = await runWithCompletedAtFallback(
-      (payload) => supabase.from('production_orders').update(payload).eq('id', opId),
+    const resProductionOrders: any = await runWithCompletedAtFallback(
+      (payload) => options.verify
+        ? supabase.from('production_orders').update(payload).eq('id', opId).select('id')
+        : supabase.from('production_orders').update(payload).eq('id', opId),
       opsPayload
     );
     if (resProductionOrders.error) {
+      lastError = resProductionOrders.error.message;
       console.error(`[updateOP] Falha ao atualizar production_orders (OP ${opId}):`, resProductionOrders.error.message);
+    } else if (options.verify && Array.isArray(resProductionOrders.data) && resProductionOrders.data.length > 0) {
+      savedSomewhere = true;
     }
   } catch (err) {
+    lastError = String((err as any)?.message || err);
     console.error(`[updateOP] Erro inesperado ao atualizar production_orders (OP ${opId}):`, err);
   }
 
   try {
-    const resOps = await runWithCompletedAtFallback(
-      (payload) => supabase.from('ops').update(payload).eq('id', opId),
+    const resOps: any = await runWithCompletedAtFallback(
+      (payload) => options.verify
+        ? supabase.from('ops').update(payload).eq('id', opId).select('id')
+        : supabase.from('ops').update(payload).eq('id', opId),
       opsPayload
     );
     if (resOps.error) {
+      lastError = resOps.error.message;
       console.error(`[updateOP] Falha ao atualizar ops (OP ${opId}):`, resOps.error.message);
+    } else if (options.verify && Array.isArray(resOps.data) && resOps.data.length > 0) {
+      savedSomewhere = true;
     }
   } catch (err) {
+    lastError = String((err as any)?.message || err);
     console.error(`[updateOP] Erro inesperado ao atualizar ops (OP ${opId}):`, err);
+  }
+
+  if (options.verify && !savedSomewhere) {
+    if (previousInMemoryOp) {
+      inMemoryOps = inMemoryOps.map(op => op.id === opId ? previousInMemoryOp : op);
+      persistOps();
+    }
+    throw new Error(`O banco não salvou a alteração da OP${lastError ? ` (${lastError})` : ' (sem permissão)'}. Nada foi alterado.`);
   }
 };
 
@@ -3110,22 +3161,49 @@ export const startWorkSession = async (lineIds: string[], userId?: string | null
   }
 };
 
-/** Encerra o expediente aberto nas linhas informadas. */
-export const endWorkSession = async (lineIds: string[], userId?: string | null): Promise<{ error: string | null }> => {
+/**
+ * Encerra o expediente aberto nas linhas informadas. Com `autoStartIso`
+ * (expediente automático das 7h, que não tem registro no banco), as linhas
+ * sem expediente aberto ganham um registro já encerrado: autoStartIso → agora.
+ */
+export const endWorkSession = async (
+  lineIds: string[],
+  userId?: string | null,
+  options: { autoStartIso?: string | null } = {}
+): Promise<{ error: string | null }> => {
   const nowIso = new Date().toISOString();
+  const autoStart = options.autoStartIso && new Date(options.autoStartIso).getTime() < Date.now() ? options.autoStartIso : null;
   if (trainingModeActive) {
+    const openIds = new Set(trainingWorkSessions.filter(s => !s.endedAt && lineIds.includes(s.lineId)).map(s => s.lineId));
     trainingWorkSessions = trainingWorkSessions.map(s =>
       !s.endedAt && lineIds.includes(s.lineId) ? { ...s, endedAt: nowIso, endedBy: userId || null } : s
     );
+    if (autoStart) {
+      lineIds.filter(id => !openIds.has(id)).forEach(lineId => {
+        trainingWorkSessions.push({ id: `sim-ws-${Date.now()}-${lineId}`, lineId, startedAt: autoStart, endedAt: nowIso, startedBy: null, endedBy: userId || null });
+      });
+    }
     return { error: null };
   }
   try {
-    const { error } = await supabase
+    const { data: closed, error } = await supabase
       .from('work_sessions')
       .update({ ended_at: nowIso, ended_by: userId || null })
       .in('line_id', lineIds)
-      .is('ended_at', null);
-    return { error: error ? error.message : null };
+      .is('ended_at', null)
+      .select('line_id');
+    if (error) return { error: error.message };
+    if (autoStart) {
+      const closedIds = new Set((closed || []).map((r: any) => String(r.line_id)));
+      const toInsert = lineIds.filter(id => !closedIds.has(id));
+      if (toInsert.length > 0) {
+        const { error: insError } = await supabase
+          .from('work_sessions')
+          .insert(toInsert.map(line_id => ({ line_id, started_at: autoStart, ended_at: nowIso, started_by: null, ended_by: userId || null })));
+        if (insError) return { error: insError.message };
+      }
+    }
+    return { error: null };
   } catch (err: any) {
     return { error: String(err?.message || err) };
   }
@@ -4260,3 +4338,114 @@ export const resetProductionDatabase = async (): Promise<void> => {
   }
 };
 
+
+// ---------------- HISTÓRICO DA PESAGEM (pesagem_history) ----------------
+// Registro de cada movimentação de OSM na Pesagem: quem registrou (entrada),
+// editou, excluiu ou deu saída — com o nome do usuário logado. O registro é
+// imutável: não existe função para editar ou apagar uma linha do histórico.
+
+let trainingPesagemHistory: PesagemHistoryEntry[] = [];
+const mapPesagemHistoryRow = (r: any): PesagemHistoryEntry => ({
+  id: String(r.id),
+  createdAt: r.created_at,
+  action: r.action as PesagemHistoryAction,
+  opId: r.op_id ?? null,
+  opNumber: String(r.op_number ?? ''),
+  product: r.product ?? null,
+  lote: r.lote ?? null,
+  industria: r.industria ?? null,
+  collaboratorName: String(r.collaborator_name ?? ''),
+  userId: r.user_id ?? null,
+  userName: r.user_name ?? null,
+  details: r.details ?? null,
+});
+
+export interface PesagemHistoryInput {
+  action: PesagemHistoryAction;
+  op: { id?: string | null; number?: string | null; product?: string | null; lote?: string | null; industria?: string | null };
+  collaboratorName: string;
+  userId?: string | null;
+  userName?: string | null;
+  details?: PesagemHistoryEntry['details'];
+}
+
+/**
+ * Grava uma movimentação no histórico. Retorna erro (em vez de lançar) para
+ * a tela avisar "a ação foi feita, mas o histórico não foi gravado" — nunca
+ * esconder uma falha de registro.
+ */
+export const logPesagemHistory = async (input: PesagemHistoryInput): Promise<{ error: string | null }> => {
+  const collaboratorName = String(input.collaboratorName || '').trim();
+  if (!collaboratorName) return { error: 'nome do usuário não informado' };
+  const row = {
+    action: input.action,
+    op_id: input.op.id ?? null,
+    op_number: String(input.op.number ?? '').trim(),
+    product: input.op.product ?? null,
+    lote: input.op.lote ?? null,
+    industria: input.op.industria ?? null,
+    collaborator_name: collaboratorName,
+    user_id: input.userId ?? null,
+    user_name: input.userName ?? null,
+    details: input.details ?? null,
+  };
+  if (trainingModeActive) {
+    trainingPesagemHistory.push(mapPesagemHistoryRow({ ...row, id: `sim-ph-${Date.now()}-${trainingPesagemHistory.length}`, created_at: new Date().toISOString() }));
+    return { error: null };
+  }
+  try {
+    // Sem .select(): só a Coordenação pode LER o histórico, então pedir a
+    // linha de volta falharia para a Pesagem/Manipulação. Uma inclusão
+    // barrada pela RLS sempre retorna erro, então basta conferir o erro.
+    const { error } = await supabase.from('pesagem_history').insert(row);
+    if (error) {
+      console.warn('[logPesagemHistory] Não foi possível gravar no histórico (rodou sql/add_pesagem_historico.sql?):', error.message);
+      return { error: error.message };
+    }
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Histórico da Pesagem entre duas datas locais (AAAA-MM-DD, inclusivas), mais recente primeiro. */
+export const getPesagemHistory = async (fromDateStr: string, toDateStr: string): Promise<{ entries: PesagemHistoryEntry[]; error: string | null }> => {
+  const [fy, fm, fd] = fromDateStr.split('-').map(Number);
+  const [ty, tm, td] = toDateStr.split('-').map(Number);
+  const fromIso = new Date(fy, (fm || 1) - 1, fd || 1, 0, 0, 0, 0).toISOString();
+  const toIso = new Date(ty, (tm || 1) - 1, (td || 1) + 1, 0, 0, 0, 0).toISOString();
+  if (trainingModeActive) {
+    const entries = trainingPesagemHistory
+      .filter(e => e.createdAt >= fromIso && e.createdAt < toIso)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(e => ({ ...e }));
+    return { entries, error: null };
+  }
+  try {
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('pesagem_history')
+        .select('*')
+        .gte('created_at', fromIso)
+        .lt('created_at', toIso)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) return { entries: [], error: error.message };
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return { entries: rows.map(mapPesagemHistoryRow), error: null };
+  } catch (err: any) {
+    return { entries: [], error: String(err?.message || err) };
+  }
+};
+
+function resetTrainingPesagemHistory(): void {
+  trainingPesagemHistory = [];
+}
