@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { RefreshCw, Sparkles, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { RefreshCw, Sparkles } from 'lucide-react';
 
 /**
  * AVISO DE NOVA ATUALIZAÇÃO DISPONÍVEL
@@ -8,7 +9,8 @@ import { RefreshCw, Sparkles, X } from 'lucide-react';
  * aberta, um novo deploy pode ir ao ar (Vercel) sem que a página recarregue
  * sozinha — o JS antigo continua rodando em memória. Este componente
  * verifica periodicamente se já existe uma build mais nova publicada e,
- * se sim, mostra um cartão discreto convidando a recarregar a página.
+ * se sim, BLOQUEIA a tela com uma janela pedindo para atualizar — ninguém
+ * continua usando uma versão antiga (que pode gravar dados do jeito antigo).
  *
  * Mecanismo: `vite.config.ts` grava, a cada `vite build`, um `buildId`
  * único tanto DENTRO do bundle JS (via `define`, em `__APP_BUILD_ID__`)
@@ -19,11 +21,11 @@ import { RefreshCw, Sparkles, X } from 'lucide-react';
  * divergem, é porque um novo deploy aconteceu depois que esta aba abriu.
  */
 
-const CHECK_INTERVAL_MS = 5 * 60 * 1000; // verifica a cada 5 minutos
+const CHECK_INTERVAL_MS = 2 * 60 * 1000; // verifica a cada 2 minutos
 
 export function UpdateNotifier() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const currentBuildIdRef = useRef<string>(
     typeof __APP_BUILD_ID__ !== 'undefined' ? __APP_BUILD_ID__ : ''
   );
@@ -59,43 +61,61 @@ export function UpdateNotifier() {
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
     };
   }, []);
 
-  if (!updateAvailable || dismissed) return null;
+  if (!updateAvailable || typeof document === 'undefined') return null;
 
-  return (
-    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 sm:left-auto sm:right-5 sm:translate-x-0 z-[100] w-[calc(100%-2.5rem)] sm:w-auto sm:max-w-sm">
-      <div className="bg-blue-950/95 border border-blue-800 rounded-2xl shadow-2xl shadow-blue-950/50 px-4 py-3.5 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200">
-        <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center shrink-0">
-          <Sparkles className="w-4 h-4 text-blue-400" />
+  const doReload = () => {
+    setReloading(true);
+    // Recarrega pedindo a página nova ao servidor (sem cache)
+    const url = new URL(window.location.href);
+    url.searchParams.set('v', String(Date.now()));
+    window.location.replace(url.toString());
+  };
+
+  // Janela que cobre a tela inteira e não pode ser fechada: bloqueia o uso
+  // do app até recarregar.
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[10000] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="update-title"
+    >
+      <div className="w-full max-w-sm bg-[#121217] border border-blue-800 rounded-3xl shadow-2xl shadow-blue-950/60 p-6 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
+        <div className="w-14 h-14 mx-auto rounded-2xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center">
+          <Sparkles className="w-7 h-7 text-blue-400" />
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold text-blue-100">Nova atualização disponível</p>
-          <p className="text-[11px] text-blue-300/80 leading-snug">
-            Recarregue a página para usar a versão mais recente do sistema.
+        <div className="space-y-1.5">
+          <h2 id="update-title" className="text-base font-black text-white uppercase tracking-wider">
+            Nova versão do app
+          </h2>
+          <p className="text-sm text-[#d4d4d8] leading-relaxed">
+            O sistema foi atualizado. Para continuar, atualize a página — assim todos usam a mesma versão e nada é gravado do jeito antigo.
+          </p>
+          <p className="text-[11px] text-[#71717a]">
+            Se estava preenchendo algo, anote antes de atualizar.
           </p>
         </div>
         <button
-          onClick={() => window.location.reload()}
-          className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 transition-all"
+          onClick={doReload}
+          disabled={reloading}
+          autoFocus
+          className="w-full h-12 flex items-center justify-center gap-2 rounded-2xl text-sm font-black uppercase tracking-wider text-white bg-blue-600 hover:bg-blue-500 disabled:opacity-70 transition-all"
         >
-          <RefreshCw className="w-3.5 h-3.5" />
-          Atualizar
-        </button>
-        <button
-          onClick={() => setDismissed(true)}
-          title="Fechar (o aviso volta a aparecer na próxima verificação, a cada 5 minutos)"
-          className="shrink-0 text-blue-300/60 hover:text-blue-100 transition-colors"
-        >
-          <X className="w-4 h-4" />
+          <RefreshCw className={`w-4 h-4 ${reloading ? 'animate-spin' : ''}`} />
+          {reloading ? 'Atualizando...' : 'Atualizar agora'}
         </button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -1468,6 +1468,7 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
+                showSetupHistory={getUserRule(profile) === 'admin'}
               />
             )}
 
@@ -2187,7 +2188,15 @@ WHERE email IN (
                   </div>
                 ) : (
                   <div className="divide-y divide-[#1e1e23]">
-                    {events.map((evt) => (
+                    {events.map((evt) => {
+                      // Número da OP, nome da linha e nome de quem fez (o evento
+                      // guarda só os códigos internos)
+                      const evtOp = ops.find(o => o.id === evt.opId);
+                      const evtOpNumber = evtOp?.number || (evt.opNumber && !String(evt.opNumber).startsWith('prod-op-') ? evt.opNumber : '');
+                      const evtLineName = lines.find(l => l.id === evt.lineId)?.name || (evt.lineName && evt.lineName !== evt.lineId ? evt.lineName : evt.lineId) || 'Linha';
+                      const evtUser = evt.leaderId ? allUsers.find(u => u.uid === evt.leaderId) : undefined;
+                      const evtWho = evtUser?.name || (evt.leaderName && evt.leaderName !== 'Líder' ? evt.leaderName : '');
+                      return (
                       <div key={evt.id} className="py-3.5 flex flex-col sm:flex-row items-start justify-between gap-2 sm:gap-4">
                         <div className="flex items-start gap-3 min-w-0">
                           <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
@@ -2217,10 +2226,13 @@ WHERE email IN (
                                 {evt.type === 'CANCELLED' && 'Início Cancelado (por engano)'}
                               </span>
                               <span className="text-[10px] text-blue-400 font-mono font-bold">
-                                {evt.opNumber ? `OP ${evt.opNumber}` : ''}
+                                {evtOpNumber ? `OP ${evtOpNumber}` : 'OP não encontrada'}
                               </span>
+                              {evtOp?.product && (
+                                <span className="text-[10px] text-[#a1a1aa] truncate max-w-[220px]">{evtOp.product}</span>
+                              )}
                               <span className="text-[10px] text-[#71717a] truncate max-w-[160px]">
-                                • {evt.lineName || 'Linha'}
+                                • {evtLineName}
                               </span>
                             </div>
 
@@ -2237,16 +2249,19 @@ WHERE email IN (
                             )}
 
                             <p className="text-[10px] text-[#71717a] mt-1">
-                              Operado por: <strong>{evt.leaderName || 'Líder de Produção'}</strong>
+                              Operado por: <strong className={evtWho ? 'text-[#d4d4d8]' : ''}>{evtWho || 'responsável não registrado'}</strong>
+                              {evtUser?.role === 'coordinator' && <span className="ml-1 text-[9px] font-bold uppercase px-1 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/50">Coordenação</span>}
                             </p>
                           </div>
                         </div>
 
                         <span className="text-[10px] font-mono text-[#71717a] shrink-0">
-                          {new Date(evt.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                          {new Date(evt.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })}{' '}
+                          {new Date(evt.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                         </span>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

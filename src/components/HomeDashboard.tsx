@@ -48,6 +48,8 @@ interface HomeDashboardProps {
   onNavigateTab?: (tab: 'cronograma' | 'ops' | 'users' | 'events' | 'daily_production') => void;
   onOpenShareModal?: () => void;
   isReadOnly?: boolean;
+  /** Lista de Setups do Envase — só no dashboard do coordenador. */
+  showSetupHistory?: boolean;
 }
 
 /**
@@ -141,6 +143,7 @@ export function HomeDashboard({
   onNavigateTab,
   onOpenShareModal,
   isReadOnly = false,
+  showSetupHistory = false,
 }: HomeDashboardProps) {
 
   const currentCalendarYear = new Date().getFullYear();
@@ -1758,8 +1761,8 @@ export function HomeDashboard({
           )}
         </div>
 
-        {/* Setups do Envase no período do filtro */}
-        <SetupHistory
+        {/* Setups do Envase no período do filtro — só para o coordenador */}
+        {showSetupHistory && <SetupHistory
           changeovers={changeovers}
           ops={ops}
           lines={lines}
@@ -1768,7 +1771,7 @@ export function HomeDashboard({
           rangeEnd={periodDateRange.rangeEnd}
           periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
           nowMs={nowTick}
-        />
+        />}
 
         {/* ---------------------- PARTE 2: MANIPULAÇÃO (REATORES) ---------------------- */}
         <div className="space-y-2 pt-1">
