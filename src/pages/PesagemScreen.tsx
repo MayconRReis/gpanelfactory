@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/authStore';
@@ -30,7 +31,7 @@ import {
   Trash2,
   ClipboardList
 } from 'lucide-react';
-import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory, findOpsByNumber } from '../services/db';
+import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory, findOpsByNumber, findOpsByLote } from '../services/db';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, PesagemHistoryChange } from '../types';
 import { getUserRule } from '../lib/permissions';
 import { PesagemMovimentacoes } from '../components/PesagemMovimentacoes';
@@ -110,10 +111,27 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
   // Toast
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
+  // Erro mostrado DENTRO da janela aberta (registro, exclusão, saída
+  // manual) — o aviso do canto pode ficar pouco visível com a janela aberta.
+  const [modalError, setModalError] = useState<string | null>(null);
+
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
-    setTimeout(() => setToastMessage(null), 3500);
+    setTimeout(() => setToastMessage(null), type === 'error' ? 7000 : 3500);
+    if (type === 'error') setModalError(text);
   };
+
+  const renderModalError = () => modalError ? (
+    <div className="flex items-start gap-2 bg-rose-950/60 border border-rose-700/70 text-rose-200 rounded-xl px-3 py-2.5 text-xs font-semibold">
+      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+      <span>{modalError}</span>
+    </div>
+  ) : null;
+
+  // Abrir/fechar qualquer janela limpa o erro anterior
+  useEffect(() => {
+    setModalError(null);
+  }, [isModalOpen, deleteModalOp, manualExitOp]);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -449,6 +467,23 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
         return;
       }
     }
+
+    // Mesmo LOTE já registrado em outra OSM (Pesagem ou Manipulação) = a
+    // mesma batelada lançada de novo, só com o número digitado diferente.
+    const loteChanged = !editingOp || (editingOp.lote || '').trim().toLowerCase() !== trimmedLot.toLowerCase();
+    if (loteChanged) {
+      const sameLote = (await findOpsByLote(trimmedLot))
+        .filter(o => o.id !== editingOp?.id && (o.setor === 'Pesagem' || o.setor === 'Manipulação'));
+      if (sameLote.length > 0) {
+        const first = sameLote[0];
+        showToast(
+          `O lote ${trimmedLot} já está registrado na OSM ${first.number} (${first.setor}). Confira o lote — não é possível registrar a mesma batelada duas vezes.`,
+          'error'
+        );
+        setIsSubmitting(false);
+        return;
+      }
+    }
     try {
       if (editingOp) {
         // Atualização da OSM existente — NÃO envia plannedQuantity/producedQuantity
@@ -610,10 +645,11 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
 
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] flex flex-col font-sans space-y-4" : "min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-purple-500/30"}>
-      {/* Toast Notification */}
-      {toastMessage && (
+      {/* Toast Notification — renderizado direto no <body> (portal) e acima de
+          tudo, para nunca ficar escondido atrás de uma janela aberta */}
+      {toastMessage && typeof document !== 'undefined' && createPortal(
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-2xl border text-sm font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-3 ${
+          className={`fixed top-4 right-4 z-[9999] max-w-[calc(100vw-32px)] sm:max-w-md px-4 py-3 rounded-xl shadow-2xl border text-sm font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-3 ${
             toastMessage.type === 'error'
               ? 'bg-rose-950/90 text-rose-200 border-rose-800'
               : 'bg-purple-950/90 text-purple-200 border-purple-800'
@@ -625,7 +661,8 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
             <CheckCircle2 className="w-4 h-4 text-purple-400 shrink-0" />
           )}
           <span>{toastMessage.text}</span>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* CABEÇALHO (Apenas se standalone) */}
@@ -1145,6 +1182,8 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               />
             </div>
 
+            {renderModalError()}
+
             <DialogFooter className="pt-2 gap-2 flex-col sm:flex-row">
               <Button
                 type="button"
@@ -1195,6 +1234,8 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
               Tem certeza que deseja excluir a OP <strong className="text-white font-mono">{deleteModalOp?.number}</strong> ({deleteModalOp?.product})? Esta ação removerá o registro permanentemente.
             </p>
           </DialogHeader>
+
+          <div className="mt-2">{renderModalError()}</div>
 
           <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
             <Button
@@ -1285,6 +1326,8 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
                   className="bg-[#121215] border-[#27272a] focus:border-orange-500 text-white font-medium text-sm h-10 rounded-xl [color-scheme:dark]"
                 />
               </div>
+
+              {renderModalError()}
 
               <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
                 <Button

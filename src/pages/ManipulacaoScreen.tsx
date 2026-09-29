@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/authStore';
@@ -770,10 +771,11 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
 
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] flex flex-col font-sans space-y-4" : "min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-cyan-500/30"}>
-      {/* Toast Notification */}
-      {toastMessage && (
+      {/* Toast Notification — renderizado direto no <body> (portal) e acima de
+          tudo, para nunca ficar escondido atrás de uma janela aberta */}
+      {toastMessage && typeof document !== 'undefined' && createPortal(
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-2xl border text-sm font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-3 ${
+          className={`fixed top-4 right-4 z-[9999] max-w-[calc(100vw-32px)] sm:max-w-md px-4 py-3 rounded-xl shadow-2xl border text-sm font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-3 ${
             toastMessage.type === 'error'
               ? 'bg-rose-950/90 text-rose-200 border-rose-800'
               : 'bg-cyan-950/90 text-cyan-200 border-cyan-800'
@@ -785,7 +787,8 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
             <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
           )}
           <span>{toastMessage.text}</span>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* CABEÇALHO (Apenas se standalone) */}

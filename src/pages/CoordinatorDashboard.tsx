@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import * as React from 'react';
 import { useState, useEffect, useRef } from 'react';
 import { useAuthStore } from '../store/authStore';
@@ -690,10 +691,52 @@ WHERE email IN (
   // do Envase (que tira a linha, `lineId: null`), aqui a OP volta pro estado
   // "em estoque na Pesagem" — `lineId: 'area-pesagem'` — já que ela nunca
   // deixou de pertencer à Pesagem, só estava organizada num reator.
+  // O que aparece na coluna de cada reator no Cronograma de Manipulação:
+  //  * a OP de Manipulação (a fila real do reator) enquanto não concluída;
+  //  * a OSM de Pesagem organizada no reator que AINDA não virou OP de
+  //    Manipulação.
+  // Antes só a OSM de Pesagem entrava — assim que a tela da Manipulação
+  // criava a OP do reator (o que acontece na hora), o card sumia do
+  // cronograma, e OP atrasada de dias anteriores nunca aparecia.
+  const isReactorColumnOp = (op: ProductionOrder) => {
+    if (op.setor === 'Manipulação') return op.status !== 'completed';
+    return !manipulatedOsmNumbers.has(op.number) && !manipulatedOsmNumbers.has(op.lote || '');
+  };
+
   const handleUnassignFromReactor = async (opId: string) => {
+    const op = ops.find(o => o.id === opId);
+    if (op && op.setor === 'Manipulação') {
+      // OP de Manipulação ainda não iniciada: sai da fila do reator e a OSM
+      // volta para o estoque da Pesagem.
+      if (op.status !== 'pending') {
+        showToast('Esta OP já foi iniciada no reator — não dá para devolver ao estoque.', 'error');
+        return;
+      }
+      try {
+        const osm = ops.find(o => o.setor === 'Pesagem' && ((o.number || '').trim() === (op.number || '').trim() || (!!op.lote && o.lote === op.lote)));
+        await deleteOP(op.id);
+        if (osm) await updateOP(osm.id, { lineId: 'area-pesagem' });
+        showToast('OP tirada da fila do reator e devolvida para o estoque da Pesagem.');
+      } catch (err: any) {
+        showToast(err?.message || 'Não foi possível tirar a OP da fila do reator.', 'error');
+      }
+      await loadData();
+      return;
+    }
     await updateOP(opId, { lineId: 'area-pesagem' });
     showToast('OP devolvida para o estoque da Pesagem.');
     await loadData();
+  };
+
+  // Arrastar entre reatores: a OP de Manipulação muda de fila e a OSM de
+  // Pesagem de origem acompanha (fica no mesmo reator).
+  const handleAssignToReactor = async (opId: string, lineId: string, scheduledDate?: string) => {
+    const op = ops.find(o => o.id === opId);
+    if (op && op.setor === 'Manipulação') {
+      const osm = ops.find(o => o.setor === 'Pesagem' && (o.number || '').trim() === (op.number || '').trim());
+      if (osm) await updateOP(osm.id, { lineId });
+    }
+    await handleAssignToQueue(opId, lineId, scheduledDate);
   };
 
   // Mesma correção de sequence do handleReorderColumn acima, só que a
@@ -707,12 +750,7 @@ WHERE email IN (
     // virado de fato uma OP de Manipulação em andamento (manipulatedOsmNumbers).
     const columnOps = columnId === CRONOGRAMA_BACKLOG_COLUMN_ID
       ? ops.filter(isPesagemAvailableForReator)
-      : ops.filter(o =>
-          o.lineId === columnId &&
-          !manipulatedOsmNumbers.has(o.number) &&
-          !manipulatedOsmNumbers.has(o.lote || '') &&
-          (!scheduledDate || o.scheduledDate === scheduledDate)
-        );
+      : ops.filter(o => o.lineId === columnId && isReactorColumnOp(o));
 
     const updates: Array<Promise<any>> = [];
     orderedOpIds.forEach((opId, idx) => {
@@ -1330,9 +1368,10 @@ WHERE email IN (
   return (
     <div className="h-screen bg-[#09090b] text-[#f4f4f5] flex font-sans overflow-hidden selection:bg-blue-600 selection:text-white">
       
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-3 duration-200 ${
+      {/* Toast Notification — renderizado direto no <body> (portal) e acima de
+          tudo, para nunca ficar escondido atrás de uma janela aberta */}
+      {toastMessage && typeof document !== 'undefined' && createPortal(
+        <div className={`fixed bottom-5 right-5 z-[9999] max-w-[calc(100vw-40px)] sm:max-w-md px-4 py-3 rounded-xl shadow-2xl border text-xs font-semibold flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-3 duration-200 ${
           toastMessage.type === 'success' ? 'bg-emerald-950/90 border-emerald-800 text-emerald-200 shadow-emerald-950/50' :
           toastMessage.type === 'error' ? 'bg-red-950/90 border-red-800 text-red-200 shadow-red-950/50' :
           'bg-blue-950/90 border-blue-800 text-blue-200 shadow-blue-950/50'
@@ -1341,7 +1380,8 @@ WHERE email IN (
           {toastMessage.type === 'error' && <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />}
           {toastMessage.type === 'info' && <Sparkles className="w-4 h-4 text-blue-400 shrink-0" />}
           <span>{toastMessage.text}</span>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* ---------------- MENU LATERAL (SIDEBAR) ---------------- */}
@@ -1522,7 +1562,7 @@ WHERE email IN (
                 <CronogramaBoard
                   lines={reactorLines}
                   ops={ops}
-                  onAssignToQueue={handleAssignToQueue}
+                  onAssignToQueue={handleAssignToReactor}
                   onUnassign={handleUnassignFromReactor}
                   onReorderColumn={handleReorderColumnManipulacao}
                   onOpenAssignModal={(line) => setAssignStockModalTargetLine(line)}
@@ -1530,9 +1570,7 @@ WHERE email IN (
                   backlogFilter={isPesagemAvailableForReator}
                   backlogLabel="Estoque / Pesagem"
                   backlogEmptyLabel="Nenhuma OSM de Pesagem disponível"
-                  lineOpsFilter={(op) =>
-                    !manipulatedOsmNumbers.has(op.number) && !manipulatedOsmNumbers.has(op.lote || '')
-                  }
+                  lineOpsFilter={isReactorColumnOp}
                 />
               )}
             </div>

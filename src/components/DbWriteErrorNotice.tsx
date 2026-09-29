@@ -30,7 +30,7 @@ export function DbWriteErrorNotice() {
 
   if (failures.length === 0 && conflict) {
     return (
-      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] w-[calc(100%-24px)] max-w-lg">
+      <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[9999] w-[calc(100%-24px)] max-w-lg">
         <div className="bg-amber-950/95 border border-amber-600 text-amber-100 rounded-2xl shadow-2xl px-4 py-3 flex items-start gap-3 backdrop-blur-md">
           <Users className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
@@ -61,7 +61,7 @@ export function DbWriteErrorNotice() {
   const last = failures[0];
 
   return (
-    <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] w-[calc(100%-24px)] max-w-lg">
+    <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[9999] w-[calc(100%-24px)] max-w-lg">
       <div className="bg-rose-950/95 border border-rose-700 text-rose-100 rounded-2xl shadow-2xl px-4 py-3 flex items-start gap-3 backdrop-blur-md">
         <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">

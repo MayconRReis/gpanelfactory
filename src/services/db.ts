@@ -2082,6 +2082,31 @@ export const findOpsByNumber = async (
   }
 };
 
+/** Igual a findOpsByNumber, mas pelo LOTE (um lote é uma batelada só). */
+export const findOpsByLote = async (
+  lote: string
+): Promise<Array<{ id: string; number: string; setor: string | null; status: string; createdAt: string | null }>> => {
+  const clean = String(lote || '').trim();
+  if (!clean) return [];
+  const same = (v: any) => String(v || '').trim().toLowerCase() === clean.toLowerCase();
+  const fromCache = () => (trainingModeActive ? trainingOps : inMemoryOps)
+    .filter(o => same(o.lote))
+    .map(o => ({ id: o.id, number: o.number, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null }));
+  if (trainingModeActive) return fromCache();
+  try {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('id, number, setor, status, created_at, lote')
+      .ilike('lote', clean);
+    if (error) return fromCache();
+    return (data || [])
+      .filter((r: any) => same(r.lote))
+      .map((r: any) => ({ id: String(r.id), number: String(r.number || ''), setor: r.setor || null, status: String(r.status || ''), createdAt: r.created_at || null }));
+  } catch {
+    return fromCache();
+  }
+};
+
 /** Já existe uma OP com esse número nesse setor (regra UNIQUE(number, setor)). */
 export class DuplicateOpError extends Error {
   readonly isDuplicateOp = true;
