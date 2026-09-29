@@ -499,7 +499,7 @@ export function HomeDashboard({
       dashboardPeriod === 'geral' ||
       ((!periodDateRange.rangeStart || day >= periodDateRange.rangeStart) &&
         (!periodDateRange.rangeEnd || day <= periodDateRange.rangeEnd));
-    const envaseIds = new Set(envaseLines.map(l => l.id));
+    const envaseIds = new Set<string>(envaseLines.map(l => String(l.id)));
 
     // Absenteísmo: último registro de cada linha em cada dia
     const lastByLineDay = new Map<string, LineHeadcount>();
@@ -520,10 +520,10 @@ export function HomeDashboard({
     const absenteeismPct = present + absent > 0 ? Math.round((absent / (present + absent)) * 1000) / 10 : null;
 
     // Produtividade: produção (eventos) ÷ horas-pessoa (trechos de trabalho × equipe)
-    const productionByLine = computeProductionByLineAndDay(events, ops);
+    const productionByLine: Record<string, Record<string, number>> = computeProductionByLineAndDay(events, ops);
     let personMs = 0;
     let producedWithTeam = 0;
-    for (const lineId of envaseIds) {
+    for (const lineId of Array.from(envaseIds)) {
       const working: Array<[number, number]> = periodProductionTime.intervals
         .filter(iv => iv.type === 'WORKING' && iv.lineId === lineId)
         .map(iv => [iv.startMs, iv.endMs] as [number, number])
@@ -539,7 +539,7 @@ export function HomeDashboard({
       // Só a produção dos dias em que a equipe foi informada entra na conta
       const daysWithTeam = new Set(headcounts.filter(h => h.lineId === lineId).map(h => toLocalDateStr(h.recordedAt)));
       for (const [day, qty] of Object.entries(productionByLine[lineId] || {})) {
-        if (inPeriod(day) && daysWithTeam.has(day)) producedWithTeam += qty;
+        if (inPeriod(day) && daysWithTeam.has(day)) producedWithTeam += Number(qty || 0);
       }
     }
     const personHours = personMs / (60 * 60 * 1000);

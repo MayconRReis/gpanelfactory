@@ -30,7 +30,7 @@ import {
   Trash2,
   ClipboardList
 } from 'lucide-react';
-import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory } from '../services/db';
+import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory, findOpsByNumber } from '../services/db';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, PesagemHistoryChange } from '../types';
 import { getUserRule } from '../lib/permissions';
 import { PesagemMovimentacoes } from '../components/PesagemMovimentacoes';
@@ -420,7 +420,35 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       showToast('Informe o Lote.', 'error');
       return;
     }
+    if (!/^[0-9A-Za-z]/.test(trimmedNumber)) {
+      showToast('O número da OSM deve começar com número ou letra (confira se não há "-" ou espaço no começo).', 'error');
+      return;
+    }
     setIsSubmitting(true);
+
+    // TRAVA DE DUPLICIDADE: confere no banco (não só na tela) se esta OSM já
+    // existe — na Pesagem ou já na Manipulação — antes de gravar.
+    const numberChanged = !editingOp || (editingOp.number || '').trim().toLowerCase() !== trimmedNumber.toLowerCase();
+    if (numberChanged) {
+      const existing = (await findOpsByNumber(trimmedNumber)).filter(o => o.id !== editingOp?.id);
+      const fmtWhen = (iso: string | null) => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return isNaN(d.getTime()) ? '' : ` em ${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} às ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+      };
+      const inPesagem = existing.find(o => o.setor === 'Pesagem');
+      const inManip = existing.find(o => o.setor === 'Manipulação');
+      if (inPesagem || inManip) {
+        showToast(
+          inPesagem
+            ? `A OSM ${trimmedNumber} já foi registrada na Pesagem${fmtWhen(inPesagem.createdAt)}. Não é possível registrar duas vezes.`
+            : `A OSM ${trimmedNumber} já está na Manipulação${fmtWhen(inManip!.createdAt)}. Não é possível registrar de novo na Pesagem.`,
+          'error'
+        );
+        setIsSubmitting(false);
+        return;
+      }
+    }
     try {
       if (editingOp) {
         // Atualização da OSM existente — NÃO envia plannedQuantity/producedQuantity

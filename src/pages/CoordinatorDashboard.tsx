@@ -852,7 +852,7 @@ WHERE email IN (
         }
         showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
       } else {
-        const created = await createOP(opPayload, isPesagemOp ? { verify: true } : {});
+        const created = await createOP(opPayload, { verify: true });
         if (isPesagemOp) {
           const res = await logPesagemHistory({
             action: 'created',

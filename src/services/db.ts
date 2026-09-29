@@ -576,6 +576,8 @@ export function generateLeaderEmail(name: string, domain = 'fabrica.com'): strin
 if (typeof window !== 'undefined' && window.localStorage) {
   try {
     const legacyKeys = [
+      'SIG_PROD_DELETED_OPS_V6',
+      'SIG_PROD_OPS_RESET_TIME_V6',
       'SIG_PROD_OPS_STORAGE_V5',
       'SIG_PROD_DELETED_OPS_V5',
       'SIG_PROD_LINES_STORAGE_V5',
@@ -758,41 +760,13 @@ export function setTrainingMode(active: boolean, seed?: { ops: ProductionOrder[]
   resetTrainingPesagemHistory();
 }
 
-// Blacklist persistente de OPs excluídas (por id específico — não afeta OPs
-// futuras nem históricas, só as que o usuário realmente excluiu uma a uma).
-//
-// Havia também um "timestamp do último reset geral" (SIG_PROD_OPS_RESET_TIME_V6)
-// que escondia no Dashboard qualquer OP com created_at <= aquele momento. Como
-// o botão de resetar produção já apaga de verdade no Supabase
-// (DELETE FROM production_orders/ops abaixo), esse filtro por data no
-// navegador era redundante — e tinha o efeito colateral de esconder
-// permanentemente qualquer dado histórico importado depois com uma data de
-// produção anterior ao reset (foi a causa de um bug real: meses inteiros
-// sumindo do Dashboard). Removido.
-const DELETED_OPS_KEY = 'SIG_PROD_DELETED_OPS_V6';
-
-let deletedOpIds = new Set<string>();
-
+// O banco de dados Supabase é a ÚNICA fonte de verdade para OPs.
+// Nenhuma lista de OPs excluídas é salva ou mantida localmente no localStorage.
 if (typeof window !== 'undefined' && window.localStorage) {
   try {
-    const stored = window.localStorage.getItem(DELETED_OPS_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      if (Array.isArray(parsed)) {
-        deletedOpIds = new Set(parsed);
-      }
-    }
-    // Limpa a trava antiga de reset por data, caso ainda exista no navegador.
+    window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V6');
     window.localStorage.removeItem('SIG_PROD_OPS_RESET_TIME_V6');
   } catch {}
-}
-
-function saveDeletedOpIds() {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.setItem(DELETED_OPS_KEY, JSON.stringify(Array.from(deletedOpIds)));
-    } catch {}
-  }
 }
 
 const SLEEVE_OPS_KEY = 'gpanel_sleeve_op_ids';
@@ -1824,7 +1798,6 @@ export const getAllOPs = async (): Promise<ProductionOrder[]> => {
         }))
         .filter((op) => {
           if (isMockOp(op)) return false;
-          if (deletedOpIds.has(op.id)) return false;
           return true;
         });
 
@@ -2039,9 +2012,15 @@ export const createOP = async (newOpData: {
     console.error(`[createOP] Erro inesperado ao gravar em production_orders (OP ${newOp.id}):`, err);
   }
 
+  // Com `verify`: a tabela principal (production_orders) é a que o app lê.
+  // Se ELA recusou, a OP não pode ser dada como criada — antes, bastava a
+  // cópia em `ops` aceitar para a tela dizer "registrada com sucesso" e a OP
+  // sumir no próximo carregamento.
+  if (options.verify && insertErrors > 0) {
+    throw new Error(`O banco não gravou a OP ${trimmedNumber} (${lastInsertError}). Nada foi registrado.`);
+  }
+
   // 2. Memória/cache local
-  deletedOpIds.delete(newOp.id);
-  saveDeletedOpIds();
   inMemoryOps = [newOp, ...inMemoryOps];
   persistOps();
 
@@ -2069,6 +2048,38 @@ export const createOP = async (newOpData: {
   }
 
   return newOp;
+};
+
+/**
+ * Busca NO BANCO (não no cache da tela) as OPs/OSMs com este número, em
+ * qualquer setor. Usado para barrar o registro de uma OSM repetida antes de
+ * gravar — com a mensagem dizendo quando e onde ela já existe.
+ */
+export const findOpsByNumber = async (
+  number: string
+): Promise<Array<{ id: string; setor: string | null; status: string; createdAt: string | null; lineId: string | null }>> => {
+  const clean = String(number || '').trim().replace(/\s+/g, ' ');
+  if (!clean) return [];
+  if (trainingModeActive) {
+    return trainingOps
+      .filter(o => o.number.trim().toLowerCase() === clean.toLowerCase())
+      .map(o => ({ id: o.id, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null, lineId: o.lineId }));
+  }
+  const fromCache = () => inMemoryOps
+    .filter(o => (o.number || '').trim().toLowerCase() === clean.toLowerCase())
+    .map(o => ({ id: o.id, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null, lineId: o.lineId }));
+  try {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('id, setor, status, created_at, line_id, number')
+      .ilike('number', clean);
+    if (error) return fromCache();
+    return (data || [])
+      .filter((r: any) => String(r.number || '').trim().toLowerCase() === clean.toLowerCase())
+      .map((r: any) => ({ id: String(r.id), setor: r.setor || null, status: String(r.status || ''), createdAt: r.created_at || null, lineId: r.line_id ? String(r.line_id) : null }));
+  } catch {
+    return fromCache();
+  }
 };
 
 /** Já existe uma OP com esse número nesse setor (regra UNIQUE(number, setor)). */
@@ -2106,8 +2117,6 @@ async function adoptExistingOp(
   data: { lineId: string | null; sequence?: number; scheduledDate?: string },
   dbStatus?: string
 ): Promise<ProductionOrder> {
-  deletedOpIds.delete(opId);
-  saveDeletedOpIds();
   const local = inMemoryOps.find(o => o.id === opId);
   const currentStatus = local?.status || dbStatus;
   const stillQueued = currentStatus === 'pending';
@@ -2175,11 +2184,6 @@ export const importOPsBatch = async (
     newCreated.push(op);
   }
 
-  // Remove qualquer OP importada do blacklist de excluídos
-  newCreated.forEach(op => deletedOpIds.delete(op.id));
-  saveDeletedOpIds();
-
-  // 1. Immediately persist locally in memory and localStorage
   inMemoryOps = [...newCreated, ...inMemoryOps];
   persistOps();
 
@@ -2562,10 +2566,10 @@ export const deleteOP = async (opId: string) => {
   // só da tela e depois dava "duplicate key" ao tentar recriá-la.
   // Obs.: quando a permissão (RLS) barra um DELETE o Supabase NÃO devolve erro,
   // só apaga 0 linhas — por isso o `.select('id')` pra contar o que saiu.
-  const [resPO, resOps] = await Promise.all([
-    supabase.from('production_orders').delete().eq('id', opId).select('id'),
-    supabase.from('ops').delete().eq('id', opId).select('id'),
-  ]);
+  // production_orders primeiro; o espelho em `ops` só é apagado depois que
+  // a principal saiu. Antes as duas eram apagadas juntas: se o banco
+  // recusava a principal, a OP sumia só de `ops` e ficava pela metade.
+  const resPO = await supabase.from('production_orders').delete().eq('id', opId).select('id');
   const removedFromPO = (resPO.data || []).length > 0;
   if (!removedFromPO) {
     // Nada apagado: ou a OP não existia em production_orders, ou o banco recusou.
@@ -2576,13 +2580,12 @@ export const deleteOP = async (opId: string) => {
       throw new Error(`O banco não excluiu a OP (${reason}). Ela continua no sistema.`);
     }
   }
+  const resOps = await supabase.from('ops').delete().eq('id', opId).select('id');
   if (resOps.error) {
     console.warn(`[deleteOP] Falha ao excluir espelho em ops (OP ${opId}):`, resOps.error.message);
   }
 
-  // 2. Só agora tira da memória e marca como excluída neste navegador
-  deletedOpIds.add(opId);
-  saveDeletedOpIds();
+  // 2. Remove da memória local para atualização imediata da tela
   inMemoryOps = inMemoryOps.filter(op => op.id !== opId);
   persistOps();
 };
@@ -4505,11 +4508,6 @@ export const updateProducedQuantityDirect = async (
 
 // ---------------- DATABASE RESET & CLEANUP ----------------
 export const clearAllOPs = async (): Promise<void> => {
-  // Registra todas as OPs atuais como excluídas (por id — o DELETE real no
-  // Supabase abaixo é quem efetivamente limpa os dados)
-  inMemoryOps.forEach(op => deletedOpIds.add(op.id));
-  saveDeletedOpIds();
-
   inMemoryOps = [];
   persistOps();
 
@@ -4544,11 +4542,6 @@ export const clearAllEvents = async (): Promise<void> => {
 };
 
 export const resetProductionDatabase = async (): Promise<void> => {
-  // Registra todas as OPs atuais como excluídas (por id — o DELETE real no
-  // Supabase abaixo é quem efetivamente limpa os dados)
-  inMemoryOps.forEach(op => deletedOpIds.add(op.id));
-  saveDeletedOpIds();
-
   inMemoryOps = [];
   inMemoryEvents = [];
   inMemoryLines = DEFAULT_LINES.map(l => ({ ...l, status: 'idle', currentOpId: null }));
@@ -4560,6 +4553,7 @@ export const resetProductionDatabase = async (): Promise<void> => {
   // Clean old storage versions as well
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
+      window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V6');
       window.localStorage.removeItem('SIG_PROD_OPS_STORAGE_V4');
       window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V4');
       window.localStorage.removeItem('SIG_PROD_EVENTS_STORAGE_V4');

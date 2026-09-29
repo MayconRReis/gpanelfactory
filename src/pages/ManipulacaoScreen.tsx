@@ -503,8 +503,8 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     setActionBusyOpId(op.id);
     try {
       await ensureShiftOpen(op.lineId);
-      await startOP(op.id, op.lineId, profile.uid);
-      if (op.status === 'pending') await logPesagemExit(op, 'manipulacao_started');
+      const res = await startOP(op.id, op.lineId, profile.uid);
+      if (op.status === 'pending' && res?.ok !== false) await logPesagemExit(op, 'manipulacao_started');
       await fetchData(true);
     } catch (err) {
       console.error('Erro ao iniciar manipulação:', err);

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 import { GranelBadge } from './GranelBadge';
@@ -120,7 +120,30 @@ export function CronogramaBoard({
   // Kanban. `weekOffset` deixa o coordenador avançar/voltar semanas — por
   // exemplo, numa sexta-feira, avançar uma semana pra já organizar a
   // segunda-feira seguinte.
-  const todayStr = useMemo(() => getLocalDateStr(), []);
+  // Dia de hoje acompanhando o relógio (vira sozinho à meia-noite)
+  const [todayStr, setTodayStr] = useState(() => getLocalDateStr());
+  useEffect(() => {
+    const t = setInterval(() => setTodayStr(getLocalDateStr()), 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Último dia programado da OP (OPs de vários dias usam scheduledEndDate)
+  const lastScheduledDay = (o: ProductionOrder) =>
+    (o.scheduledEndDate && o.scheduledEndDate >= (o.scheduledDate || '') ? o.scheduledEndDate : o.scheduledDate) || '';
+
+  // ATRASADA: não concluída e o último dia programado já passou. Ela
+  // continua aparecendo no dia de HOJE (além do dia original), marcada como
+  // atrasada — antes ela ficava só no dia de ontem e sumia do cronograma.
+  const isOverdue = (o: ProductionOrder) =>
+    o.status !== 'completed' && !!o.scheduledDate && lastScheduledDay(o) < todayStr;
+
+  // A OP aparece no dia selecionado se ele está dentro do período programado,
+  // ou se o dia selecionado é hoje e ela está atrasada.
+  const showsOnDay = (o: ProductionOrder, day: string) => {
+    if (!o.scheduledDate) return false;
+    if (o.scheduledDate <= day && day <= lastScheduledDay(o)) return true;
+    return day === todayStr && isOverdue(o);
+  };
   const [weekOffset, setWeekOffset] = useState(0);
   const weekDays = useMemo(() => {
     const reference = new Date();
@@ -158,10 +181,12 @@ export function CronogramaBoard({
     for (const op of ops) {
       if (op.lineId && op.scheduledDate && op.status !== 'completed') {
         map[op.scheduledDate] = (map[op.scheduledDate] || 0) + 1;
+        if (isOverdue(op)) map[todayStr] = (map[todayStr] || 0) + 1;
       }
     }
     return map;
-  }, [ops]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ops, todayStr]);
 
   // OPs sem linha atribuída (ainda no estoque) e não concluídas — a ordem já
   // vem por `sequence` (a consulta ao Supabase em getAllOPs ordena por essa
@@ -192,11 +217,17 @@ export function CronogramaBoard({
     const map: Record<string, ProductionOrder[]> = {};
     for (const line of lines) {
       map[line.id] = ops
-        .filter(o => o.lineId === line.id && o.scheduledDate === selectedDate && extraFilter(o, line))
-        .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+        .filter(o => o.lineId === line.id && showsOnDay(o, selectedDate) && extraFilter(o, line))
+        .sort((a, b) => {
+          // Em produção/pausada primeiro, depois as atrasadas, depois a fila
+          const rank = (o: ProductionOrder) =>
+            o.status === 'in_progress' || o.status === 'paused' ? 0 : (selectedDate === todayStr && isOverdue(o) ? 1 : 2);
+          return rank(a) - rank(b) || (a.sequence || 0) - (b.sequence || 0);
+        });
     }
     return map;
-  }, [lines, ops, selectedDate, lineOpsFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines, ops, selectedDate, lineOpsFilter, todayStr]);
 
   const columnOps = (columnId: string): ProductionOrder[] =>
     columnId === BACKLOG_COLUMN_ID ? backlogOps : (opsByLine[columnId] || []);
@@ -408,7 +439,16 @@ export function CronogramaBoard({
               <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-amber-500 text-black uppercase">
                 Pausada
               </span>
-            ) : isCritical ? (
+            ) : null}
+            {columnId !== BACKLOG_COLUMN_ID && isOverdue(op) && (
+              <span
+                className="text-[9px] font-black px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-700/60 uppercase"
+                title={`Programada para ${lastScheduledDay(op).split('-').reverse().join('/')} e ainda não concluída`}
+              >
+                Atrasada · {lastScheduledDay(op).split('-').reverse().slice(0, 2).join('/')}
+              </span>
+            )}
+            {op.status !== 'in_progress' && op.status !== 'paused' && isCritical ? (
               <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-red-900/80 text-red-300 border border-red-700/50 flex items-center gap-0.5">
                 <AlertTriangle className="w-2.5 h-2.5" />
                 {op.priority}

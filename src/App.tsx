@@ -7,6 +7,7 @@ import { CoordinatorDashboard } from './pages/CoordinatorDashboard';
 import { FirstAccessPasswordChange } from './pages/FirstAccessPasswordChange';
 import { PublicDashboardView } from './pages/PublicDashboardView';
 import { UpdateNotifier } from './components/UpdateNotifier';
+import { DbWriteErrorNotice } from './components/DbWriteErrorNotice';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, profile, isLoading } = useAuthStore();
@@ -78,6 +79,8 @@ export default function App() {
           pra ficar sempre montado (login, dashboard público ou app logado)
           e nunca desmontar numa troca de rota. */}
       <UpdateNotifier />
+      {/* Aviso quando o banco recusa uma gravação do chão de fábrica */}
+      <DbWriteErrorNotice />
     </AuthProvider>
   );
 }
