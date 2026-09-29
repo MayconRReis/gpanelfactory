@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover } from '../types';
 import { calculateProductionTime } from '../lib/productionTime';
 
 /**
@@ -213,6 +213,26 @@ export function toLocalDateStr(value?: string | null): string {
  */
 export function getOpReferenceDateStr(op: ProductionOrder): string {
   return toLocalDateStr(op.completedAt || op.scheduledDate || op.createdAt);
+}
+
+// ---------------- STATUS DO GRANEL (Separado → Manipulando → Manipulado) ----------------
+// O campo "granel" da OP de Envase é o número da OSM da Pesagem. O status sai
+// dos registros que já existem dessa OSM — nada é digitado à parte:
+//   - Manipulado:  a OSM de Manipulação com esse número foi finalizada;
+//   - Manipulando: está em processo ou pausada num reator;
+//   - Separado:    a Pesagem registrou a OSM (e ela ainda não foi finalizada na Manipulação);
+//   - Não separado: nenhuma OSM com esse número foi encontrada.
+export type GranelStatus = 'manipulado' | 'manipulando' | 'separado' | 'nao_separado';
+
+export function getGranelStatus(granel: string | undefined | null, ops: ProductionOrder[]): GranelStatus | null {
+  const key = String(granel || '').trim().toLowerCase();
+  if (!key) return null;
+  const sameNumber = ops.filter(o => String(o.number || '').trim().toLowerCase() === key && !o.isPartialRecord);
+  const manip = sameNumber.filter(o => o.setor === 'Manipulação');
+  if (manip.some(o => o.status === 'completed')) return 'manipulado';
+  if (manip.some(o => o.status === 'in_progress' || o.status === 'paused')) return 'manipulando';
+  if (sameNumber.some(o => o.setor === 'Pesagem' || o.tipoDocumento === 'OSM') || manip.length > 0) return 'separado';
+  return 'nao_separado';
 }
 
 // ---------------- CONCLUSÕES PARCIAIS ----------------
@@ -3118,6 +3138,249 @@ export function getOpenWorkSession(sessions: WorkSession[], lineId: string): Wor
   return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
 }
 
+// ---------------- EQUIPE POR LINHA (line_headcounts) ----------------
+// Colaboradores presentes e faltas de cada linha. O líder informa ao iniciar o
+// expediente e pode corrigir durante o dia — cada correção é um registro novo
+// com horário, e o valor que vale é sempre o mais recente.
+
+let trainingHeadcounts: LineHeadcount[] = [];
+
+/** Registros de equipe dos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getLineHeadcounts = async (sinceDays = 400): Promise<LineHeadcount[]> => {
+  if (trainingModeActive) return trainingHeadcounts.map(h => ({ ...h }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('line_headcounts')
+        .select('*')
+        .gte('recorded_at', since)
+        .order('recorded_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getLineHeadcounts] Não foi possível ler line_headcounts (rodou sql/add_line_headcounts.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map((r: any) => ({
+      id: String(r.id),
+      lineId: String(r.line_id),
+      present: Number(r.present) || 0,
+      absent: Number(r.absent) || 0,
+      recordedAt: r.recorded_at,
+      recordedBy: r.recorded_by || null,
+    }));
+  } catch (err) {
+    console.warn('[getLineHeadcounts] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Grava a equipe atual da linha (presentes e faltas). */
+export const recordLineHeadcount = async (
+  lineId: string,
+  present: number,
+  absent: number,
+  userId?: string | null
+): Promise<{ error: string | null }> => {
+  const p = Math.max(0, Math.floor(Number(present) || 0));
+  const a = Math.max(0, Math.floor(Number(absent) || 0));
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingHeadcounts.push({ id: `sim-hc-${Date.now()}`, lineId, present: p, absent: a, recordedAt: nowIso, recordedBy: userId || null });
+    return { error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('line_headcounts')
+      .insert({ line_id: lineId, present: p, absent: a, recorded_at: nowIso, recorded_by: userId || null })
+      .select('id');
+    if (error) return { error: error.message };
+    if (!data || data.length === 0) return { error: 'o banco não gravou (sem permissão)' };
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Equipe vigente de uma linha num dia (último registro do dia), ou null se não informada. */
+export function getHeadcountForLineDay(list: LineHeadcount[], lineId: string, dayStr: string): LineHeadcount | null {
+  let latest: LineHeadcount | null = null;
+  for (const h of list) {
+    if (h.lineId !== lineId || toLocalDateStr(h.recordedAt) !== dayStr) continue;
+    if (!latest || new Date(h.recordedAt).getTime() >= new Date(latest.recordedAt).getTime()) latest = h;
+  }
+  return latest;
+}
+
+/**
+ * Horas-pessoa trabalhadas numa linha: cada trecho de trabalho vale o número
+ * de colaboradores presentes naquele horário (o primeiro registro do dia vale
+ * desde o início do dia; cada correção vale a partir do horário em que foi
+ * feita). Dia sem equipe informada não entra (retorna os ms sem equipe à parte).
+ */
+export function computePersonHours(
+  workingRanges: Array<[number, number]>,
+  headcounts: LineHeadcount[],
+  lineId: string
+): { personMs: number; workingMsWithTeam: number; workingMsWithoutTeam: number } {
+  const recs = headcounts
+    .filter(h => h.lineId === lineId)
+    .map(h => ({ t: new Date(h.recordedAt).getTime(), present: h.present, day: toLocalDateStr(h.recordedAt) }))
+    .filter(r => !isNaN(r.t))
+    .sort((a, b) => a.t - b.t);
+  let personMs = 0;
+  let withTeam = 0;
+  let withoutTeam = 0;
+  for (const [start, end] of workingRanges) {
+    let cursor = start;
+    while (cursor < end) {
+      const day = toLocalDateStr(new Date(cursor).toISOString());
+      const d = new Date(cursor);
+      const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+      const sliceEnd = Math.min(end, dayEnd);
+      const dayRecs = recs.filter(r => r.day === day);
+      if (dayRecs.length === 0) {
+        withoutTeam += sliceEnd - cursor;
+      } else {
+        // Trechos do dia por registro: [início do dia ou registro, próximo registro)
+        for (let i = 0; i < dayRecs.length; i++) {
+          const segStart = i === 0 ? -Infinity : dayRecs[i].t;
+          const segEnd = i + 1 < dayRecs.length ? dayRecs[i + 1].t : Infinity;
+          const a = Math.max(cursor, segStart);
+          const b = Math.min(sliceEnd, segEnd);
+          if (b > a) {
+            personMs += (b - a) * dayRecs[i].present;
+            withTeam += b - a;
+          }
+        }
+      }
+      cursor = sliceEnd;
+    }
+  }
+  return { personMs, workingMsWithTeam: withTeam, workingMsWithoutTeam: withoutTeam };
+}
+
+// ---------------- TROCA DE PRODUTO (line_changeovers) ----------------
+// Tempo entre terminar uma OP e começar a próxima, trocando o produto da
+// linha. Aberta pelo botão "Iniciar troca"; fecha ao iniciar a próxima OP,
+// ao encerrar a troca ou ao encerrar o expediente.
+
+let trainingChangeovers: LineChangeover[] = [];
+
+const mapChangeoverRow = (r: any): LineChangeover => ({
+  id: String(r.id),
+  lineId: String(r.line_id),
+  startedAt: r.started_at,
+  endedAt: r.ended_at || null,
+  startedBy: r.started_by || null,
+  endedBy: r.ended_by || null,
+  previousOpId: r.previous_op_id || null,
+  nextOpId: r.next_op_id || null,
+});
+
+/** Trocas iniciadas nos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getChangeovers = async (sinceDays = 400): Promise<LineChangeover[]> => {
+  if (trainingModeActive) return trainingChangeovers.map(c => ({ ...c }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('line_changeovers')
+        .select('*')
+        .gte('started_at', since)
+        .order('started_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getChangeovers] Não foi possível ler line_changeovers (rodou sql/add_line_changeovers.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map(mapChangeoverRow);
+  } catch (err) {
+    console.warn('[getChangeovers] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Troca aberta (sem ended_at) de uma linha, se houver. */
+export function getOpenChangeover(list: LineChangeover[], lineId: string): LineChangeover | null {
+  const open = list.filter(c => c.lineId === lineId && !c.endedAt);
+  if (open.length === 0) return null;
+  return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
+}
+
+/** Abre a troca de produto na linha (não abre outra se já houver uma aberta). */
+export const startChangeover = async (
+  lineId: string,
+  userId?: string | null,
+  previousOpId?: string | null
+): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    if (!trainingChangeovers.some(c => c.lineId === lineId && !c.endedAt)) {
+      trainingChangeovers.push({ id: `sim-co-${Date.now()}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, previousOpId: previousOpId || null });
+    }
+    return { error: null };
+  }
+  try {
+    const { data: openRows, error: readError } = await supabase
+      .from('line_changeovers').select('id').eq('line_id', lineId).is('ended_at', null).limit(1);
+    if (readError) return { error: readError.message };
+    if (openRows && openRows.length > 0) return { error: null };
+    const { data, error } = await supabase
+      .from('line_changeovers')
+      .insert({ line_id: lineId, started_at: nowIso, started_by: userId || null, previous_op_id: previousOpId || null })
+      .select('id');
+    if (error) return { error: error.message };
+    if (!data || data.length === 0) return { error: 'o banco não gravou (sem permissão)' };
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Fecha a troca aberta da linha (ao iniciar a próxima OP, encerrar a troca ou o expediente). */
+export const endChangeover = async (
+  lineId: string,
+  userId?: string | null,
+  nextOpId?: string | null
+): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingChangeovers = trainingChangeovers.map(c =>
+      c.lineId === lineId && !c.endedAt ? { ...c, endedAt: nowIso, endedBy: userId || null, nextOpId: nextOpId || null } : c
+    );
+    return { error: null };
+  }
+  try {
+    const { error } = await supabase
+      .from('line_changeovers')
+      .update({ ended_at: nowIso, ended_by: userId || null, next_op_id: nextOpId || null })
+      .eq('line_id', lineId)
+      .is('ended_at', null);
+    return { error: error ? error.message : null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
 // ---------------- OP ACTIONS ----------------
 export const startOP = async (opId: string, lineId: string, leaderId: string) => {
   if (trainingModeActive) {
@@ -3711,6 +3974,20 @@ export const cancelOP = async (
     createdAt: new Date().toISOString(),
   };
 
+  // 1. Volta a OP pra "aguardando" no banco e CONFERE se gravou — com a
+  // permissão (RLS) barrando, o Supabase não dá erro, só atualiza 0 linhas.
+  const resPO = await supabase
+    .from('production_orders')
+    .update({ status: 'pending', leader_id: null })
+    .eq('id', opId)
+    .select('id');
+  if (resPO.error || !resPO.data || resPO.data.length === 0) {
+    const reason = resPO.error?.message || 'sem permissão para alterar esta OP';
+    console.error(`[cancelOP] Banco não cancelou o início da OP ${opId}:`, reason);
+    return { success: false, message: `O banco não cancelou o início (${reason}). A OP continua como estava.` };
+  }
+
+  // 2. Só agora reflete na tela/memória
   inMemoryEvents = [
     cancelledEvent,
     ...inMemoryEvents.filter(e => !(e.opId === opId && e.createdAt >= cutoffIso)),
@@ -3723,8 +4000,10 @@ export const cancelOP = async (
   persistLines();
 
   try {
+    // Tenta apagar os eventos da sessão errada. Se a permissão não deixar,
+    // não tem problema: o evento CANCELLED gravado abaixo já faz o cálculo de
+    // tempo (lib/productionTime) descartar essa sessão.
     await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'pending', leader_id: null }).eq('id', opId),
       supabase.from('ops').update({ status: 'pending', leader_id: null }).eq('id', opId),
       supabase.from('events').delete().eq('op_id', opId).gte('created_at', cutoffIso),
       supabase.from('production_events').delete().eq('op_id', opId).gte('created_at', cutoffIso),

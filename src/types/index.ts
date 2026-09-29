@@ -151,3 +151,25 @@ export interface WorkSession {
   startedBy?: string | null;
   endedBy?: string | null;
 }
+
+/** Equipe de uma linha num momento do dia (tabela line_headcounts). O valor vigente é o registro mais recente. */
+export interface LineHeadcount {
+  id: string;
+  lineId: string;
+  present: number;
+  absent: number;
+  recordedAt: string;
+  recordedBy?: string | null;
+}
+
+/** Troca de produto numa linha (tabela line_changeovers): do "Iniciar troca" até iniciar a próxima OP. */
+export interface LineChangeover {
+  id: string;
+  lineId: string;
+  startedAt: string;
+  endedAt?: string | null;
+  startedBy?: string | null;
+  endedBy?: string | null;
+  previousOpId?: string | null;
+  nextOpId?: string | null;
+}

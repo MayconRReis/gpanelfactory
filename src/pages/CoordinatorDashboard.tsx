@@ -3282,7 +3282,7 @@ WHERE email IN (
         isOpen={Boolean(assignModalOp)}
         onClose={() => setAssignModalOp(null)}
         op={assignModalOp}
-        lines={lines}
+        lines={assignModalOp && (assignModalOp.setor === 'Manipulação' || assignModalOp.setor === 'Pesagem') ? reactorLines : envaseLines}
         allOps={ops}
         onSave={handleSaveAssignment}
       />
@@ -3683,7 +3683,7 @@ WHERE email IN (
       <GoalsModal
         isOpen={showGoalsModal}
         onClose={() => setShowGoalsModal(false)}
-        lines={lines}
+        lines={envaseLines}
         factoryMonthlyGoal={factoryMonthlyGoal}
         factoryMonthlyGoals={factoryMonthlyGoals}
         lineDailyGoals={lineDailyGoals}

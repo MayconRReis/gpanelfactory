@@ -32,13 +32,13 @@ import {
   pauseOP,
   resumeOP,
   finishOP,
-  deleteOP,
   getLines,
   getWorkSessions,
   startWorkSession,
   endWorkSession,
   getOpenWorkSession,
   getRecentEvents,
+  cancelOP,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
@@ -57,9 +57,9 @@ interface ManipulacaoScreenProps {
 // tenha sido rodada (ou getLines() falhe), pra tela nunca ficar sem nenhum
 // reator pra mostrar.
 const DEFAULT_REACTOR_LINES: ProductionLine[] = [
-  { id: 'reator-1', name: 'Reator 1', status: 'idle', currentOpId: null },
-  { id: 'reator-2', name: 'Reator 2', status: 'idle', currentOpId: null },
-  { id: 'reator-3', name: 'Reator 3', status: 'idle', currentOpId: null },
+  { id: 'reator-1', name: 'Reator 11', status: 'idle', currentOpId: null },
+  { id: 'reator-2', name: 'Reator 12', status: 'idle', currentOpId: null },
+  { id: 'reator-3', name: 'Reator 13', status: 'idle', currentOpId: null },
 ];
 
 // Motivos de pausa específicos da Manipulação — lista própria, separada da
@@ -535,22 +535,25 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     }
   };
 
-  // Cancelar uma manipulação já iniciada por engano — exclui a OP de
-  // Manipulação. Como a OSM de Pesagem de origem continua organizada no
-  // mesmo reator pelo Cronograma, ela é remontada automaticamente como uma
-  // nova OP 'pending' (materialização acima) — ou seja, volta pra fila do
-  // reator pronta pra ser iniciada de novo, em vez de desaparecer.
+  // Cancelar uma manipulação INICIADA POR ENGANO — mesma regra do Envase:
+  // a OP volta pra "Pronta pra Iniciar" no mesmo lugar da fila do reator e o
+  // horário de início registrado por engano deixa de contar nos indicadores.
+  // Nada é excluído. Só vale enquanto nenhum Kg foi apontado.
   const handleConfirmCancel = async () => {
-    if (!cancellingOp) return;
+    if (!cancellingOp || !cancellingOp.lineId) return;
     setIsCancellingSubmitting(true);
     try {
-      await deleteOP(cancellingOp.id);
-      showToast(`OP ${cancellingOp.number} cancelada — voltou para a fila do reator.`);
+      const res = await cancelOP(cancellingOp.id, cancellingOp.lineId, 'Início cancelado (iniciado por engano)');
+      if (!res.success) {
+        showToast(res.message || 'Não foi possível cancelar o início desta OP.', 'error');
+        return;
+      }
+      showToast(`Início da OP ${cancellingOp.number} cancelado — ela voltou para a fila do reator.`);
       setCancellingOp(null);
       await fetchData(true);
     } catch (err) {
-      console.error('Erro ao cancelar OSM de Manipulação:', err);
-      showToast((err as any)?.message || 'Erro ao cancelar esta OP.', 'error');
+      console.error('Erro ao cancelar início da manipulação:', err);
+      showToast((err as any)?.message || 'Erro ao cancelar o início desta OP.', 'error');
     } finally {
       setIsCancellingSubmitting(false);
     }
@@ -563,7 +566,11 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     // Horário real de início = 1º evento STARTED da OP. Antes caía no horário
     // em que a OP foi CRIADA (quando entrou na fila do reator), mostrando um
     // "Início" que nunca aconteceu.
-    const startEvents = events.filter(e => e.opId === op.id && e.type === 'STARTED');
+    // (desconsidera inícios que foram cancelados por engano)
+    const lastCancelMs = events
+      .filter(e => e.opId === op.id && e.type === 'CANCELLED')
+      .reduce((max, e) => Math.max(max, new Date(e.createdAt).getTime()), -Infinity);
+    const startEvents = events.filter(e => e.opId === op.id && e.type === 'STARTED' && new Date(e.createdAt).getTime() > lastCancelMs);
     const firstStart = startEvents.length > 0
       ? startEvents.reduce((a, b) => (new Date(a.createdAt).getTime() < new Date(b.createdAt).getTime() ? a : b)).createdAt
       : null;
@@ -605,13 +612,16 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
               </span>
             )}
           </div>
-          <Button
-            onClick={() => setCancellingOp(op)}
-            title="Cancelar"
-            className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-rose-950/30 text-rose-400/70 hover:text-rose-300 border border-rose-500/20 flex items-center justify-center transition-all p-0"
-          >
-            <XCircle className="w-3.5 h-3.5" />
-          </Button>
+          {/* Cancelar início: só pra OP já iniciada (em processo/pausada) e sem Kg apontado */}
+          {(op.status === 'in_progress' || op.status === 'paused') && !(Number(op.producedQuantity) > 0) && (
+            <Button
+              onClick={() => setCancellingOp(op)}
+              title="Cancelar início (iniciada por engano)"
+              className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-rose-950/30 text-rose-400/70 hover:text-rose-300 border border-rose-500/20 flex items-center justify-center transition-all p-0"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center justify-between gap-2">
@@ -1286,17 +1296,17 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
           <DialogHeader>
             <DialogTitle className="text-sm font-black uppercase tracking-wider text-rose-400 flex items-center gap-2">
               <XCircle className="w-5 h-5" />
-              Cancelar Manipulação
+              Cancelar Início da Manipulação
             </DialogTitle>
           </DialogHeader>
 
           {cancellingOp && (
             <div className="space-y-3 py-2">
               <p className="text-sm text-[#d4d4d8]">
-                Tem certeza que deseja cancelar a manipulação da OP <strong className="text-white">{cancellingOp.number}</strong>?
+                A OP <strong className="text-white">{cancellingOp.number}</strong> foi iniciada por engano?
               </p>
               <p className="text-xs text-[#a1a1aa]">
-                A OP de Manipulação é excluída, mas a OSM continua organizada neste reator pelo Cronograma — ela volta pra fila pronta pra ser iniciada de novo.
+                Ela volta para "Pronta pra Iniciar" no mesmo lugar da fila deste reator, como se nunca tivesse sido iniciada — o horário de início registrado por engano não entra nos indicadores. Nada é excluído.
               </p>
             </div>
           )}
@@ -1325,7 +1335,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
               ) : (
                 <>
                   <XCircle className="w-3.5 h-3.5" />
-                  <span>Sim, Cancelar</span>
+                  <span>Sim, Cancelar Início</span>
                 </>
               )}
             </Button>

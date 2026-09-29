@@ -237,7 +237,7 @@ export function AssignStockOpToLineModal({
                             <span className="text-blue-400">
                               {isAlreadyInThisLine
                                 ? 'Já vinculada a esta linha'
-                                : `Vinculada a ${op.lineId === 'line-1' ? 'Envase 1' : op.lineId === 'line-2' ? 'Envase 2' : op.lineId === 'line-sleeve' ? 'Sleev' : op.lineId === 'reator-1' ? 'Reator 1' : op.lineId === 'reator-2' ? 'Reator 2' : op.lineId === 'reator-3' ? 'Reator 3' : op.lineId}`}
+                                : `Vinculada a ${op.lineId === 'line-1' ? 'Envase 1' : op.lineId === 'line-2' ? 'Envase 2' : op.lineId === 'line-sleeve' ? 'Sleev' : op.lineId === 'reator-1' ? 'Reator 11' : op.lineId === 'reator-2' ? 'Reator 12' : op.lineId === 'reator-3' ? 'Reator 13' : op.lineId}`}
                             </span>
                           </>
                         )}

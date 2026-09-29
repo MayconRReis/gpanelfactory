@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
+import { GranelBadge } from './GranelBadge';
 
 interface CronogramaBoardProps {
   lines: ProductionLine[];
@@ -482,6 +483,13 @@ export function CronogramaBoard({
           </span>
           {op.lote && <span className="font-mono text-emerald-400">{op.lote}</span>}
         </div>
+        {/* Status do granel (só pras OPs de Envase — a OSM é o próprio granel) */}
+        {op.granel && op.setor !== 'Manipulação' && op.setor !== 'Pesagem' && op.tipoDocumento !== 'OSM' && (
+          <div className="flex items-center justify-between gap-1 text-[9px] text-[#71717a] mt-1">
+            <span className="font-mono truncate">Granel {op.granel}</span>
+            <GranelBadge granel={op.granel} ops={ops} />
+          </div>
+        )}
         {/* No Estoque a OP ainda não está numa coluna de dia — mostra a data
             agendada (se houver uma de uma atribuição anterior) como dica. */}
         {columnId === BACKLOG_COLUMN_ID && op.scheduledDate && (

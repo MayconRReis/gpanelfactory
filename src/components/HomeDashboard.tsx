@@ -10,8 +10,8 @@ import {
   Filter,
   Boxes,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession } from '../services/db';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
+import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -331,13 +331,38 @@ export function HomeDashboard({
     return () => { cancelled = true; clearInterval(timer); };
   }, []);
 
+  // Trocas de produto (botão "Iniciar troca" do líder de Envase)
+  const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getChangeovers().then(list => { if (!cancelled) setChangeovers(list); }).catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
+  // Equipe por linha (colaboradores presentes e faltas), informada pelo líder
+  const [headcounts, setHeadcounts] = useState<LineHeadcount[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getLineHeadcounts().then(list => { if (!cancelled) setHeadcounts(list); }).catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
   const todayProductionTime = useMemo(() => {
     return calculateProductionTime(events, ops, lines, {
       targetDate: todayDateStr,
       referenceTime: nowTick,
       workSessions,
+      changeovers,
     });
-  }, [events, ops, lines, todayDateStr, nowTick, workSessions]);
+  }, [events, ops, lines, todayDateStr, nowTick, workSessions, changeovers]);
 
   // Total de pausas registradas hoje
   const totalTodayPausesCount = useMemo(() => {
@@ -409,6 +434,48 @@ export function HomeDashboard({
     return { rangeStart: undefined, rangeEnd: undefined, days: daysElapsed };
   }, [dashboardPeriod, selectedMonth, todayDateStr, ops, events]);
 
+  // ---------------- RENDIMENTO DO ENVASE (segue o filtro Dia / Mês / Ano / Geral) ----------------
+  // Rendimento de cada OP = produzido ÷ esperado, limitado a 100% (quem passa
+  // do esperado conta como 100%, nunca mais). O rendimento do período é
+  // PONDERADO pela quantidade: soma do produzido de cada OP (limitado ao
+  // esperado dela) ÷ soma do esperado. Ex.: 956 de 1.000 + 120 de 100 + 4.000
+  // de 5.000 → (956 + 100 + 4.000) ÷ 6.100 = 82,9%.
+  // - Conta cada OP de Envase CONCLUÍDA no período (dia em que foi fechada).
+  // - Conclusões parciais entram na própria OP: produzido = parciais + final;
+  //   esperado = parciais + saldo final (= o planejado original).
+  // - Só Envase/Sleev (unidades): Pesagem e Manipulação (Kg) ficam de fora.
+  const rendimento = useMemo(() => {
+    const partialQtyByOp = new Map<string, number>();
+    for (const ev of events || []) {
+      if (!ev.opId || !isPartialFinishEvent(ev)) continue;
+      const q = Number(ev.quantity) || 0;
+      if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
+    }
+    let producedCapped = 0;
+    let expected = 0;
+    let opsCount = 0;
+    for (const op of ops) {
+      if (op.status !== 'completed') continue;
+      if (op.setor === 'Pesagem' || op.setor === 'Manipulação' || op.tipoDocumento === 'OSM') continue;
+      if (op.lineId && /reator|pesagem|manipula/i.test(op.lineId)) continue;
+      if (dashboardPeriod !== 'geral') {
+        const day = getOpReferenceDateStr(op);
+        if (!day) continue;
+        if (periodDateRange.rangeStart && day < periodDateRange.rangeStart) continue;
+        if (periodDateRange.rangeEnd && day > periodDateRange.rangeEnd) continue;
+      }
+      const partialQty = partialQtyByOp.get(String(op.id)) || 0;
+      const opExpected = (Number(op.plannedQuantity) || 0) + partialQty;
+      if (opExpected <= 0) continue;
+      const opProduced = (Number(op.producedQuantity) || 0) + partialQty;
+      producedCapped += Math.min(Math.max(opProduced, 0), opExpected);
+      expected += opExpected;
+      opsCount += 1;
+    }
+    const pct = expected > 0 ? Math.round((producedCapped / expected) * 1000) / 10 : null;
+    return { produced: producedCapped, expected, pct, opsCount };
+  }, [ops, events, dashboardPeriod, periodDateRange]);
+
   // Métricas de Tempo do PERÍODO selecionado (Dia/Mês/Ano/Geral)
   const periodProductionTime = useMemo(() => {
     return calculateProductionTime(events, ops, lines, {
@@ -416,8 +483,69 @@ export function HomeDashboard({
       rangeEnd: periodDateRange.rangeEnd,
       referenceTime: nowTick,
       workSessions,
+      changeovers,
     });
-  }, [events, ops, lines, periodDateRange, nowTick, workSessions]);
+  }, [events, ops, lines, periodDateRange, nowTick, workSessions, changeovers]);
+
+  // ---------------- EQUIPE DO ENVASE NO PERÍODO ----------------
+  // Absenteísmo = faltas ÷ (presentes + faltas), usando a equipe vigente
+  // (último registro) de cada linha em cada dia do período.
+  // Produtividade = unidades produzidas ÷ horas-pessoa trabalhadas: cada trecho
+  // de trabalho da linha vale o nº de colaboradores presentes naquele horário.
+  // Só entram dias/trechos com equipe informada — nada é estimado.
+  const teamMetrics = useMemo(() => {
+    const inPeriod = (day: string) =>
+      dashboardPeriod === 'geral' ||
+      ((!periodDateRange.rangeStart || day >= periodDateRange.rangeStart) &&
+        (!periodDateRange.rangeEnd || day <= periodDateRange.rangeEnd));
+    const envaseIds = new Set(envaseLines.map(l => l.id));
+
+    // Absenteísmo: último registro de cada linha em cada dia
+    const lastByLineDay = new Map<string, LineHeadcount>();
+    for (const h of headcounts) {
+      if (!envaseIds.has(h.lineId)) continue;
+      const day = toLocalDateStr(h.recordedAt);
+      if (!inPeriod(day)) continue;
+      const key = `${h.lineId}|${day}`;
+      const cur = lastByLineDay.get(key);
+      if (!cur || new Date(h.recordedAt).getTime() >= new Date(cur.recordedAt).getTime()) lastByLineDay.set(key, h);
+    }
+    let present = 0;
+    let absent = 0;
+    for (const h of lastByLineDay.values()) {
+      present += h.present;
+      absent += h.absent;
+    }
+    const absenteeismPct = present + absent > 0 ? Math.round((absent / (present + absent)) * 1000) / 10 : null;
+
+    // Produtividade: produção (eventos) ÷ horas-pessoa (trechos de trabalho × equipe)
+    const productionByLine = computeProductionByLineAndDay(events, ops);
+    let personMs = 0;
+    let producedWithTeam = 0;
+    for (const lineId of envaseIds) {
+      const working: Array<[number, number]> = periodProductionTime.intervals
+        .filter(iv => iv.type === 'WORKING' && iv.lineId === lineId)
+        .map(iv => [iv.startMs, iv.endMs] as [number, number])
+        .sort((a, b) => a[0] - b[0]);
+      const merged: Array<[number, number]> = [];
+      for (const r of working) {
+        const last = merged[merged.length - 1];
+        if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+        else merged.push([r[0], r[1]]);
+      }
+      const ph = computePersonHours(merged, headcounts, lineId);
+      personMs += ph.personMs;
+      // Só a produção dos dias em que a equipe foi informada entra na conta
+      const daysWithTeam = new Set(headcounts.filter(h => h.lineId === lineId).map(h => toLocalDateStr(h.recordedAt)));
+      for (const [day, qty] of Object.entries(productionByLine[lineId] || {})) {
+        if (inPeriod(day) && daysWithTeam.has(day)) producedWithTeam += qty;
+      }
+    }
+    const personHours = personMs / (60 * 60 * 1000);
+    const unitsPerPersonHour = personHours > 0 ? Math.round(producedWithTeam / personHours) : null;
+
+    return { present, absent, absenteeismPct, unitsPerPersonHour, personHours, lineDays: lastByLineDay.size };
+  }, [headcounts, envaseLines, dashboardPeriod, periodDateRange, events, ops, periodProductionTime]);
 
   // Duração de um turno de trabalho (8h) — multiplicada pelos dias do
   // período para virar a base do Índice de Ociosidade (% das horas perdidas)
@@ -437,6 +565,7 @@ export function HomeDashboard({
     let sumIdleMs = 0;
     let sumSessionMs = 0;
     let sumOvertimeMs = 0;
+    let sumChangeoverMs = 0;
     let matchedLines = 0;
     for (const lineId of lineIds) {
       const metrics = periodProductionTime.byLine[lineId];
@@ -445,6 +574,7 @@ export function HomeDashboard({
         sumIdleMs += metrics.idleMs;
         sumSessionMs += metrics.sessionMs || 0;
         sumOvertimeMs += metrics.overtimeMs || 0;
+        sumChangeoverMs += metrics.changeoverMs || 0;
         matchedLines += 1;
       }
     }
@@ -455,6 +585,7 @@ export function HomeDashboard({
         avgIdleMs: sumIdleMs / matchedLines,
         avgSessionMs: sumSessionMs / matchedLines,
         avgOvertimeMs: sumOvertimeMs / matchedLines,
+        avgChangeoverMs: sumChangeoverMs / matchedLines,
       };
     }
 
@@ -467,7 +598,7 @@ export function HomeDashboard({
     // se fosse 1 recurso só inflava o total acima das horas de calendário do
     // próprio período (ex.: "3226h trabalhadas" num mês de 730h).
     const resourceEntries = Object.values(periodProductionTime.byResource || {}) as { workingMs: number; idleMs: number }[];
-    if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0, avgSessionMs: 0, avgOvertimeMs: 0 };
+    if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0, avgSessionMs: 0, avgOvertimeMs: 0, avgChangeoverMs: 0 };
 
     const totalResourceWorkingMs = resourceEntries.reduce((sum, r) => sum + (r.workingMs || 0), 0);
     const totalResourceIdleMs = resourceEntries.reduce((sum, r) => sum + (r.idleMs || 0), 0);
@@ -476,6 +607,7 @@ export function HomeDashboard({
       avgIdleMs: totalResourceIdleMs / resourceEntries.length,
       avgSessionMs: 0,
       avgOvertimeMs: 0,
+      avgChangeoverMs: 0,
     };
   }, [envaseLines, periodProductionTime]);
 
@@ -764,6 +896,9 @@ export function HomeDashboard({
       : lastSessionToday
       ? `Expediente encerrado às ${hhmm(lastSessionToday.endedAt)}`
       : 'Expediente não iniciado';
+    const teamToday = /reator/i.test(line.id) ? null : getHeadcountForLineDay(headcounts, line.id, todayDateStr);
+    const openLineChangeover = getOpenChangeover(changeovers, line.id);
+    const changeoverTodayMs = todayProductionTime.byLine[line.id]?.changeoverMs || 0;
     const sessionLabelClass = openSession
       ? (toLocalDateStr(openSession.startedAt) !== todayDateStr ? 'text-rose-400' : 'text-emerald-400')
       : lastSessionToday ? 'text-[#a1a1aa]' : 'text-[#52525b]';
@@ -794,16 +929,32 @@ export function HomeDashboard({
                 {line.name}
               </h4>
               <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
-                isPausedNow
+                openLineChangeover && !activeLineOp
+                  ? 'text-orange-300 bg-orange-950/80'
+                  : isPausedNow
                   ? 'text-amber-300 bg-amber-950/80'
                   : activeLineOp ? 'text-emerald-400 bg-emerald-950/80' : 'text-[#71717a] bg-[#1a1a22]'
               }`}>
-                {isPausedNow ? 'Pausada' : activeLineOp ? 'Produzindo' : 'Parada'}
+                {openLineChangeover && !activeLineOp ? 'Em troca' : isPausedNow ? 'Pausada' : activeLineOp ? 'Produzindo' : 'Parada'}
               </span>
             </div>
             <p className={`text-[10px] font-semibold mt-1 truncate ${sessionLabelClass}`} title={sessionLabel}>
               {sessionLabel}
             </p>
+            {!/reator/i.test(line.id) && (
+              <p className="text-[10px] font-semibold mt-0.5 truncate text-[#a1a1aa]">
+                {teamToday
+                  ? <>Equipe: <span className="text-white">{teamToday.present}</span>{teamToday.absent > 0 && <span className="text-amber-300"> · {teamToday.absent} falta(s)</span>}</>
+                  : <span className="text-[#52525b]">Equipe não informada</span>}
+              </p>
+            )}
+            {!/reator/i.test(line.id) && (openLineChangeover || changeoverTodayMs >= 60000) && (
+              <p className="text-[10px] font-semibold mt-0.5 truncate text-orange-300">
+                {openLineChangeover
+                  ? `Em troca desde ${new Date(openLineChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+                  : `Troca de produto hoje: ${formatMsToHoursMinutes(changeoverTodayMs)}`}
+              </p>
+            )}
           </div>
 
           {activeLineOp ? (
@@ -1127,6 +1278,15 @@ export function HomeDashboard({
               <span>Média ociosa do período</span>
               <span className="font-mono font-bold">{formatMsToHoursMinutes(avgLineProductionTime.avgIdleMs)}</span>
             </div>
+            {avgLineProductionTime.avgChangeoverMs >= 60000 && (
+              <div
+                className="text-[10px] text-amber-100/90 font-medium truncate flex items-center justify-between pt-0.5"
+                title="Parte do tempo ocioso que foi troca de produto (botão Iniciar troca), média por linha de Envase"
+              >
+                <span>dos quais troca de produto</span>
+                <span className="font-mono font-bold">{formatMsToHoursMinutes(avgLineProductionTime.avgChangeoverMs)}</span>
+              </div>
+            )}
           </div>
 
           {/* CARD 4: LILÁS PASTEL (Tempo Trabalhado) */}
@@ -1214,6 +1374,75 @@ export function HomeDashboard({
               <span className="font-mono font-bold">D×P×Q</span>
             </div>
           </div>
+
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* ── RENDIMENTO: produzido ÷ esperado das OPs concluídas, no período do filtro ── */}
+        <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">Rendimento do Envase</h3>
+              <span className="bg-[#1a1a22] text-[#d4d4d8] border border-[#2c2c3c] px-1.5 py-0.5 rounded text-[9px] font-bold font-mono">
+                {PERIOD_LABELS[dashboardPeriod]}{dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}
+              </span>
+            </div>
+            <p className="text-[11px] text-[#71717a]">
+              Produzido ÷ esperado de cada OP de Envase concluída (máx. 100% por OP), ponderado pela quantidade
+            </p>
+          </div>
+          <div className="sm:text-right">
+            <div className={`text-3xl sm:text-4xl font-black font-mono tracking-tight ${
+              rendimento.pct === null ? 'text-[#52525b]'
+                : rendimento.pct >= 95 ? 'text-emerald-400'
+                : rendimento.pct >= 85 ? 'text-amber-400'
+                : 'text-rose-400'
+            }`}>
+              {rendimento.pct !== null ? `${rendimento.pct.toLocaleString('pt-BR')}%` : '—'}
+            </div>
+            <div className="text-[11px] text-[#a1a1aa] font-mono">
+              {rendimento.pct !== null
+                ? `${rendimento.produced.toLocaleString('pt-BR')} de ${rendimento.expected.toLocaleString('pt-BR')} · ${rendimento.opsCount} OP(s)`
+                : 'Nenhuma OP concluída no período'}
+            </div>
+          </div>
+        </div>
+
+        {/* ── EQUIPE DO ENVASE: absenteísmo e produtividade por pessoa, no período do filtro ── */}
+        <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">Equipe do Envase</h3>
+            <span className="bg-[#1a1a22] text-[#d4d4d8] border border-[#2c2c3c] px-1.5 py-0.5 rounded text-[9px] font-bold font-mono">
+              {PERIOD_LABELS[dashboardPeriod]}{dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}
+            </span>
+          </div>
+          {teamMetrics.lineDays === 0 ? (
+            <p className="text-[11px] text-[#71717a] py-2">Nenhuma equipe informada no período.</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Absenteísmo</div>
+                <div className={`text-2xl sm:text-3xl font-black font-mono tracking-tight mt-0.5 ${
+                  (teamMetrics.absenteeismPct ?? 0) === 0 ? 'text-emerald-400' : (teamMetrics.absenteeismPct ?? 0) <= 5 ? 'text-amber-400' : 'text-rose-400'
+                }`}>
+                  {teamMetrics.absenteeismPct !== null ? `${teamMetrics.absenteeismPct.toLocaleString('pt-BR')}%` : '—'}
+                </div>
+                <div className="text-[11px] text-[#a1a1aa] font-mono">
+                  {teamMetrics.absent} falta(s) de {teamMetrics.present + teamMetrics.absent}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Produtividade</div>
+                <div className="text-2xl sm:text-3xl font-black font-mono tracking-tight mt-0.5 text-blue-300">
+                  {teamMetrics.unitsPerPersonHour !== null ? teamMetrics.unitsPerPersonHour.toLocaleString('pt-BR') : '—'}
+                </div>
+                <div className="text-[11px] text-[#a1a1aa] font-mono">
+                  un por pessoa/hora{teamMetrics.personHours > 0 ? ` · ${Math.round(teamMetrics.personHours).toLocaleString('pt-BR')} h-pessoa` : ''}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         </div>
 

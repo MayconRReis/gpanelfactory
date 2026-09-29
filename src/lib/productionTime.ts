@@ -1,4 +1,4 @@
-import { ProductionEvent, ProductionOrder, ProductionLine, WorkSession } from '../types';
+import { ProductionEvent, ProductionOrder, ProductionLine, WorkSession, LineChangeover } from '../types';
 
 export interface TimelineInterval {
   opId?: string;
@@ -35,6 +35,8 @@ export interface LineTimeMetrics {
   overtimeMs?: number;
   /** true quando algum trecho do período teve expediente registrado pelo botão. */
   hasExplicitSession?: boolean;
+  /** Parte do ocioso que foi troca de produto (botão "Iniciar troca"). Só com workSessions. */
+  changeoverMs?: number;
 }
 
 /**
@@ -189,6 +191,8 @@ export function calculateProductionTime(
      * informado, o ocioso da linha passa a ser: tempo de expediente − tempo
      * trabalhado (fora do expediente nada conta como ocioso). */
     workSessions?: WorkSession[];
+    /** Trocas de produto registradas — viram uma fatia do ocioso ("Troca de produto"). */
+    changeovers?: LineChangeover[];
   }
 ): FactoryTimeMetrics {
   const refTime = options?.referenceTime || Date.now();
@@ -327,6 +331,10 @@ export function calculateProductionTime(
     let segmentLineId: string | undefined = lineId || undefined;
     const resourceKey = resourceKeyOf(op);
 
+    // Onde começaram os intervalos da sessão atual desta OP — se vier um
+    // CANCELLED (início por engano), tudo desde o último STARTED é descartado.
+    let sessionIntervalStart = allIntervals.length;
+    let sessionBreakMarks: Array<{ lineId: string; count: number }> = [];
     let currentState: 'IDLE' | 'WORKING' | 'PAUSED' | 'FINISHED' = 'IDLE';
     let lastChangeTime: number | null = null;
     let lastPauseReason: string | undefined = undefined;
@@ -338,7 +346,29 @@ export function calculateProductionTime(
       // Início de trecho (STARTED/RESUMED/PAUSED): a linha vem do próprio evento.
       const eventLineId = ev.lineId || lineId || undefined;
 
+      if (ev.type === 'CANCELLED') {
+        // Descarta a sessão cancelada: intervalos e trechos de intervalo
+        // (almoço) registrados desde o último STARTED desta OP
+        for (let k = allIntervals.length - 1; k >= sessionIntervalStart; k--) {
+          if (allIntervals[k].opId === opId) allIntervals.splice(k, 1);
+        }
+        // (as OPs são processadas uma de cada vez, então o que entrou depois do
+        // STARTED — inclusive numa linha nova — veio desta sessão)
+        for (const [lineKey, list] of breakRangesByLine.entries()) {
+          const mark = sessionBreakMarks.find(m => m.lineId === lineKey);
+          list.length = mark ? Math.min(list.length, mark.count) : 0;
+        }
+        sessionBreakMarks = [];
+        currentState = 'IDLE';
+        lastChangeTime = null;
+        lastPauseReason = undefined;
+        lastPauseObs = undefined;
+        continue;
+      }
+
       if (ev.type === 'STARTED') {
+        sessionIntervalStart = allIntervals.length;
+        sessionBreakMarks = Array.from(breakRangesByLine.entries()).map(([lineId, list]) => ({ lineId, count: list.length }));
         if (currentState === 'WORKING' && lastChangeTime !== null) {
           pushInterval('WORKING', lastChangeTime, evTime, opId, segmentLineId, undefined, undefined, resourceKey);
         } else if (currentState === 'PAUSED' && lastChangeTime !== null) {
@@ -426,8 +456,12 @@ export function calculateProductionTime(
 
   for (const [opId, opEvents] of eventsByOp.entries()) {
     if (opId === 'orphan') continue;
+    // Inícios cancelados (iniciados por engano) não contam
+    const lastCancelMs = opEvents
+      .filter(e => e.type === 'CANCELLED')
+      .reduce((max, e) => Math.max(max, new Date(e.createdAt).getTime()), -Infinity);
     const started = opEvents
-      .filter(e => e.type === 'STARTED')
+      .filter(e => e.type === 'STARTED' && new Date(e.createdAt).getTime() > lastCancelMs)
       .map(e => new Date(e.createdAt).getTime())
       .filter(t => !isNaN(t));
     const finished = opEvents
@@ -731,8 +765,28 @@ export function calculateProductionTime(
         overtimeMs = rangesLength(subtractRanges(effectiveCoverage, scheduled));
       }
 
+      // Troca de produto: trechos marcados pelo líder que caem no ocioso da linha
+      // (troca aberta hoje vai até agora; aberta em dia passado vai até o fim do
+      // expediente daquele dia — o recorte pelo ocioso já limita isso).
+      const changeoverRanges: Array<[number, number]> = [];
+      for (const co of options?.changeovers || []) {
+        if (co.lineId !== lId) continue;
+        const a = new Date(co.startedAt).getTime();
+        if (isNaN(a)) continue;
+        let b = co.endedAt ? new Date(co.endedAt).getTime() : NaN;
+        if (isNaN(b)) {
+          const d = new Date(a);
+          b = dayKey(a) === dayKey(refTime) ? refTime : new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+        }
+        const c = clampRange([a, b]);
+        if (c) changeoverRanges.push(c);
+      }
+      const changeoverUnion = mergeRanges(changeoverRanges);
+      const changeoverInIdle = subtractRanges(changeoverUnion, subtractRanges(changeoverUnion, idleUnion));
+
       byLine[lId].workingMs = rangesLength(workingUnion);
       byLine[lId].idleMs = rangesLength(idleUnion);
+      byLine[lId].changeoverMs = rangesLength(changeoverInIdle);
       byLine[lId].sessionMs = coverageMs;
       byLine[lId].overtimeMs = overtimeMs;
       byLine[lId].hasExplicitSession = explicitUnion.length > 0;

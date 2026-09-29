@@ -32,6 +32,8 @@ import {
   XCircle,
   Sunrise,
   Sunset,
+  Users,
+  RefreshCcw,
 } from 'lucide-react';
 import {
   getLines,
@@ -56,9 +58,17 @@ import {
   computeProductionByLineAndDay,
   toLocalDateStr,
   getOpReferenceDateStr,
+  getLineHeadcounts,
+  recordLineHeadcount,
+  getHeadcountForLineDay,
+  getChangeovers,
+  getOpenChangeover,
+  startChangeover,
+  endChangeover,
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal } from '../types';
+import { GranelBadge } from '../components/GranelBadge';
+import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 import { Input } from '../components/ui/input';
@@ -132,7 +142,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [isPauseOpen, setIsPauseOpen] = useState(false);
   const [pauseReason, setPauseReason] = useState('');
   const [pauseObs, setPauseObs] = useState('');
-  const [pauseProducedQty, setPauseProducedQty] = useState('');
 
   const [isCancelOpen, setIsCancelOpen] = useState(false);
   const [isCancellingOp, setIsCancellingOp] = useState(false);
@@ -157,6 +166,16 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [isEndShiftOpen, setIsEndShiftOpen] = useState(false);
   const [isShiftBusy, setIsShiftBusy] = useState(false);
   const [shiftError, setShiftError] = useState<string | null>(null);
+  // Equipe da linha (colaboradores presentes e faltas)
+  const [headcounts, setHeadcounts] = useState<LineHeadcount[]>([]);
+  const [teamDialogMode, setTeamDialogMode] = useState<'start' | 'edit' | null>(null);
+  const [teamPresent, setTeamPresent] = useState('');
+  const [teamAbsent, setTeamAbsent] = useState('0');
+  const [teamError, setTeamError] = useState<string | null>(null);
+  // Troca de produto (botão "Iniciar troca")
+  const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
+  const [isChangeoverBusy, setIsChangeoverBusy] = useState(false);
+  const [changeoverError, setChangeoverError] = useState<string | null>(null);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -203,24 +222,32 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         setLoading(true);
       }
 
-      const [loadedLines, loadedOps, loadedEvents, loadedReasons, loadedSessions, loadedLineGoals] = await Promise.all([
+      const [loadedLines, loadedOps, loadedEvents, loadedReasons, loadedSessions, loadedLineGoals, loadedHeadcounts, loadedChangeovers] = await Promise.all([
         getLines(),
         getAllOPs(),
         getRecentEvents(),
         getPauseReasons(),
         getWorkSessions(3),
         getLineDailyGoals().catch(() => [] as LineDailyGoal[]),
+        getLineHeadcounts(3),
+        getChangeovers(3),
       ]);
 
       // Uma chamada mais nova já assumiu enquanto esperávamos — descarta esta
       // resposta desatualizada em vez de sobrescrever dados mais recentes.
       if (requestId !== fetchRequestIdRef.current) return;
 
-      setLines(loadedLines);
+      // Tela do Envase: só linhas de Envase/Sleeve. Os reatores (reator-1/2/3)
+      // entraram na tabela de linhas por causa da Manipulação e apareciam aqui
+      // pro líder de Envase escolher — eles são operados só na tela da Manipulação.
+      const envaseLinesOnly = loadedLines.filter(l => !/reator/i.test(l.id) && !/reator/i.test(l.name));
+      setLines(envaseLinesOnly);
       setAllOps(loadedOps);
       setRecentEvents(loadedEvents);
       setWorkSessions(loadedSessions);
       setLineDailyGoals(loadedLineGoals || []);
+      setHeadcounts(loadedHeadcounts || []);
+      setChangeovers(loadedChangeovers || []);
       if (loadedReasons && loadedReasons.length > 0) {
         // "Intervalo" precisa sempre existir: é a pausa de almoço/café que
         // não conta como ociosidade (até 1h por pausa).
@@ -242,9 +269,9 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         } catch {
           // localStorage pode não estar disponível (ex.: modo privado) — sem problema, cai no fallback abaixo.
         }
-        const chosenLineId = (restoredLineId && loadedLines.some(l => l.id === restoredLineId))
+        const chosenLineId = (restoredLineId && envaseLinesOnly.some(l => l.id === restoredLineId))
           ? restoredLineId
-          : (loadedLines[0]?.id || 'line-1');
+          : (envaseLinesOnly[0]?.id || 'line-1');
         setSelectedLineId(chosenLineId);
 
         // IMPORTANTE: no banco, a permissão do líder para atualizar uma OP
@@ -399,13 +426,54 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     [workSessions, currentLine]
   );
 
-  const handleStartShift = async () => {
+  // "Iniciar Expediente" abre o formulário da equipe (colaboradores e faltas);
+  // o expediente só abre quando o líder confirma.
+  const handleStartShift = () => {
     if (!currentLine || !profile) return;
-    setIsShiftBusy(true);
     setShiftError(null);
-    const res = await startWorkSession([currentLine.id], profile.uid);
-    if (res.error) setShiftError(`Não foi possível iniciar o expediente: ${res.error}`);
+    setTeamError(null);
+    setTeamPresent('');
+    setTeamAbsent('0');
+    setTeamDialogMode('start');
+  };
+
+  const openTeamEditor = () => {
+    setTeamError(null);
+    setTeamPresent(todayTeam ? String(todayTeam.present) : '');
+    setTeamAbsent(todayTeam ? String(todayTeam.absent) : '0');
+    setTeamDialogMode('edit');
+  };
+
+  const handleConfirmTeam = async () => {
+    if (!currentLine || !profile || !teamDialogMode) return;
+    const present = parseInt(teamPresent, 10);
+    const absent = teamAbsent.trim() === '' ? 0 : parseInt(teamAbsent, 10);
+    if (isNaN(present) || present < 1) {
+      setTeamError('Informe quantos colaboradores estão trabalhando na linha (mínimo 1).');
+      return;
+    }
+    if (isNaN(absent) || absent < 0) {
+      setTeamError('Informe as faltas (0 se ninguém faltou).');
+      return;
+    }
+    setIsShiftBusy(true);
+    setTeamError(null);
+    if (teamDialogMode === 'start' && !openShift) {
+      const res = await startWorkSession([currentLine.id], profile.uid);
+      if (res.error) {
+        setIsShiftBusy(false);
+        setTeamError(`Não foi possível iniciar o expediente: ${res.error}`);
+        return;
+      }
+    }
+    const resTeam = await recordLineHeadcount(currentLine.id, present, absent, profile.uid);
     setIsShiftBusy(false);
+    if (resTeam.error) {
+      setTeamError(`Não foi possível gravar a equipe: ${resTeam.error}`);
+      await fetchData(true);
+      return;
+    }
+    setTeamDialogMode(null);
     await fetchData(true);
   };
 
@@ -425,6 +493,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     if (activeOp && activeOp.status === 'in_progress') {
       await pauseOP(activeOp.id, currentLine.id, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
     }
+    if (openChangeover) await handleEndChangeover(null);
     const res = await endWorkSession([currentLine.id], profile.uid);
     setIsShiftBusy(false);
     if (res.error) {
@@ -435,21 +504,48 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     await fetchData(true);
   };
 
+  // ---------------- TROCA DE PRODUTO ----------------
+  const openChangeover = useMemo(
+    () => (currentLine ? getOpenChangeover(changeovers, currentLine.id) : null),
+    [changeovers, currentLine]
+  );
+
+  const handleStartChangeover = async () => {
+    if (!currentLine || !profile) return;
+    setIsChangeoverBusy(true);
+    setChangeoverError(null);
+    // OP que acabou de ser finalizada nesta linha (pra registro)
+    const lastFinished = recentEvents
+      .filter(e => e.type === 'FINISHED' && (e.lineId === currentLine.id || e.lineName === currentLine.name))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    const res = await startChangeover(currentLine.id, profile.uid, lastFinished?.opId || null);
+    setIsChangeoverBusy(false);
+    if (res.error) setChangeoverError(`Não foi possível iniciar a troca: ${res.error}`);
+    await fetchData(true);
+  };
+
+  const handleEndChangeover = async (nextOpId?: string | null) => {
+    if (!currentLine || !profile) return;
+    const res = await endChangeover(currentLine.id, profile.uid, nextOpId || null);
+    if (res.error) console.warn('[LeaderScreen] Não foi possível encerrar a troca:', res.error);
+  };
+
   const handleStart = async () => {
     if (!currentLine || !activeOp || !profile) return;
     await ensureShiftOpen();
+    // Iniciar a próxima OP encerra a troca de produto aberta
+    if (openChangeover) await handleEndChangeover(activeOp.id);
     await startOP(activeOp.id, currentLine.id, profile.uid);
     await fetchData(true);
   };
 
   const handlePause = async () => {
     if (!currentLine || !activeOp || !profile || !pauseReason) return;
-    const parsedQty = pauseProducedQty.trim() !== '' ? parseInt(pauseProducedQty, 10) : undefined;
-    await pauseOP(activeOp.id, currentLine.id, profile.uid, pauseReason, pauseObs, parsedQty);
+    // A quantidade não é mais pedida na pausa — o apontamento é feito só pelo botão próprio
+    await pauseOP(activeOp.id, currentLine.id, profile.uid, pauseReason, pauseObs);
     setIsPauseOpen(false);
     setPauseReason('');
     setPauseObs('');
-    setPauseProducedQty('');
     await fetchData(true);
   };
 
@@ -540,6 +636,12 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     const found = lineDailyGoals.find(g => g.lineId === currentLine.id);
     return found && found.goalQuantity > 0 ? found.goalQuantity : null;
   }, [lineDailyGoals, currentLine]);
+
+  // Equipe informada hoje nesta linha (último registro do dia)
+  const todayTeam = useMemo(
+    () => (currentLine ? getHeadcountForLineDay(headcounts, currentLine.id, todayDateStr) : null),
+    [headcounts, currentLine, todayDateStr]
+  );
 
   const dailyMetrics = useMemo(() => {
     // Eventos de hoje na linha (dia LOCAL — o createdAt vem em UTC)
@@ -966,6 +1068,103 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 </p>
               </div>
             )}
+            {/* Equipe da linha hoje */}
+            {openShift && (
+              todayTeam ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121217] border border-[#22222b] rounded-2xl px-4 py-2.5">
+                  <div className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+                    <Users className="w-4 h-4 text-blue-400" />
+                    <span>
+                      Equipe: <strong className="text-white">{todayTeam.present} colaborador(es)</strong>
+                      {' · '}
+                      <strong className={todayTeam.absent > 0 ? 'text-amber-300' : 'text-[#a1a1aa]'}>{todayTeam.absent} falta(s)</strong>
+                    </span>
+                    <span className="text-[10px] text-[#71717a] font-mono">
+                      desde {new Date(todayTeam.recordedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <button
+                    onClick={openTeamEditor}
+                    className="px-3 py-1.5 rounded-lg bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-[11px] font-bold text-[#f4f4f5]"
+                  >
+                    Alterar equipe
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-950/40 border border-amber-800/50 rounded-2xl px-4 py-3">
+                  <p className="text-xs text-amber-200 flex items-center gap-2">
+                    <Users className="w-4 h-4 text-amber-400 shrink-0" />
+                    Informe quantos colaboradores estão na linha hoje e quantos faltaram.
+                  </p>
+                  <button
+                    onClick={openTeamEditor}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[11px] font-black"
+                  >
+                    Informar equipe
+                  </button>
+                </div>
+              )
+            )}
+
+            {/* Troca de produto: aparece com a linha sem OP rodando, depois de finalizar uma OP */}
+            {(() => {
+              const lineIdle = !activeOp || activeOp.status === 'pending';
+              const finishedToday = lineEvents.some(e => e.type === 'FINISHED' && e.createdAt && toLocalDateStr(e.createdAt) === todayDateStr);
+              if (openChangeover) {
+                const elapsed = Math.max(0, currentTime.getTime() - new Date(openChangeover.startedAt).getTime());
+                const hh = String(Math.floor(elapsed / 3600000)).padStart(2, '0');
+                const mm = String(Math.floor((elapsed % 3600000) / 60000)).padStart(2, '0');
+                const ss = String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0');
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-3 bg-orange-950/40 border border-orange-700/50 rounded-2xl px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      <RefreshCcw className="w-5 h-5 text-orange-400 animate-spin [animation-duration:3s]" />
+                      <div>
+                        <p className="text-xs font-black uppercase tracking-wider text-orange-300">Troca de produto em andamento</p>
+                        <p className="text-[11px] text-orange-200/80">
+                          desde {new Date(openChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · termina ao iniciar a próxima OP
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-2xl font-black text-white tabular-nums">{hh}:{mm}:{ss}</span>
+                      <button
+                        onClick={async () => { setIsChangeoverBusy(true); await handleEndChangeover(null); setIsChangeoverBusy(false); await fetchData(true); }}
+                        disabled={isChangeoverBusy}
+                        className="px-3 py-1.5 rounded-lg bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-[11px] font-bold text-[#f4f4f5] disabled:opacity-60"
+                      >
+                        Encerrar troca
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+              if (lineIdle && openShift && finishedToday) {
+                return (
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121217] border border-orange-800/40 rounded-2xl px-4 py-3">
+                    <p className="text-xs text-[#d4d4d8] flex items-center gap-2">
+                      <RefreshCcw className="w-4 h-4 text-orange-400 shrink-0" />
+                      Vai trocar o produto da linha? Marque o início da troca pra esse tempo entrar no relatório.
+                    </p>
+                    <button
+                      onClick={handleStartChangeover}
+                      disabled={isChangeoverBusy}
+                      className="px-4 py-2 rounded-xl bg-orange-500 hover:bg-orange-400 text-orange-950 text-xs font-black uppercase tracking-wider disabled:opacity-60"
+                    >
+                      {isChangeoverBusy ? 'Iniciando...' : 'Iniciar troca'}
+                    </button>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+            {changeoverError && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-200">{changeoverError}</p>
+              </div>
+            )}
+
             {shiftError && !isEndShiftOpen && (
               <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
@@ -993,6 +1192,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                       <span className="px-2.5 py-1 rounded-xl bg-[#16161e] border border-[#272733] text-xs font-mono text-[#a1a1aa] flex items-center gap-1">
                         <Boxes className="w-3 h-3 text-[#71717a]" />
                         Granel: <strong className="text-white">{activeOp.granel}</strong>
+                        <GranelBadge granel={activeOp.granel} ops={allOps} className="ml-1" />
                       </span>
                     )}
                   </div>
@@ -1180,7 +1380,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                       {/* Pausar Linha */}
                       <Button
                         onClick={() => {
-                          setPauseProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : '0');
                           setIsPauseOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-amber-950/30 text-amber-400 hover:text-amber-300 border border-amber-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
@@ -1338,6 +1537,12 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                         <p className="text-[11px] text-[#71717a] font-mono">
                           Lote: {op.lote || 'N/A'} • Meta: {op.plannedQuantity.toLocaleString('pt-BR')} {displayUnit}
                         </p>
+                        {op.granel && (
+                          <p className="text-[11px] text-[#71717a] font-mono flex items-center gap-1.5 flex-wrap">
+                            Granel: {op.granel}
+                            <GranelBadge granel={op.granel} ops={allOps} />
+                          </p>
+                        )}
                       </div>
 
                       <div className="pt-2 border-t border-[#20202b] flex items-center justify-between text-[11px] text-[#a1a1aa]">
@@ -1931,26 +2136,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             </div>
 
             <div className="space-y-2">
-              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider flex items-center justify-between">
-                <span>Quantidade Produzida até o Momento ({displayUnit})</span>
-                <span className="text-amber-400 font-mono text-[11px]">
-                  Atual: {activeOp?.producedQuantity.toLocaleString('pt-BR')} {displayUnit}
-                </span>
-              </Label>
-              <Input
-                type="number"
-                min="0"
-                value={pauseProducedQty}
-                onChange={e => setPauseProducedQty(e.target.value)}
-                placeholder={`Informe o total produzido (ex: ${activeOp?.producedQuantity || 0})`}
-                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
-              />
-              <p className="text-[11px] text-[#71717a]">
-                O valor informado atualizará o painel e a barra de progresso imediatamente ao confirmar a pausa.
-              </p>
-            </div>
-
-            <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
                 Observação Complementar (Opcional)
               </Label>
@@ -1983,6 +2168,77 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       </Dialog>
 
       {/* MODAL: CANCELAR OP INICIADA POR ENGANO */}
+      {/* MODAL: EQUIPE DA LINHA (ao iniciar o expediente e para corrigir durante o dia) */}
+      <Dialog open={teamDialogMode !== null} onOpenChange={(open) => { if (!open) setTeamDialogMode(null); }}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-emerald-300 flex items-center gap-2">
+              {teamDialogMode === 'start' ? <Sunrise className="w-5 h-5" /> : <Users className="w-5 h-5" />}
+              {teamDialogMode === 'start' ? 'Iniciar Expediente' : 'Equipe da Linha'} — {currentLine?.name}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-3">
+            <div className="space-y-1.5">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
+                Colaboradores trabalhando na linha
+              </Label>
+              <Input
+                type="number"
+                min="1"
+                inputMode="numeric"
+                value={teamPresent}
+                onChange={e => setTeamPresent(e.target.value)}
+                placeholder="Ex: 6"
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
+                Faltas (integrantes da equipe que não vieram)
+              </Label>
+              <Input
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={teamAbsent}
+                onChange={e => setTeamAbsent(e.target.value)}
+                placeholder="0"
+                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
+              />
+            </div>
+            <p className="text-[11px] text-[#71717a]">
+              {teamDialogMode === 'start'
+                ? 'Se alguém entrar ou sair durante o dia, use "Alterar equipe" — o horário de cada mudança fica registrado.'
+                : 'A mudança vale a partir de agora; o que foi informado antes continua registrado.'}
+            </p>
+            {teamError && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-lg px-3 py-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-rose-300">{teamError}</p>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setTeamDialogMode(null)}
+              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={handleConfirmTeam}
+              disabled={isShiftBusy}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              {isShiftBusy ? 'Salvando...' : teamDialogMode === 'start' ? 'Iniciar Expediente' : 'Salvar Equipe'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* MODAL: ENCERRAR EXPEDIENTE */}
       <Dialog open={isEndShiftOpen} onOpenChange={(open) => { setIsEndShiftOpen(open); if (!open) setShiftError(null); }}>
         <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
