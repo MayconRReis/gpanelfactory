@@ -46,6 +46,7 @@ import {
   reportQuantity,
   saveLeaderRotation,
   getRecentEvents,
+  getAllUsers,
   getPauseReasons,
   updateOP,
   DEFAULT_PAUSE_REASONS,
@@ -67,7 +68,7 @@ import {
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
-import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover } from '../types';
+import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 import { Input } from '../components/ui/input';
@@ -132,6 +133,22 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
   const [allOps, setAllOps] = useState<ProductionOrder[]>([]);
   const [recentEvents, setRecentEvents] = useState<ProductionEvent[]>([]);
+
+  // Nomes dos usuários (líderes e coordenadores) para mostrar quem fez cada
+  // apontamento na linha do tempo.
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getAllUsers().then(list => { if (!cancelled) setAllUsers(list); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const responsibleFor = useCallback((leaderId?: string | null): { name: string; isCoordinator: boolean } | null => {
+    if (!leaderId) return null;
+    const u = allUsers.find(x => x.uid === leaderId);
+    if (u) return { name: u.name, isCoordinator: u.role === 'coordinator' };
+    if (profile && profile.uid === leaderId) return { name: profile.name, isCoordinator: profile.role === 'coordinator' };
+    return null;
+  }, [allUsers, profile]);
   const [pauseReasonsList, setPauseReasonsList] = useState<PauseReason[]>(DEFAULT_PAUSE_REASONS);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -579,7 +596,12 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     const parsedRejected = qtyToReport === undefined && reportRejectedQty.trim() !== ''
       ? parseInt(reportRejectedQty, 10)
       : undefined;
-    await reportQuantity(activeOp.id, currentLine.id, profile.uid, finalQty, parsedRejected);
+    const res = await reportQuantity(activeOp.id, currentLine.id, profile.uid, finalQty, parsedRejected);
+    if (res && res.ok === false) {
+      // Não foi gravado — mantém o formulário aberto com o valor (o aviso aparece no topo)
+      await fetchData(true);
+      return;
+    }
     setQuantity('');
     setReportRejectedQty('');
     setIsReportOpen(false);
@@ -591,7 +613,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     const parsedQty = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : undefined;
     const parsedLostQty = finishLostQty.trim() !== '' ? parseInt(finishLostQty, 10) : undefined;
 
-    await finishOP(
+    const res = await finishOP(
       activeOp.id,
       currentLine.id,
       profile.uid,
@@ -601,6 +623,10 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       parsedLostQty,
       finishProductionType === 'parcial'
     );
+    if (res && res.ok === false) {
+      await fetchData(true);
+      return;
+    }
     setIsFinishOpen(false);
     setFinishShift(null);
     setFinishProducedQty('');
@@ -1704,12 +1730,35 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                                  return `${docTypeLabel} Finalizada com Sucesso`;
                                })()}
                             </span>
-                            {event.opNumber && (
-                              <span className="text-[10px] font-mono text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded">
-                                {docTypeLabel} {event.opNumber}
-                              </span>
-                            )}
+                            {(() => {
+                              // Número da OP (o evento às vezes só traz o id interno)
+                              const relatedOp = allOps.find(o => o.id === event.opId);
+                              const opLabel = relatedOp?.number || event.opNumber;
+                              return opLabel ? (
+                                <span className="text-[10px] font-mono text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded shrink-0">
+                                  {docTypeLabel} {opLabel}
+                                </span>
+                              ) : null;
+                            })()}
                           </div>
+                          {(() => {
+                            const who = responsibleFor(event.leaderId);
+                            return (
+                              <p className="text-[11px] mt-0.5 flex items-center gap-1">
+                                <span className="text-[#71717a]">por</span>
+                                {who ? (
+                                  <>
+                                    <strong className="text-[#d4d4d8]">{who.name}</strong>
+                                    {who.isCoordinator && (
+                                      <span className="text-[9px] font-bold uppercase px-1 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/50">Coordenação</span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-[#52525b]">responsável não registrado</span>
+                                )}
+                              </p>
+                            );
+                          })()}
                           {event.observation && (
                             <p className="text-[11px] text-[#71717a] truncate mt-0.5">
                               Obs: {event.observation}
