@@ -667,14 +667,17 @@ const DEFAULT_OPS: ProductionOrder[] = [];
 
 // Default pause reasons
 export const DEFAULT_PAUSE_REASONS: PauseReason[] = [
-  { id: 'pr-1', name: 'Aguardando laboratório' },
-  { id: 'pr-2', name: 'Falta de insumo' },
-  { id: 'pr-3', name: 'Limpeza' },
-  { id: 'pr-4', name: 'Manutenção' },
-  { id: 'pr-5', name: 'Problema na envasadora' },
-  { id: 'pr-6', name: 'Problema operacional' },
-  { id: 'pr-7', name: 'Intervalo' },
-  { id: 'pr-8', name: 'Outro' },
+  { id: 'pr-intervalo', name: 'Intervalo' },
+  { id: 'pr-cafe', name: 'Café' },
+  { id: 'pr-embalagens', name: 'Falta de embalagens' },
+  { id: 'pr-insumos', name: 'Falta de insumos' },
+  { id: 'pr-redatar', name: 'Redatar frascos' },
+  { id: 'pr-orientacao', name: 'Aguardando orientação' },
+  { id: 'pr-laboratorio', name: 'Aguardando laboratório' },
+  { id: 'pr-operacional', name: 'Problema operacional' },
+  { id: 'pr-manutencao', name: 'Manutenção' },
+  { id: 'pr-limpeza', name: 'Limpeza' },
+  { id: 'pr-outro', name: 'Outro' },
 ];
 
 // Default recent events (Vazio por padrão)
@@ -2866,26 +2869,9 @@ export const saveLeaderRotation = async (
 
 // ---------------- PAUSE REASONS & EVENTS ----------------
 export const getPauseReasons = async (): Promise<PauseReason[]> => {
-  if (trainingModeActive) return DEFAULT_PAUSE_REASONS;
-  try {
-    // pause_reasons não está no schema.sql (tabela criada manualmente no
-    // Supabase). Colunas reais confirmadas: id (uuid), reason (text),
-    // description (text), created_at — não existe "name" nem "category".
-    // Ordenamos em JS (em vez de .order('reason', ...) no Supabase) para não
-    // depender de mais nenhuma suposição sobre o schema real dessa tabela.
-    const { data, error } = await supabase.from('pause_reasons').select('*');
-    if (data && data.length > 0 && !error) {
-      return data
-        .map((d: any) => ({
-          id: String(d.id),
-          name: d.reason || d.description || 'Pausa Operacional',
-          category: d.category || 'Geral',
-        }))
-        .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-    }
-  } catch (err) {
-    console.warn('Busca de motivos de pausa no Supabase:', err);
-  }
+  // Lista FIXA de motivos do Envase (definida pela coordenação). A tabela
+  // pause_reasons do Supabase não é mais consultada, para que todas as telas
+  // mostrem exatamente as mesmas opções, na mesma ordem.
   return DEFAULT_PAUSE_REASONS;
 };
 

@@ -731,6 +731,24 @@ export function HomeDashboard({
     return result;
   }, [dashboardPeriod, ops, events, currentYear, currentMonth, isEnvaseLineOp, workSessions]);
 
+  // Timer do card da linha = tempo TRABALHADO da OP (soma dos trechos em
+  // produção, sem pausas e sem as noites em que ficou esquecida "em
+  // produção"). Antes era "agora − início", que passava de 24h.
+  const workedMsByOp = useMemo(() => {
+    const activeIds = new Set(ops.filter(o => o && (o.status === 'in_progress' || o.status === 'paused')).map(o => o.id));
+    const out = new Map<string, number>();
+    if (activeIds.size === 0) return out;
+    const res = calculateProductionTime((events || []).filter(e => activeIds.has(e.opId)), ops, lines, {
+      referenceTime: nowTick,
+      workSessions,
+    });
+    for (const it of res.intervals) {
+      if (it.type !== 'WORKING' || !it.opId) continue;
+      out.set(it.opId, (out.get(it.opId) || 0) + it.durationMs);
+    }
+    return out;
+  }, [events, ops, lines, nowTick, workSessions]);
+
   // Métricas de Tempo TOTAIS acumuladas
   const totalProductionTime = useMemo(() => {
     return calculateProductionTime(events, ops, lines, {
@@ -977,7 +995,7 @@ export function HomeDashboard({
               <div className="flex items-center justify-between text-[11px]">
                 <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
                 <span className="font-mono font-black text-white text-sm tabular-nums">
-                  {start ? formatElapsedTimer(nowTick - start.getTime()) : '--:--:--'}
+                  {start ? formatElapsedTimer(workedMsByOp.get(activeLineOp.id) || 0) : '--:--:--'}
                 </span>
               </div>
 

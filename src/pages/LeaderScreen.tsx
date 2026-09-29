@@ -170,6 +170,8 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [isFinishOpen, setIsFinishOpen] = useState(false);
   const [finishShift, setFinishShift] = useState<'Manhã' | 'Tarde' | null>(null);
   const [finishProducedQty, setFinishProducedQty] = useState('');
+  // Confirmação quando o total informado na conclusão é MENOR que o já apontado
+  const [finishConfirmLower, setFinishConfirmLower] = useState(false);
   const [finishLostQty, setFinishLostQty] = useState('');
   const [finishProductionType, setFinishProductionType] = useState<'total' | 'parcial'>('total');
   const [finishSendToSleeve, setFinishSendToSleeve] = useState(false);
@@ -265,12 +267,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       setLineDailyGoals(loadedLineGoals || []);
       setHeadcounts(loadedHeadcounts || []);
       setChangeovers(loadedChangeovers || []);
-      if (loadedReasons && loadedReasons.length > 0) {
-        // "Intervalo" precisa sempre existir: é a pausa de almoço/café que
-        // não conta como ociosidade (até 1h por pausa).
-        const hasBreak = loadedReasons.some(r => /^\s*intervalo/i.test(r.name || ''));
-        setPauseReasonsList(hasBreak ? loadedReasons : [{ id: 'intervalo', name: 'Intervalo' }, ...loadedReasons]);
-      }
+      if (loadedReasons && loadedReasons.length > 0) setPauseReasonsList(loadedReasons);
 
       // As OPs agora são atribuídas à LINHA (pelo cronograma de envase), não
       // ao líder — qualquer líder pode operar qualquer linha, bastando
@@ -1400,6 +1397,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setFinishSendToSleeve(false);
+                          setFinishConfirmLower(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 font-black text-xs sm:text-sm uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2 transition-all"
@@ -1427,6 +1425,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                           setFinishProducedQty(activeOp.producedQuantity ? String(activeOp.producedQuantity) : String(activeOp.plannedQuantity));
                           setFinishProductionType(activeOp.producedQuantity >= activeOp.plannedQuantity ? 'total' : 'parcial');
                           setFinishSendToSleeve(false);
+                          setFinishConfirmLower(false);
                           setIsFinishOpen(true);
                         }}
                         className="h-14 bg-[#181820] hover:bg-emerald-950/30 text-emerald-400 border border-emerald-500/30 font-black text-xs uppercase tracking-wider rounded-2xl flex items-center justify-center gap-2"
@@ -1711,6 +1710,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                           event.type === 'QUANTITY_REPORTED' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' :
                           event.type === 'STARTED' ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30' :
                           event.type === 'PAUSED' ? 'bg-amber-600/20 text-amber-400 border border-amber-500/30' :
+                          event.type === 'CANCELLED' ? 'bg-rose-600/20 text-rose-400 border border-rose-500/30' :
                           'bg-purple-600/20 text-purple-400 border border-purple-500/30'
                         }`}>
                           {event.type === 'QUANTITY_REPORTED' ? <Package className="w-4 h-4" /> :
@@ -1725,7 +1725,8 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                               {event.type === 'QUANTITY_REPORTED' ? `Apontamento de +${event.quantity} ${displayUnit}` :
                                event.type === 'STARTED' ? 'Início de Produção' :
                                event.type === 'PAUSED' ? `Pausa: ${event.reason || 'Operacional'}` :
-                               event.type === 'RESUMED' ? 'Retomada de Produção' : 
+                               event.type === 'RESUMED' ? 'Retomada de Produção' :
+                               event.type === 'CANCELLED' ? 'Início Cancelado (por engano)' : 
                                (() => {
                                  const relatedOp = allOps.find(o => o.id === event.opId || o.number === event.opNumber);
                                  if (relatedOp?.finishedShift) {
@@ -2148,9 +2149,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 <SelectTrigger className="bg-[#181822] border-[#2c2c3c] rounded-xl h-11 text-xs font-medium">
                   <SelectValue placeholder="Escolha o motivo da pausa..." />
                 </SelectTrigger>
-                <SelectContent className="bg-[#181822] border-[#2c2c3c] text-[#f4f4f5] max-h-60">
+                <SelectContent
+                  alignItemWithTrigger={false}
+                  sideOffset={10}
+                  className="bg-[#181822] border border-[#2c2c3c] text-[#f4f4f5] max-h-80 p-1.5 space-y-0.5"
+                >
                   {pauseReasonsList.map(r => (
-                    <SelectItem key={r.id || r.name} value={r.name} className="text-xs">
+                    <SelectItem key={r.id || r.name} value={r.name} className="text-sm py-2.5 px-3 rounded-lg">
                       {r.name}
                     </SelectItem>
                   ))}
@@ -2159,6 +2164,11 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               {/^\s*intervalo/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
                   Intervalos de até 1 hora não serão contabilizados como ociosidade. Caso ultrapasse 1 hora, somente o período excedente será contabilizado como ociosidade.
+                </p>
+              )}
+              {/^\s*caf[eé]/i.test(pauseReason || '') && (
+                <p className="text-[11px] text-emerald-400 mt-1.5">
+                  Cafés de até 15 minutos não serão contabilizados como ociosidade. Caso ultrapasse 15 minutos, somente o período excedente será contabilizado como ociosidade.
                 </p>
               )}
             </div>
@@ -2476,6 +2486,31 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 placeholder={`Quantidade produzida em ${displayUnit}`}
                 className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono text-white focus:border-emerald-500"
               />
+              {activeOp && (() => {
+                const already = activeOp.producedQuantity || 0;
+                const informed = finishProducedQty.trim() !== '' ? parseInt(finishProducedQty, 10) : NaN;
+                return (
+                  <>
+                    <p className="text-[10px] text-[#a1a1aa] font-mono">
+                      Já apontado nesta OP: <strong className="text-white">{already.toLocaleString('pt-BR')} {displayUnit}</strong> — informe o TOTAL produzido da OP (não só o de agora).
+                    </p>
+                    {!isNaN(informed) && informed < already && (
+                      <label className="flex items-start gap-2 bg-rose-950/50 border border-rose-700/60 rounded-xl px-3 py-2 text-[11px] text-rose-200 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={finishConfirmLower}
+                          onChange={e => setFinishConfirmLower(e.target.checked)}
+                          className="mt-0.5 accent-rose-500"
+                        />
+                        <span>
+                          O total informado ({informed.toLocaleString('pt-BR')}) é <strong>menor</strong> que o já apontado ({already.toLocaleString('pt-BR')}).
+                          Isso vai <strong>tirar {(already - informed).toLocaleString('pt-BR')} {displayUnit}</strong> da produção. Marque só se o apontamento anterior estava errado.
+                        </span>
+                      </label>
+                    )}
+                  </>
+                );
+              })()}
               {/* Saldo restante — só faz sentido mostrar na conclusão Parcial,
                   já que é o que sobra pra uma próxima produção desta OP. */}
               {finishProductionType === 'parcial' && activeOp && (() => {
@@ -2572,7 +2607,10 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
             </Button>
             <Button
               onClick={handleFinish}
-              disabled={!finishProducedQty || isNaN(parseInt(finishProducedQty, 10)) || parseInt(finishProducedQty, 10) < 0}
+              disabled={
+                !finishProducedQty || isNaN(parseInt(finishProducedQty, 10)) || parseInt(finishProducedQty, 10) < 0 ||
+                (!!activeOp && parseInt(finishProducedQty, 10) < (activeOp.producedQuantity || 0) && !finishConfirmLower)
+              }
               className={
                 finishSendToSleeve
                   ? 'bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-lg shadow-purple-950/50'

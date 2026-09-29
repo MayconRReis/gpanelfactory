@@ -1000,7 +1000,7 @@ WHERE email IN (
       lineId: op.lineId || 'line-1',
       opNumber: op.number,
     });
-    setSelectedPauseReason(pauseReasons[0]?.name || 'Aguardando laboratório');
+    setSelectedPauseReason(pauseReasons[0]?.name || 'Intervalo');
     setPauseObservation('');
   };
 

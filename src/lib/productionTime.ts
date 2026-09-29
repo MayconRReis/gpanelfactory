@@ -45,12 +45,24 @@ export interface LineTimeMetrics {
  * Índice = Date.getDay() (0 = domingo).
  */
 /**
- * Pausa de INTERVALO (almoço/café): até 1h por pausa não conta como
- * ociosidade. O que passar de 1h numa mesma pausa volta a contar.
+ * Pausas toleradas (não contam como ociosidade até o limite, por pausa):
+ * - INTERVALO (almoço): até 1h
+ * - CAFÉ: até 15min
+ * O que passar do limite numa mesma pausa volta a contar como ocioso.
  */
 export const BREAK_ALLOWANCE_MS = 60 * 60 * 1000;
+export const COFFEE_ALLOWANCE_MS = 15 * 60 * 1000;
+export function isCoffeePauseReason(reason?: string | null): boolean {
+  return /^\s*caf[eé]/i.test(String(reason || ''));
+}
 export function isBreakPauseReason(reason?: string | null): boolean {
-  return /^\s*intervalo/i.test(String(reason || ''));
+  return /^\s*intervalo/i.test(String(reason || '')) || isCoffeePauseReason(reason);
+}
+/** Tolerância (ms) da pausa; 0 quando o motivo não é tolerado. */
+export function getBreakAllowanceMs(reason?: string | null): number {
+  if (isCoffeePauseReason(reason)) return COFFEE_ALLOWANCE_MS;
+  if (/^\s*intervalo/i.test(String(reason || ''))) return BREAK_ALLOWANCE_MS;
+  return 0;
 }
 
 export const WORK_SCHEDULE: Record<number, { start: number; end: number } | null> = {
@@ -158,6 +170,78 @@ export function getAutoShiftNow(
   // Ainda "vale" só se não foi encerrado agora há pouco (range termina em now)
   if (range[1] < now) return none;
   return { active: true, startMs: win[0], endMs: win[1] };
+}
+
+/**
+ * OP que ficou "em produção" de um dia para o outro (esqueceram de pausar /
+ * encerrar o expediente): o trecho trabalhado NÃO atravessa a noite.
+ * - dia do início: vai até o fim do expediente daquele dia (maior entre o fim
+ *   da jornada e o fim do expediente registrado); se começou depois, vai até
+ *   o próprio início (não conta nada além);
+ * - dias do meio: só o expediente registrado do dia ou, sem registro, a
+ *   jornada padrão (fim de semana sem registro = nada);
+ * - último dia: a partir do início do expediente registrado no dia (sem
+ *   registro, do início da jornada).
+ * Trecho dentro de um mesmo dia volta inteiro, sem alteração.
+ */
+export function splitWorkingAcrossDays(
+  startMs: number,
+  endMs: number,
+  lineId: string | undefined,
+  sessions: WorkSession[]
+): Array<[number, number]> {
+  if (!(endMs > startMs)) return [];
+  if (localDayStr(startMs) === localDayStr(endMs)) return [[startMs, endMs]];
+  const lineSessions = lineId ? sessions.filter(ss => ss.lineId === lineId) : [];
+  const dayWindow = (dayMs: number): [number, number] | null => {
+    const dayStr = localDayStr(dayMs);
+    const sched = getScheduledWindow(dayMs);
+    let a = sched ? sched[0] : Infinity;
+    let b = sched ? sched[1] : -Infinity;
+    for (const ss of lineSessions) {
+      const sa = new Date(ss.startedAt).getTime();
+      if (isNaN(sa) || localDayStr(sa) !== dayStr) continue;
+      const se = ss.endedAt ? new Date(ss.endedAt).getTime() : NaN;
+      a = Math.min(a, sa);
+      if (!isNaN(se)) b = Math.max(b, se);
+    }
+    return isFinite(a) && isFinite(b) && b > a ? [a, b] : null;
+  };
+  const out: Array<[number, number]> = [];
+  const cursor = new Date(startMs);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() <= endMs) {
+    const dayStart = cursor.getTime();
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    const dayEnd = next.getTime();
+    const win = dayWindow(dayStart);
+    const isFirst = startMs >= dayStart && startMs < dayEnd;
+    const isLast = endMs > dayStart && endMs <= dayEnd;
+    let a: number;
+    let b: number;
+    if (isFirst) {
+      a = startMs;
+      b = win ? Math.max(win[1], startMs) : startMs;
+    } else if (isLast) {
+      // Com expediente registrado no dia, começa nele; senão, no início da jornada
+      const dayStr = localDayStr(dayStart);
+      const sessStarts = lineSessions
+        .map(ss => new Date(ss.startedAt).getTime())
+        .filter(t => !isNaN(t) && localDayStr(t) === dayStr);
+      a = sessStarts.length > 0 ? Math.min(...sessStarts) : win ? win[0] : endMs;
+      b = endMs;
+    } else if (win) {
+      [a, b] = win;
+    } else {
+      a = b = 0;
+    }
+    a = Math.max(a, dayStart, startMs);
+    b = Math.min(b, dayEnd, endMs);
+    if (b > a) out.push([a, b]);
+    cursor.setTime(dayEnd);
+  }
+  return out;
 }
 
 export interface FactoryTimeMetrics {
@@ -342,6 +426,17 @@ export function calculateProductionTime(
     observation?: string,
     resourceKey?: string
   ) => {
+    // Trabalho que atravessou a noite (OP esquecida "em produção"): só conta
+    // dentro do expediente de cada dia — ver splitWorkingAcrossDays.
+    if (type === 'WORKING') {
+      const cappedEnd = Math.min(endMs, refTime);
+      if (localDayStr(startMs) !== localDayStr(cappedEnd) && cappedEnd > startMs) {
+        for (const [a, b] of splitWorkingAcrossDays(startMs, cappedEnd, lineId, options?.workSessions || [])) {
+          pushInterval(type, a, b, opId, lineId, reason, observation, resourceKey);
+        }
+        return;
+      }
+    }
     let actualStart = startMs;
     let actualEnd = Math.min(endMs, refTime);
 
@@ -387,7 +482,8 @@ export function calculateProductionTime(
       pushInterval('IDLE', startMs, endMs, opId, lineId, reason, observation, resourceKey);
       return;
     }
-    const allowanceEnd = Math.min(endMs, startMs + BREAK_ALLOWANCE_MS);
+    const allowanceMs = getBreakAllowanceMs(reason);
+    const allowanceEnd = Math.min(endMs, startMs + allowanceMs);
     // parte tolerada: guarda (recortada pelo filtro de data / agora) sem contar como ocioso
     let a = startMs;
     let b = Math.min(allowanceEnd, refTime);
@@ -400,9 +496,9 @@ export function calculateProductionTime(
       list.push([a, b]);
       breakRangesByLine.set(lineId, list);
     }
-    // o que passar de 1h conta como ociosidade normal
+    // o que passar do limite conta como ociosidade normal
     if (endMs > allowanceEnd) {
-      pushInterval('IDLE', allowanceEnd, endMs, opId, lineId, `${reason} (acima de 1h)`, observation, resourceKey);
+      pushInterval('IDLE', allowanceEnd, endMs, opId, lineId, `${reason} (acima de ${allowanceMs >= 3600000 ? '1h' : '15min'})`, observation, resourceKey);
     }
   };
 
