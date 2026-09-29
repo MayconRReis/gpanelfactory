@@ -2158,7 +2158,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               </Select>
               {/^\s*intervalo/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
-                  Intervalo de até 1h não conta como ociosidade. Se passar de 1h, o excedente conta.
+                  Intervalos de até 1 hora não serão contabilizados como ociosidade. Caso ultrapasse 1 hora, somente o período excedente será contabilizado como ociosidade.
                 </p>
               )}
             </div>
