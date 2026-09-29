@@ -172,6 +172,8 @@ export interface LineChangeover {
   endedBy?: string | null;
   previousOpId?: string | null;
   nextOpId?: string | null;
+  /** Tipo do setup informado pelo líder: mesmo tipo de produto ou produto diferente. */
+  setupType?: 'same' | 'different' | null;
 }
 
 // Histórico de movimentações da Pesagem (quem registrou, editou, excluiu

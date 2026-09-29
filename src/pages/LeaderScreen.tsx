@@ -13,7 +13,6 @@ import {
   AlertTriangle,
   RefreshCw,
   Factory,
-  Layers,
   TrendingUp,
   Activity,
   Check,
@@ -176,6 +175,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
   const [isChangeoverBusy, setIsChangeoverBusy] = useState(false);
   const [changeoverError, setChangeoverError] = useState<string | null>(null);
+  const [isSetupDialogOpen, setIsSetupDialogOpen] = useState(false);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -524,7 +524,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     [changeovers, currentLine]
   );
 
-  const handleStartChangeover = async () => {
+  const handleStartChangeover = async (setupType: 'same' | 'different') => {
     if (!currentLine || !profile) return;
     setIsChangeoverBusy(true);
     setChangeoverError(null);
@@ -532,16 +532,17 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     const lastFinished = recentEvents
       .filter(e => e.type === 'FINISHED' && (e.lineId === currentLine.id || e.lineName === currentLine.name))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-    const res = await startChangeover(currentLine.id, profile.uid, lastFinished?.opId || null);
+    const res = await startChangeover(currentLine.id, profile.uid, lastFinished?.opId || null, setupType);
     setIsChangeoverBusy(false);
-    if (res.error) setChangeoverError(`Não foi possível iniciar a troca: ${res.error}`);
+    if (res.error) setChangeoverError(`Não foi possível iniciar o setup: ${res.error}`);
+    else setIsSetupDialogOpen(false);
     await fetchData(true);
   };
 
   const handleEndChangeover = async (nextOpId?: string | null) => {
     if (!currentLine || !profile) return;
     const res = await endChangeover(currentLine.id, profile.uid, nextOpId || null);
-    if (res.error) console.warn('[LeaderScreen] Não foi possível encerrar a troca:', res.error);
+    if (res.error) console.warn('[LeaderScreen] Não foi possível encerrar o setup:', res.error);
   };
 
   const handleStart = async () => {
@@ -635,6 +636,18 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [currentTime.getFullYear(), currentTime.getMonth(), currentTime.getDate()]
   );
+
+  // SETUP (troca de produto): só depois de finalizar uma OP — a linha está
+  // parada, o expediente está valendo e o último evento da linha hoje foi um
+  // FINISHED (ninguém iniciou outra OP depois).
+  const setupAvailable = useMemo(() => {
+    const lineIdle = !activeOp || activeOp.status === 'pending';
+    if (!lineIdle || !shiftActive) return false;
+    const todays = lineEvents
+      .filter(e => e.createdAt && toLocalDateStr(e.createdAt) === todayDateStr && ['STARTED', 'RESUMED', 'FINISHED', 'CANCELLED'].includes(e.type))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return todays.length > 0 && todays[0].type === 'FINISHED';
+  }, [activeOp, shiftActive, lineEvents, todayDateStr]);
 
   // Produção REAL desta linha por dia (a partir dos apontamentos, pausas e
   // conclusões gravados). Nada é estimado: dia sem registro = 0.
@@ -869,9 +882,21 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 <Factory className="w-5 h-5" />
               </div>
               <div className="min-w-0">
-                <h1 className="text-sm font-black text-white tracking-tight uppercase truncate">
-                  Chão de Fábrica (Envase)
-                </h1>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h1 className="text-sm font-black text-white tracking-tight uppercase truncate">
+                    Envase
+                  </h1>
+                  <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
+                    activeOp?.status === 'in_progress'
+                      ? 'bg-emerald-950/80 text-emerald-400 border-emerald-800/40'
+                      : activeOp?.status === 'paused'
+                      ? 'bg-amber-950/80 text-amber-400 border-amber-800/40'
+                      : 'bg-blue-950/80 text-blue-400 border-blue-800/40'
+                  }`}>
+                    {activeOp?.status === 'in_progress' ? 'Linha em Produção' :
+                     activeOp?.status === 'paused' ? 'Linha Pausada' : 'Aguardando Início'}
+                  </span>
+                </div>
                 <p className="text-xs text-[#71717a]">
                   Acompanhamento de produção em tempo real
                 </p>
@@ -895,6 +920,65 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
           {/* Seletor da Linha de Responsabilidade & Status */}
           <div className="flex items-center gap-2.5 w-full md:w-auto flex-wrap justify-between md:justify-end">
             
+            {/* Início / fim de expediente da linha */}
+              {shiftActive && shiftStartedAtMs ? (
+                <button
+                  onClick={() => { setShiftError(null); setIsEndShiftOpen(true); }}
+                  disabled={isShiftBusy}
+                  title={openShift
+                    ? `Expediente aberto desde ${new Date(shiftStartedAtMs).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                    : 'Expediente iniciado automaticamente no horário da jornada'}
+                  className="px-3 py-1.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/50 border border-rose-800/50 text-xs font-bold text-rose-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                >
+                  <Sunset className="w-4 h-4 text-rose-400" />
+                  <span>Encerrar Expediente</span>
+                  <span className="font-mono text-[10px] text-rose-300/80">
+                    (desde {new Date(shiftStartedAtMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}{!openShift ? ' · automático' : ''})
+                  </span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleStartShift}
+                  disabled={isShiftBusy}
+                  title="O expediente começa sozinho às 7h nas linhas com OP no dia. Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
+                  className="px-3 py-1.5 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                >
+                  <Sunrise className="w-4 h-4 text-emerald-400" />
+                  <span>{isShiftBusy ? 'Iniciando...' : 'Iniciar Expediente'}</span>
+                </button>
+              )}
+
+            {/* SETUP (troca de produto) */}
+            {openChangeover ? (() => {
+              const elapsed = Math.max(0, currentTime.getTime() - new Date(openChangeover.startedAt).getTime());
+              const hh = String(Math.floor(elapsed / 3600000)).padStart(2, '0');
+              const mm = String(Math.floor((elapsed % 3600000) / 60000)).padStart(2, '0');
+              const ss = String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0');
+              return (
+                <button
+                  onClick={async () => { setIsChangeoverBusy(true); await handleEndChangeover(null); setIsChangeoverBusy(false); await fetchData(true); }}
+                  disabled={isChangeoverBusy}
+                  title={`Setup${openChangeover.setupType === 'same' ? ' (mesmo tipo de produto)' : openChangeover.setupType === 'different' ? ' (produto diferente)' : ''} desde ${new Date(openChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}. Termina sozinho ao iniciar a próxima OP.`}
+                  className="px-3 py-1.5 rounded-xl bg-orange-950/60 hover:bg-orange-900/60 border border-orange-700/60 text-xs font-bold text-orange-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                >
+                  <RefreshCcw className="w-4 h-4 text-orange-400 animate-spin [animation-duration:3s]" />
+                  <span>Setup</span>
+                  <span className="font-mono text-[11px] text-white tabular-nums">{hh}:{mm}:{ss}</span>
+                  <span className="text-[10px] text-orange-300/80">· Encerrar</span>
+                </button>
+              );
+            })() : (
+              <button
+                onClick={() => { setChangeoverError(null); setIsSetupDialogOpen(true); }}
+                disabled={!setupAvailable || isChangeoverBusy}
+                title={setupAvailable ? 'Marcar o tempo de preparo da linha para a próxima OP' : 'Disponível depois de finalizar uma OP, com a linha parada'}
+                className="px-3 py-1.5 rounded-xl bg-orange-950/40 hover:bg-orange-900/50 border border-orange-800/50 text-xs font-bold text-orange-200 flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <RefreshCcw className="w-4 h-4 text-orange-400" />
+                <span>Setup</span>
+              </button>
+            )}
+
             {/* Badge Interativo da Linha Responsável */}
             <button
               onClick={() => setIsLineSelectOpen(true)}
@@ -1002,80 +1086,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         {activeTab === 'operation' && (
           <div className="space-y-6 animate-in fade-in duration-200">
             
-            {/* Banner de Status da Linha */}
-            <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg shrink-0 border ${
-                  activeOp?.status === 'in_progress'
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.15)]'
-                    : activeOp?.status === 'paused'
-                    ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.15)]'
-                    : 'bg-blue-500/10 text-blue-400 border-blue-500/30'
-                }`}>
-                  <Factory className="w-6 h-6" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-bold uppercase tracking-wider text-[#71717a]">
-                      Posto de Trabalho
-                    </span>
-                    <span className={`text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${
-                      activeOp?.status === 'in_progress'
-                        ? 'bg-emerald-950/80 text-emerald-400 border-emerald-800/40'
-                        : activeOp?.status === 'paused'
-                        ? 'bg-amber-950/80 text-amber-400 border-amber-800/40'
-                        : 'bg-blue-950/80 text-blue-400 border-blue-800/40'
-                    }`}>
-                      {activeOp?.status === 'in_progress' ? 'Linha em Produção' :
-                       activeOp?.status === 'paused' ? 'Linha Pausada' : 'Aguardando Início'}
-                    </span>
-                  </div>
-                  <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
-                    {currentLine?.name || 'Linha de Produção'}
-                  </h2>
-                </div>
-              </div>
-
-              <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2">
-                {/* Botão de Expediente da linha */}
-                {shiftActive && shiftStartedAtMs ? (
-                  <button
-                    onClick={() => { setShiftError(null); setIsEndShiftOpen(true); }}
-                    disabled={isShiftBusy}
-                    title={openShift
-                      ? `Expediente aberto desde ${new Date(shiftStartedAtMs).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
-                      : 'Expediente iniciado automaticamente no horário da jornada'}
-                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/50 border border-rose-800/50 text-xs font-bold text-rose-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
-                  >
-                    <Sunset className="w-4 h-4 text-rose-400" />
-                    <span>Encerrar Expediente</span>
-                    <span className="font-mono text-[10px] text-rose-300/80">
-                      (desde {new Date(shiftStartedAtMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}{!openShift ? ' · automático' : ''})
-                    </span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleStartShift}
-                    disabled={isShiftBusy}
-                    title="O expediente começa sozinho às 7h nas linhas com OP no dia. Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
-                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
-                  >
-                    <Sunrise className="w-4 h-4 text-emerald-400" />
-                    <span>{isShiftBusy ? 'Iniciando...' : 'Iniciar Expediente'}</span>
-                  </button>
-                )}
-
-                {/* Botão de Trocar Linha */}
-                <button
-                  onClick={() => setIsLineSelectOpen(true)}
-                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-xs font-bold text-[#f4f4f5] flex items-center justify-center gap-2 transition-all"
-                >
-                  <Layers className="w-4 h-4 text-blue-400" />
-                  <span>Trocar de Linha</span>
-                </button>
-              </div>
-            </div>
-
             {openShift && new Date(openShift.startedAt).toDateString() !== new Date().toDateString() && (
               <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
@@ -1123,58 +1133,6 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
               )
             )}
 
-            {/* Troca de produto: aparece com a linha sem OP rodando, depois de finalizar uma OP */}
-            {(() => {
-              const lineIdle = !activeOp || activeOp.status === 'pending';
-              const finishedToday = lineEvents.some(e => e.type === 'FINISHED' && e.createdAt && toLocalDateStr(e.createdAt) === todayDateStr);
-              if (openChangeover) {
-                const elapsed = Math.max(0, currentTime.getTime() - new Date(openChangeover.startedAt).getTime());
-                const hh = String(Math.floor(elapsed / 3600000)).padStart(2, '0');
-                const mm = String(Math.floor((elapsed % 3600000) / 60000)).padStart(2, '0');
-                const ss = String(Math.floor((elapsed % 60000) / 1000)).padStart(2, '0');
-                return (
-                  <div className="flex flex-wrap items-center justify-between gap-3 bg-orange-950/40 border border-orange-700/50 rounded-2xl px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <RefreshCcw className="w-5 h-5 text-orange-400 animate-spin [animation-duration:3s]" />
-                      <div>
-                        <p className="text-xs font-black uppercase tracking-wider text-orange-300">Troca de produto em andamento</p>
-                        <p className="text-[11px] text-orange-200/80">
-                          desde {new Date(openChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · termina ao iniciar a próxima OP
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono text-2xl font-black text-white tabular-nums">{hh}:{mm}:{ss}</span>
-                      <button
-                        onClick={async () => { setIsChangeoverBusy(true); await handleEndChangeover(null); setIsChangeoverBusy(false); await fetchData(true); }}
-                        disabled={isChangeoverBusy}
-                        className="px-3 py-1.5 rounded-lg bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-[11px] font-bold text-[#f4f4f5] disabled:opacity-60"
-                      >
-                        Encerrar troca
-                      </button>
-                    </div>
-                  </div>
-                );
-              }
-              if (lineIdle && shiftActive && finishedToday) {
-                return (
-                  <div className="flex flex-wrap items-center justify-between gap-2 bg-[#121217] border border-orange-800/40 rounded-2xl px-4 py-3">
-                    <p className="text-xs text-[#d4d4d8] flex items-center gap-2">
-                      <RefreshCcw className="w-4 h-4 text-orange-400 shrink-0" />
-                      Vai trocar o produto da linha? Marque o início da troca pra esse tempo entrar no relatório.
-                    </p>
-                    <button
-                      onClick={handleStartChangeover}
-                      disabled={isChangeoverBusy}
-                      className="px-4 py-2 rounded-xl bg-orange-500 hover:bg-orange-400 text-orange-950 text-xs font-black uppercase tracking-wider disabled:opacity-60"
-                    >
-                      {isChangeoverBusy ? 'Iniciando...' : 'Iniciar troca'}
-                    </button>
-                  </div>
-                );
-              }
-              return null;
-            })()}
             {changeoverError && (
               <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
                 <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
@@ -2257,6 +2215,45 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       </Dialog>
 
       {/* MODAL: ENCERRAR EXPEDIENTE */}
+      {/* DIÁLOGO DO SETUP: tipo da troca */}
+      <Dialog open={isSetupDialogOpen} onOpenChange={(open) => { setIsSetupDialogOpen(open); if (!open) setChangeoverError(null); }}>
+        <DialogContent className="bg-[#121217] border-[#22222b] text-white max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-orange-300 flex items-center gap-2">
+              <RefreshCcw className="w-5 h-5" />
+              Iniciar Setup — {currentLine?.name}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-[#d4d4d8]">
+              O setup marca o tempo de preparo da linha para a próxima OP. Ele termina sozinho quando você iniciar a próxima OP.
+            </p>
+            <p className="text-xs font-bold text-[#a1a1aa] uppercase tracking-wider">Qual é o tipo de troca?</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                onClick={() => handleStartChangeover('same')}
+                disabled={isChangeoverBusy}
+                className="p-4 rounded-xl bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-800/50 text-left disabled:opacity-60"
+              >
+                <div className="text-sm font-black text-emerald-300">Mesmo tipo de produto</div>
+                <div className="text-[11px] text-emerald-200/70 mt-0.5">Troca mais rápida</div>
+              </button>
+              <button
+                onClick={() => handleStartChangeover('different')}
+                disabled={isChangeoverBusy}
+                className="p-4 rounded-xl bg-orange-950/40 hover:bg-orange-900/50 border border-orange-800/50 text-left disabled:opacity-60"
+              >
+                <div className="text-sm font-black text-orange-300">Produto diferente</div>
+                <div className="text-[11px] text-orange-200/70 mt-0.5">Troca mais demorada</div>
+              </button>
+            </div>
+            {changeoverError && (
+              <p className="text-xs text-rose-300 bg-rose-950/40 border border-rose-800/40 rounded-lg px-3 py-2">{changeoverError}</p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isEndShiftOpen} onOpenChange={(open) => { setIsEndShiftOpen(open); if (!open) setShiftError(null); }}>
         <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
           <DialogHeader>

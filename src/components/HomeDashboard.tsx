@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
 import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
+import { SetupHistory } from './SetupHistory';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -939,7 +940,7 @@ export function HomeDashboard({
                   ? 'text-amber-300 bg-amber-950/80'
                   : activeLineOp ? 'text-emerald-400 bg-emerald-950/80' : 'text-[#71717a] bg-[#1a1a22]'
               }`}>
-                {openLineChangeover && !activeLineOp ? 'Em troca' : isPausedNow ? 'Pausada' : activeLineOp ? 'Produzindo' : 'Parada'}
+                {openLineChangeover && !activeLineOp ? 'Em setup' : isPausedNow ? 'Pausada' : activeLineOp ? 'Produzindo' : 'Parada'}
               </span>
             </div>
             <p className={`text-[10px] font-semibold mt-1 truncate ${sessionLabelClass}`} title={sessionLabel}>
@@ -955,8 +956,8 @@ export function HomeDashboard({
             {!/reator/i.test(line.id) && (openLineChangeover || changeoverTodayMs >= 60000) && (
               <p className="text-[10px] font-semibold mt-0.5 truncate text-orange-300">
                 {openLineChangeover
-                  ? `Em troca desde ${new Date(openLineChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
-                  : `Troca de produto hoje: ${formatMsToHoursMinutes(changeoverTodayMs)}`}
+                  ? `Em setup desde ${new Date(openLineChangeover.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`
+                  : `Setup hoje: ${formatMsToHoursMinutes(changeoverTodayMs)}`}
               </p>
             )}
           </div>
@@ -1285,9 +1286,9 @@ export function HomeDashboard({
             {avgLineProductionTime.avgChangeoverMs >= 60000 && (
               <div
                 className="text-[10px] text-amber-100/90 font-medium truncate flex items-center justify-between pt-0.5"
-                title="Parte do tempo ocioso que foi troca de produto (botão Iniciar troca), média por linha de Envase"
+                title="Parte do tempo ocioso que foi setup (botão Setup), média por linha de Envase"
               >
-                <span>dos quais troca de produto</span>
+                <span>dos quais setup</span>
                 <span className="font-mono font-bold">{formatMsToHoursMinutes(avgLineProductionTime.avgChangeoverMs)}</span>
               </div>
             )}
@@ -1756,6 +1757,18 @@ export function HomeDashboard({
             </div>
           )}
         </div>
+
+        {/* Setups do Envase no período do filtro */}
+        <SetupHistory
+          changeovers={changeovers}
+          ops={ops}
+          lines={lines}
+          users={[...(allUsers || []), ...(leaders || [])]}
+          rangeStart={periodDateRange.rangeStart}
+          rangeEnd={periodDateRange.rangeEnd}
+          periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
+          nowMs={nowTick}
+        />
 
         {/* ---------------------- PARTE 2: MANIPULAÇÃO (REATORES) ---------------------- */}
         <div className="space-y-2 pt-1">

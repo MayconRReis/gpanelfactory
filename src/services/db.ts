@@ -3363,6 +3363,7 @@ const mapChangeoverRow = (r: any): LineChangeover => ({
   endedBy: r.ended_by || null,
   previousOpId: r.previous_op_id || null,
   nextOpId: r.next_op_id || null,
+  setupType: r.setup_type === 'same' || r.setup_type === 'different' ? r.setup_type : null,
 });
 
 /** Trocas iniciadas nos últimos `sinceDays` dias (padrão: ~13 meses). */
@@ -3404,16 +3405,21 @@ export function getOpenChangeover(list: LineChangeover[], lineId: string): LineC
   return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
 }
 
-/** Abre a troca de produto na linha (não abre outra se já houver uma aberta). */
+/**
+ * Abre o SETUP (troca de produto) na linha — não abre outro se já houver um
+ * aberto. `setupType`: 'same' = mesmo tipo de produto, 'different' = produto
+ * diferente (escolhido pelo líder).
+ */
 export const startChangeover = async (
   lineId: string,
   userId?: string | null,
-  previousOpId?: string | null
+  previousOpId?: string | null,
+  setupType?: 'same' | 'different' | null
 ): Promise<{ error: string | null }> => {
   const nowIso = new Date().toISOString();
   if (trainingModeActive) {
     if (!trainingChangeovers.some(c => c.lineId === lineId && !c.endedAt)) {
-      trainingChangeovers.push({ id: `sim-co-${Date.now()}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, previousOpId: previousOpId || null });
+      trainingChangeovers.push({ id: `sim-co-${Date.now()}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, previousOpId: previousOpId || null, setupType: setupType || null });
     }
     return { error: null };
   }
@@ -3424,9 +3430,12 @@ export const startChangeover = async (
     if (openRows && openRows.length > 0) return { error: null };
     const { data, error } = await supabase
       .from('line_changeovers')
-      .insert({ line_id: lineId, started_at: nowIso, started_by: userId || null, previous_op_id: previousOpId || null })
+      .insert({ line_id: lineId, started_at: nowIso, started_by: userId || null, previous_op_id: previousOpId || null, ...(setupType ? { setup_type: setupType } : {}) })
       .select('id');
-    if (error) return { error: error.message };
+    if (error) {
+      if (/setup_type/i.test(error.message || '')) return { error: 'falta a coluna do tipo de setup no banco (rode sql/add_setup_type.sql)' };
+      return { error: error.message };
+    }
     if (!data || data.length === 0) return { error: 'o banco não gravou (sem permissão)' };
     return { error: null };
   } catch (err: any) {
