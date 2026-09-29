@@ -342,7 +342,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       await fetchData(true);
     } catch (err: any) {
       console.error('Erro ao excluir ordem:', err);
-      showToast('Erro ao excluir a OSM. Tente novamente.', 'error');
+      showToast(err?.message || 'Erro ao excluir a OSM. Tente novamente.', 'error');
     } finally {
       setIsDeleting(false);
     }
@@ -423,7 +423,7 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       await fetchData(true);
     } catch (err: any) {
       console.error('Erro ao salvar ordem:', err);
-      showToast(editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.', 'error');
+      showToast(err?.isDuplicateOp ? err.message : (editingOp ? 'Erro ao atualizar ordem. Tente novamente.' : 'Erro ao registrar ordem. Tente novamente.'), 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -482,9 +482,14 @@ export function PesagemScreen({ embedded = false, hideDashboardTabs = false }: P
       showToast(`Saída manual da OSM ${manualExitOp.number} registrada com sucesso!`, 'success');
       setManualExitOp(null);
       await fetchData(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erro ao registrar saída manual:', err);
-      showToast('Erro ao registrar saída manual.', 'error');
+      showToast(
+        err?.isDuplicateOp
+          ? `A OSM ${manualExitOp.number} já está na Manipulação (fila de um reator). Finalize por lá.`
+          : 'Erro ao registrar saída manual.',
+        'error'
+      );
     } finally {
       setIsManualExitSubmitting(false);
     }

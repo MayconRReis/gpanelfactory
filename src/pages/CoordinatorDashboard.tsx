@@ -650,8 +650,16 @@ WHERE email IN (
   const manipulatedOsmNumbers = React.useMemo(() => {
     const set = new Set<string>();
     manipulacaoOpsForCronograma.forEach(op => {
-      if (op.number) set.add(op.number);
-      if (op.lote) set.add(op.lote);
+      if (op.number) {
+        const num = op.number.trim();
+        set.add(num);
+        set.add(num.toLowerCase());
+      }
+      if (op.lote) {
+        const lot = op.lote.trim();
+        set.add(lot);
+        set.add(lot.toLowerCase());
+      }
     });
     return set;
   }, [manipulacaoOpsForCronograma]);
@@ -665,7 +673,14 @@ WHERE email IN (
     if (op.id && op.id.startsWith('imp-')) return false;
     const isPesagemCompleted = (op.setor === 'Pesagem' || op.tipoDocumento === 'OSM') && op.status === 'completed' && op.setor !== 'Manipulação';
     if (!isPesagemCompleted) return false;
-    if (manipulatedOsmNumbers.has(op.number) || manipulatedOsmNumbers.has(op.lote || '')) return false;
+    const numTrim = (op.number || '').trim();
+    const lotTrim = (op.lote || '').trim();
+    if (
+      (numTrim && (manipulatedOsmNumbers.has(numTrim) || manipulatedOsmNumbers.has(numTrim.toLowerCase()))) ||
+      (lotTrim && (manipulatedOsmNumbers.has(lotTrim) || manipulatedOsmNumbers.has(lotTrim.toLowerCase())))
+    ) {
+      return false;
+    }
     if (op.lineId && op.lineId.startsWith('reator-')) return false;
     return true;
   };
@@ -750,7 +765,7 @@ WHERE email IN (
     setNewOpGranel(op.granel || '');
     setNewOpPriority(op.priority || 'Normal');
     setNewOpLineId(op.lineId || '');
-    setNewOpPackage(String(op.packageAvailability || 1000));
+    setNewOpPackage(String(op.packageAvailability || 0));
     setNewOpIndustria((op.industria as any) || 'Ybera');
     setNewOpScheduledDate(op.scheduledDate || '');
     setNewOpScheduledDays(op.scheduledDays ? String(op.scheduledDays) : '1');
@@ -831,8 +846,11 @@ WHERE email IN (
       setNewOpScheduledDays('1');
       setNewOpScheduledShift('Integral');
       await loadData();
-    } catch {
-      showToast(editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.', 'error');
+    } catch (err: any) {
+      showToast(
+        err?.isDuplicateOp ? err.message : (editingOp ? 'Falha ao atualizar a OP.' : 'Falha ao registrar nova OP.'),
+        'error'
+      );
     } finally {
       setIsSubmittingOp(false);
     }
@@ -855,7 +873,7 @@ WHERE email IN (
       await loadData();
     } catch (err) {
       console.error('Erro ao excluir OP:', err);
-      showToast('Falha ao remover a OP do estoque.', 'error');
+      showToast((err as any)?.message || 'Falha ao remover a OP do estoque.', 'error');
       await loadData();
     } finally {
       setIsDeletingOp(false);

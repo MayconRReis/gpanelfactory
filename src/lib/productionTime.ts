@@ -1,4 +1,4 @@
-import { ProductionEvent, ProductionOrder, ProductionLine } from '../types';
+import { ProductionEvent, ProductionOrder, ProductionLine, WorkSession } from '../types';
 
 export interface TimelineInterval {
   opId?: string;
@@ -29,7 +29,37 @@ export interface LineTimeMetrics {
   disponibilidade: number; // 0 a 100% (Working / (Working + Idle))
   pauseCount: number;
   pauses: { reason: string; durationMs: number; createdAt: string }[];
+  /** Tempo de expediente da linha no período (só quando workSessions é informado). */
+  sessionMs?: number;
+  /** Parte do expediente fora da jornada padrão = hora extra (só com workSessions). */
+  overtimeMs?: number;
+  /** true quando algum trecho do período teve expediente registrado pelo botão. */
+  hasExplicitSession?: boolean;
 }
+
+/**
+ * Jornada padrão da fábrica (hora local). Segunda a quinta 7h–17h, sexta
+ * 7h–16h, fim de semana sem jornada (tudo que for feito é hora extra).
+ * Índice = Date.getDay() (0 = domingo).
+ */
+/**
+ * Pausa de INTERVALO (almoço/café): até 1h por pausa não conta como
+ * ociosidade. O que passar de 1h numa mesma pausa volta a contar.
+ */
+export const BREAK_ALLOWANCE_MS = 60 * 60 * 1000;
+export function isBreakPauseReason(reason?: string | null): boolean {
+  return /^\s*intervalo/i.test(String(reason || ''));
+}
+
+export const WORK_SCHEDULE: Record<number, { start: number; end: number } | null> = {
+  0: null,
+  1: { start: 7, end: 17 },
+  2: { start: 7, end: 17 },
+  3: { start: 7, end: 17 },
+  4: { start: 7, end: 17 },
+  5: { start: 7, end: 16 },
+  6: null,
+};
 
 export interface FactoryTimeMetrics {
   workingMs: number;
@@ -155,6 +185,10 @@ export function calculateProductionTime(
     rangeEnd?: string; // 'YYYY-MM-DD' — fim de um intervalo (ex.: hoje)
     referenceTime?: number; // timestamp atual (ms), default Date.now()
     filterLineId?: string; // se quiser restringir a uma linha
+    /** Expedientes registrados pelo botão Iniciar/Encerrar expediente. Quando
+     * informado, o ocioso da linha passa a ser: tempo de expediente − tempo
+     * trabalhado (fora do expediente nada conta como ocioso). */
+    workSessions?: WorkSession[];
   }
 ): FactoryTimeMetrics {
   const refTime = options?.referenceTime || Date.now();
@@ -236,6 +270,41 @@ export function calculateProductionTime(
     });
   };
 
+  // Trechos de INTERVALO dentro da tolerância (até 1h por pausa), por linha —
+  // não são ociosidade e, com expediente, também saem da base do expediente.
+  const breakRangesByLine = new Map<string, Array<[number, number]>>();
+  const pushPause = (
+    startMs: number,
+    endMs: number,
+    opId: string,
+    lineId: string | undefined,
+    reason: string | undefined,
+    observation: string | undefined,
+    resourceKey: string
+  ) => {
+    if (!isBreakPauseReason(reason)) {
+      pushInterval('IDLE', startMs, endMs, opId, lineId, reason, observation, resourceKey);
+      return;
+    }
+    const allowanceEnd = Math.min(endMs, startMs + BREAK_ALLOWANCE_MS);
+    // parte tolerada: guarda (recortada pelo filtro de data / agora) sem contar como ocioso
+    let a = startMs;
+    let b = Math.min(allowanceEnd, refTime);
+    if (dateBoundaries) {
+      a = Math.max(a, dateBoundaries.startMs);
+      b = Math.min(b, dateBoundaries.endMs);
+    }
+    if (lineId && b > a) {
+      const list = breakRangesByLine.get(lineId) || [];
+      list.push([a, b]);
+      breakRangesByLine.set(lineId, list);
+    }
+    // o que passar de 1h conta como ociosidade normal
+    if (endMs > allowanceEnd) {
+      pushInterval('IDLE', allowanceEnd, endMs, opId, lineId, `${reason} (acima de 1h)`, observation, resourceKey);
+    }
+  };
+
   // Chave de recurso (setor + turno) de uma OP — usada só como agregação
   // auxiliar (byResource), nunca pra decidir o que é ocioso/trabalhado.
   const resourceKeyOf = (op?: ProductionOrder): string =>
@@ -249,7 +318,13 @@ export function calculateProductionTime(
     processedOpIds.add(opId);
 
     const op = opMap.get(opId);
+    // Linha "padrão" da OP — só usada quando o evento não diz a linha.
     const lineId = op?.lineId || opEvents[0]?.lineId;
+    // Linha em que o trecho ATUAL (desde o último evento) aconteceu. Antes
+    // todo o histórico da OP ia pra linha em que ela está AGORA: uma OP que
+    // envasou no Envase 1 e depois foi pro Sleev (ou uma parcial retomada em
+    // outra linha) levava as horas do Envase 1 junto pro Sleev.
+    let segmentLineId: string | undefined = lineId || undefined;
     const resourceKey = resourceKeyOf(op);
 
     let currentState: 'IDLE' | 'WORKING' | 'PAUSED' | 'FINISHED' = 'IDLE';
@@ -260,38 +335,43 @@ export function calculateProductionTime(
     for (const ev of opEvents) {
       const evTime = new Date(ev.createdAt).getTime();
       if (isNaN(evTime)) continue;
+      // Início de trecho (STARTED/RESUMED/PAUSED): a linha vem do próprio evento.
+      const eventLineId = ev.lineId || lineId || undefined;
 
       if (ev.type === 'STARTED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, segmentLineId, undefined, undefined, resourceKey);
         } else if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
+          pushPause(lastChangeTime, evTime, opId, segmentLineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'WORKING';
         lastChangeTime = evTime;
+        segmentLineId = eventLineId;
         lastPauseReason = undefined;
         lastPauseObs = undefined;
       } else if (ev.type === 'PAUSED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, segmentLineId, undefined, undefined, resourceKey);
         }
         currentState = 'PAUSED';
         lastChangeTime = evTime;
+        segmentLineId = eventLineId;
         lastPauseReason = ev.reason;
         lastPauseObs = ev.observation;
       } else if (ev.type === 'RESUMED') {
         if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
+          pushPause(lastChangeTime, evTime, opId, segmentLineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'WORKING';
         lastChangeTime = evTime;
+        segmentLineId = eventLineId;
         lastPauseReason = undefined;
         lastPauseObs = undefined;
       } else if (ev.type === 'FINISHED') {
         if (currentState === 'WORKING' && lastChangeTime !== null) {
-          pushInterval('WORKING', lastChangeTime, evTime, opId, lineId, undefined, undefined, resourceKey);
+          pushInterval('WORKING', lastChangeTime, evTime, opId, segmentLineId, undefined, undefined, resourceKey);
         } else if (currentState === 'PAUSED' && lastChangeTime !== null) {
-          pushInterval('IDLE', lastChangeTime, evTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
+          pushPause(lastChangeTime, evTime, opId, segmentLineId, lastPauseReason, lastPauseObs, resourceKey);
         }
         currentState = 'FINISHED';
         lastChangeTime = null;
@@ -318,21 +398,16 @@ export function calculateProductionTime(
       if (op?.status === 'completed' && op.completedAt) {
         const completedMs = new Date(op.completedAt).getTime();
         if (!isNaN(completedMs) && completedMs > lastChangeTime) {
-          pushInterval(
-            currentState === 'PAUSED' ? 'IDLE' : 'WORKING',
-            lastChangeTime,
-            completedMs,
-            opId,
-            lineId,
-            lastPauseReason,
-            lastPauseObs,
-            resourceKey
-          );
+          if (currentState === 'PAUSED') {
+            pushPause(lastChangeTime, completedMs, opId, segmentLineId, lastPauseReason, lastPauseObs, resourceKey);
+          } else {
+            pushInterval('WORKING', lastChangeTime, completedMs, opId, segmentLineId, undefined, undefined, resourceKey);
+          }
         }
       } else if (op?.status === 'paused') {
-        pushInterval('IDLE', lastChangeTime, refTime, opId, lineId, lastPauseReason, lastPauseObs, resourceKey);
+        pushPause(lastChangeTime, refTime, opId, segmentLineId, lastPauseReason, lastPauseObs, resourceKey);
       } else if (op?.status === 'in_progress') {
-        pushInterval('WORKING', lastChangeTime, refTime, opId, lineId, undefined, undefined, resourceKey);
+        pushInterval('WORKING', lastChangeTime, refTime, opId, segmentLineId, undefined, undefined, resourceKey);
       }
     }
   }
@@ -510,6 +585,160 @@ export function calculateProductionTime(
     }
   }
 
+  // Uma linha só trabalha UMA vez em cada instante. Antes os intervalos de
+  // todas as OPs da linha eram simplesmente somados — se duas OPs ficassem
+  // "em produção" ao mesmo tempo na mesma linha (ex.: uma iniciada por engano
+  // e nunca finalizada/cancelada), as horas dobravam e o dia passava das
+  // horas reais do relógio. Agora o trabalhado da linha é a UNIÃO dos
+  // intervalos trabalhados, e o ocioso só conta onde ela não estava trabalhando.
+  const mergeRanges = (ranges: Array<[number, number]>): Array<[number, number]> => {
+    const sorted = ranges.filter(r => r[1] > r[0]).sort((a, b) => a[0] - b[0]);
+    const out: Array<[number, number]> = [];
+    for (const r of sorted) {
+      const last = out[out.length - 1];
+      if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+      else out.push([r[0], r[1]]);
+    }
+    return out;
+  };
+  const rangesLength = (ranges: Array<[number, number]>) => ranges.reduce((acc, r) => acc + (r[1] - r[0]), 0);
+  const subtractRanges = (base: Array<[number, number]>, cut: Array<[number, number]>) => {
+    const out: Array<[number, number]> = [];
+    for (const [bs, be] of base) {
+      let cursor = bs;
+      for (const [cs, ce] of cut) {
+        if (ce <= cursor || cs >= be) continue;
+        if (cs > cursor) out.push([cursor, Math.min(cs, be)]);
+        cursor = Math.max(cursor, ce);
+        if (cursor >= be) break;
+      }
+      if (cursor < be) out.push([cursor, be]);
+    }
+    return out;
+  };
+  const rangesByLine = new Map<string, { working: Array<[number, number]>; idle: Array<[number, number]> }>();
+  for (const interval of allIntervals) {
+    if (!interval.lineId) continue;
+    const entry = rangesByLine.get(interval.lineId) || { working: [], idle: [] };
+    if (interval.type === 'WORKING') entry.working.push([interval.startMs, interval.endMs]);
+    else if (interval.type === 'IDLE') entry.idle.push([interval.startMs, interval.endMs]);
+    rangesByLine.set(interval.lineId, entry);
+  }
+  const sessionsOpt = options?.workSessions;
+  if (!sessionsOpt) {
+    for (const [lId, entry] of rangesByLine.entries()) {
+      if (!byLine[lId]) continue;
+      const workingUnion = mergeRanges(entry.working);
+      const idleUnion = subtractRanges(mergeRanges(entry.idle), workingUnion);
+      byLine[lId].workingMs = rangesLength(workingUnion);
+      byLine[lId].idleMs = rangesLength(idleUnion);
+    }
+  } else {
+    // ---- Com controle de expediente ----
+    // Cobertura = expedientes registrados (resolvidos) + , nos dias em que a
+    // linha trabalhou SEM expediente registrado (esqueceram de iniciar), o
+    // trecho do primeiro ao último trabalho do dia. Ocioso = cobertura −
+    // trabalhado; hora extra = cobertura fora da jornada padrão.
+    const dayKey = (ms: number) => {
+      const d = new Date(ms);
+      return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    };
+    const clampRange = (r: [number, number]): [number, number] | null => {
+      let a = r[0];
+      let b = Math.min(r[1], refTime);
+      if (dateBoundaries) {
+        a = Math.max(a, dateBoundaries.startMs);
+        b = Math.min(b, dateBoundaries.endMs);
+      }
+      return b > a ? [a, b] : null;
+    };
+    const scheduledRangesFor = (fromMs: number, toMs: number): Array<[number, number]> => {
+      const out: Array<[number, number]> = [];
+      const cursor = new Date(fromMs);
+      cursor.setHours(0, 0, 0, 0);
+      while (cursor.getTime() <= toMs) {
+        const win = WORK_SCHEDULE[cursor.getDay()];
+        if (win) {
+          const y = cursor.getFullYear(), m = cursor.getMonth(), d = cursor.getDate();
+          out.push([new Date(y, m, d, win.start, 0, 0, 0).getTime(), new Date(y, m, d, win.end, 0, 0, 0).getTime()]);
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+      return out;
+    };
+
+    // Trabalhado BRUTO (sem o recorte do filtro de data) por linha — usado pra
+    // descobrir onde termina um expediente que ficou aberto num dia passado.
+    const lineIdsWithData = new Set<string>([
+      ...Array.from(rangesByLine.keys()),
+      ...sessionsOpt.map(ss => ss.lineId),
+    ]);
+
+    for (const lId of lineIdsWithData) {
+      if (!byLine[lId]) {
+        if (!lines.some(l => l.id === lId)) continue; // expediente de linha que não entra neste cálculo
+        const foundLine = lines.find(l => l.id === lId);
+        byLine[lId] = {
+          lineId: lId, lineName: foundLine?.name || lId,
+          workingMs: 0, idleMs: 0, totalMs: 0, workingHours: 0, idleHours: 0, totalHours: 0,
+          workingFormatted: '0h 00m', idleFormatted: '0h 00m', disponibilidade: 0, pauseCount: 0, pauses: [],
+        };
+      }
+      const entry = rangesByLine.get(lId) || { working: [], idle: [] };
+      const workingUnion = mergeRanges(entry.working);
+
+      const explicit: Array<[number, number]> = [];
+      for (const ws of sessionsOpt) {
+        if (ws.lineId !== lId) continue;
+        const startMs = new Date(ws.startedAt).getTime();
+        if (isNaN(startMs)) continue;
+        let endMs = ws.endedAt ? new Date(ws.endedAt).getTime() : NaN;
+        if (isNaN(endMs)) {
+          if (dayKey(startMs) === dayKey(refTime)) {
+            endMs = refTime; // aberto hoje: vai até agora
+          } else {
+            // Esqueceram de encerrar num dia passado: termina no último
+            // trabalho daquele dia (sem trabalho, o expediente não conta).
+            const sameDayWork = workingUnion.filter(r => dayKey(r[0]) === dayKey(startMs) && r[1] > startMs);
+            endMs = sameDayWork.length > 0 ? Math.max(...sameDayWork.map(r => r[1])) : startMs;
+          }
+        }
+        const c = clampRange([startMs, endMs]);
+        if (c) explicit.push(c);
+      }
+      const explicitUnion = mergeRanges(explicit);
+
+      // Dias com trabalho mas sem nenhum expediente registrado
+      const explicitDays = new Set(explicitUnion.map(r => dayKey(r[0])));
+      const implicitByDay = new Map<string, [number, number]>();
+      for (const r of workingUnion) {
+        const k = dayKey(r[0]);
+        if (explicitDays.has(k)) continue;
+        const cur = implicitByDay.get(k);
+        implicitByDay.set(k, cur ? [Math.min(cur[0], r[0]), Math.max(cur[1], r[1])] : [r[0], r[1]]);
+      }
+      // O trabalho fora do expediente registrado também é coberto (conta como trabalhado, nunca como ocioso)
+      const coverage = mergeRanges([...explicitUnion, ...Array.from(implicitByDay.values()), ...workingUnion]);
+
+      // Intervalo tolerado (até 1h) não é ocioso nem conta na base do expediente
+      const breaksUnion = subtractRanges(mergeRanges(breakRangesByLine.get(lId) || []), workingUnion);
+      const effectiveCoverage = subtractRanges(coverage, breaksUnion);
+      const idleUnion = subtractRanges(effectiveCoverage, workingUnion);
+      const coverageMs = rangesLength(effectiveCoverage);
+      let overtimeMs = 0;
+      if (coverage.length > 0) {
+        const scheduled = mergeRanges(scheduledRangesFor(coverage[0][0], coverage[coverage.length - 1][1]));
+        overtimeMs = rangesLength(subtractRanges(effectiveCoverage, scheduled));
+      }
+
+      byLine[lId].workingMs = rangesLength(workingUnion);
+      byLine[lId].idleMs = rangesLength(idleUnion);
+      byLine[lId].sessionMs = coverageMs;
+      byLine[lId].overtimeMs = overtimeMs;
+      byLine[lId].hasExplicitSession = explicitUnion.length > 0;
+    }
+  }
+
   // Finaliza cálculos por linha (horas decimais, formatações e OEE de Disponibilidade)
   for (const lId of Object.keys(byLine)) {
     const item = byLine[lId];
@@ -522,6 +751,25 @@ export function calculateProductionTime(
     item.disponibilidade = item.totalMs > 0
       ? Math.round((item.workingMs / item.totalMs) * 1000) / 10
       : 0;
+  }
+
+  // Com expediente, o total da fábrica passa a ser a soma do que foi apurado
+  // por linha (já sem sobreposição, sem madrugada e sem intervalo tolerado),
+  // mais o que não tem linha (histórico importado, agregado por recurso).
+  if (sessionsOpt) {
+    let w = 0;
+    let i = 0;
+    for (const item of Object.values(byLine)) {
+      w += item.workingMs;
+      i += item.idleMs;
+    }
+    for (const interval of allIntervals) {
+      if (interval.lineId) continue;
+      if (interval.type === 'WORKING') w += interval.durationMs;
+      else i += interval.durationMs;
+    }
+    totalWorkingMs = w;
+    totalIdleMs = i;
   }
 
   const factoryTotalMs = totalWorkingMs + totalIdleMs;

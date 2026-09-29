@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession } from '../types';
 import { calculateProductionTime } from '../lib/productionTime';
 
 /**
@@ -76,7 +76,8 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
  */
 export function calculateOEE(
   ops: ProductionOrder[],
-  events: ProductionEvent[]
+  events: ProductionEvent[],
+  workSessions?: WorkSession[]
 ): {
   disponibilidade: number | null;
   performance: number | null;
@@ -107,7 +108,15 @@ export function calculateOEE(
     const opEvents = events ? events.filter(e => e.opId && opIds.has(e.opId)) : [];
 
     if (opEvents.length > 0) {
-      const timeMetrics = calculateProductionTime(opEvents, ops, []);
+      // Com os expedientes, a Disponibilidade usa a mesma apuração dos cards
+      // (sem madrugada, sem sobreposição, intervalo de até 1h tolerado).
+      const lineIdsInOps = Array.from(new Set(ops.map(o => o.lineId).filter(Boolean))) as string[];
+      const timeMetrics = calculateProductionTime(
+        opEvents,
+        ops,
+        lineIdsInOps.map(id => ({ id, name: id, status: 'idle', currentOpId: null } as ProductionLine)),
+        workSessions ? { workSessions } : undefined
+      );
       if (timeMetrics.totalMs > 0) {
         disponibilidade = Math.max(0, Math.min(1, timeMetrics.workingMs / timeMetrics.totalMs));
       }
@@ -132,9 +141,12 @@ export function calculateOEE(
       }
     }
 
-    // 2. Performance = producedQuantity / plannedQuantity (para OPs concluídas, pausadas ou em progresso)
+    // 2. Performance = producedQuantity / plannedQuantity — só das OPs já
+    // CONCLUÍDAS. Antes entravam também as em andamento/pausadas: uma OP no
+    // meio do envase somava o planejado inteiro com só parte produzida, e a
+    // Performance do dia começava lá embaixo e só subia no fim do turno.
     const activeOrFinishedOps = ops.filter(
-      op => (op.status === 'completed' || op.status === 'in_progress' || op.status === 'paused') && op.plannedQuantity > 0
+      op => op.status === 'completed' && !op.isPartialRecord && op.plannedQuantity > 0
     );
     let performance: number | null = null;
 
@@ -175,6 +187,175 @@ export function calculateOEE(
 }
 
 /**
+ * Converte uma data/timestamp em 'YYYY-MM-DD' no fuso LOCAL (Brasil).
+ * - 'YYYY-MM-DD' puro (scheduledDate) volta como está — `new Date('2026-09-28')`
+ *   seria meia-noite UTC = 21h do dia 27 no Brasil, jogando a OP pro dia anterior.
+ * - Timestamp ISO (completedAt/createdAt, gravados em UTC) é convertido pro dia
+ *   local — antes o dashboard fazia `split('T')[0]`, que pega o dia em UTC:
+ *   toda OP fechada depois das 21h caía no dia seguinte e sumia do "Hoje".
+ */
+export function toLocalDateStr(value?: string | null): string {
+  if (!value) return '';
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw.split('T')[0];
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Data de referência de uma OP pros dashboards: OP concluída conta no dia em
+ * que foi FECHADA (completedAt); sem isso, no dia programado; por último, no
+ * dia em que foi criada. Sempre no fuso local.
+ */
+export function getOpReferenceDateStr(op: ProductionOrder): string {
+  return toLocalDateStr(op.completedAt || op.scheduledDate || op.createdAt);
+}
+
+// ---------------- CONCLUSÕES PARCIAIS ----------------
+// Numa conclusão Parcial (sem Sleev) a OP volta pro estoque com o saldo como
+// novo planejado e produzido ZERADO — a quantidade envasada até ali só fica
+// registrada no evento FINISHED daquela conclusão. Sem as funções abaixo,
+// essa produção sumia de todas as métricas do dia.
+//
+// A marca da parcial é o texto que o próprio finishOP grava na observação
+// ("Envase parcial (...)"), o que também recupera as parciais antigas.
+
+export function isPartialFinishEvent(ev: ProductionEvent): boolean {
+  return ev?.type === 'FINISHED' && /^envase parcial/i.test(String(ev.observation || '').trim());
+}
+
+/**
+ * Transforma cada conclusão parcial num "registro de produção" (uma OP
+ * virtual, status 'completed', com a quantidade daquela parcial e a data/hora
+ * em que ela aconteceu) pra entrar nas SOMAS de produção e nos gráficos.
+ * `isPartialRecord: true` — NÃO conta como OP finalizada, e nunca deve ser
+ * gravado no banco.
+ */
+export function buildPartialProductionRecords(
+  ops: ProductionOrder[],
+  events: ProductionEvent[]
+): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const opById = new Map(ops.map(op => [String(op.id), op]));
+  const records: ProductionOrder[] = [];
+  for (const ev of events) {
+    if (!isPartialFinishEvent(ev)) continue;
+    const qty = Number(ev.quantity || 0);
+    if (!ev.opId || !(qty > 0)) continue;
+    const op = opById.get(String(ev.opId));
+    if (!op) continue; // OP excluída: não inventa produção sem saber setor/produto
+    records.push({
+      ...op,
+      id: `partial-${ev.id}`,
+      status: 'completed',
+      plannedQuantity: qty,
+      producedQuantity: qty,
+      rejectedQuantity: 0,
+      lineId: ev.lineId || op.lineId,
+      leaderId: ev.leaderId || op.leaderId,
+      completedAt: ev.createdAt,
+      createdAt: ev.createdAt,
+      scheduledDate: undefined,
+      finishedShift: undefined,
+      isSleeve: false,
+      isPartialRecord: true,
+    });
+  }
+  return records;
+}
+
+/**
+ * OPs que estão no estoque por causa de uma conclusão parcial: ainda não
+ * finalizadas e cuja ÚLTIMA conclusão registrada foi parcial. Quando a OP é
+ * finalizada de vez, sai da lista sozinha.
+ */
+export function getPartialOpsInStock(
+  ops: ProductionOrder[],
+  events: ProductionEvent[]
+): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const lastFinishedByOp = new Map<string, ProductionEvent>();
+  for (const ev of events) {
+    if (ev?.type !== 'FINISHED' || !ev.opId) continue;
+    const key = String(ev.opId);
+    const prev = lastFinishedByOp.get(key);
+    if (!prev || new Date(ev.createdAt).getTime() > new Date(prev.createdAt).getTime()) {
+      lastFinishedByOp.set(key, ev);
+    }
+  }
+  return ops.filter(op => {
+    if (op.status === 'completed' || op.isPartialRecord) return false;
+    const last = lastFinishedByOp.get(String(op.id));
+    return !!last && isPartialFinishEvent(last);
+  });
+}
+
+/**
+ * Produção REAL por linha e por dia, reconstruída dos eventos de cada OP:
+ * - QUANTITY_REPORTED soma o que foi apontado (é incremento);
+ * - PAUSED/FINISHED trazem o total acumulado da OP naquele momento — a
+ *   diferença pro que já tinha sido apontado entra no dia do evento;
+ * - depois de um FINISHED o acumulado zera (conclusão parcial / Sleev
+ *   recomeçam a contagem).
+ * Cada quantidade entra na linha e no dia (local) do evento que a registrou.
+ * Nada é estimado: dia sem evento = 0.
+ */
+export function computeProductionByLineAndDay(
+  events: ProductionEvent[],
+  ops: ProductionOrder[] = []
+): Record<string, Record<string, number>> {
+  const result: Record<string, Record<string, number>> = {};
+  if (!events?.length) return result;
+  const opById = new Map(ops.map(o => [String(o.id), o]));
+  const byOp = new Map<string, ProductionEvent[]>();
+  for (const ev of events) {
+    if (!ev?.opId || !ev.createdAt) continue;
+    if (ev.type !== 'QUANTITY_REPORTED' && ev.type !== 'PAUSED' && ev.type !== 'FINISHED') continue;
+    const list = byOp.get(String(ev.opId)) || [];
+    list.push(ev);
+    byOp.set(String(ev.opId), list);
+  }
+  const credit = (lineId: string | undefined, iso: string, qty: number) => {
+    if (!lineId || !qty) return;
+    const day = toLocalDateStr(iso);
+    if (!day) return;
+    const lineMap = result[lineId] || (result[lineId] = {});
+    lineMap[day] = (lineMap[day] || 0) + qty;
+  };
+  for (const [opId, list] of byOp.entries()) {
+    list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const op = opById.get(opId);
+    let cumulative = 0;
+    for (const ev of list) {
+      const lineId = ev.lineId || op?.lineId || undefined;
+      const q = ev.quantity !== undefined && ev.quantity !== null && !isNaN(Number(ev.quantity)) ? Number(ev.quantity) : undefined;
+      if (ev.type === 'QUANTITY_REPORTED') {
+        if (q && q > 0) {
+          credit(lineId, ev.createdAt, q);
+          cumulative += q;
+        }
+      } else if (ev.type === 'PAUSED') {
+        // total informado na pausa (pode corrigir o apontado pra cima ou pra baixo)
+        if (q !== undefined && q !== cumulative) {
+          credit(lineId, ev.createdAt, q - cumulative);
+          cumulative = q;
+        }
+      } else if (ev.type === 'FINISHED') {
+        if (q !== undefined && q !== cumulative) {
+          credit(lineId, ev.createdAt, q - cumulative);
+        }
+        cumulative = 0;
+      }
+    }
+  }
+  return result;
+}
+
+/**
  * Agrupa producedQuantity por dia e por setor (para o gráfico de barras diário).
  * Retorna um array de objetos com: { day: number, setor: string, quantity: number }
  * ordenado por dia crescente, filtrado pelo mês e ano fornecidos.
@@ -192,25 +373,16 @@ export function groupProductionByDayAndSetor(
     for (const op of ops) {
       if (!op || (op.producedQuantity == null)) continue;
 
+      // Dia em que a OP foi FECHADA (completedAt) tem prioridade sobre o dia
+      // programado — uma OP programada pra ontem e fechada hoje conta hoje.
       let opDate: Date | null = null;
-      if (op.scheduledDate) {
-        const parts = op.scheduledDate.split('-');
-        if (parts.length === 3) {
-          const y = parseInt(parts[0], 10);
-          const m = parseInt(parts[1], 10);
-          const d = parseInt(parts[2], 10);
-          if (y === year && m === targetMonth1to12) {
-            opDate = new Date(y, m - 1, d);
-          }
-        }
-      }
-
-      if (!opDate && op.createdAt) {
-        const d = new Date(op.createdAt);
-        if (!isNaN(d.getTime())) {
-          if (d.getFullYear() === year && (d.getMonth() + 1) === targetMonth1to12) {
-            opDate = d;
-          }
+      const refParts = getOpReferenceDateStr(op).split('-');
+      if (refParts.length === 3) {
+        const y = parseInt(refParts[0], 10);
+        const m = parseInt(refParts[1], 10);
+        const d = parseInt(refParts[2], 10);
+        if (y === year && m === targetMonth1to12) {
+          opDate = new Date(y, m - 1, d);
         }
       }
 
@@ -307,19 +479,14 @@ export function groupProductionByMonth(
       let opYear: number | null = null;
       let opMonth0: number | null = null;
 
-      if (op.scheduledDate) {
-        const parts = op.scheduledDate.split('-');
-        if (parts.length >= 2) {
-          opYear = parseInt(parts[0], 10);
-          opMonth0 = parseInt(parts[1], 10) - 1;
-        }
-      }
-
-      if ((opYear === null || opMonth0 === null) && op.createdAt) {
-        const d = new Date(op.createdAt);
-        if (!isNaN(d.getTime())) {
-          opYear = d.getFullYear();
-          opMonth0 = d.getMonth();
+      // Mesmo critério do gráfico diário: mês em que a OP foi FECHADA primeiro.
+      const refParts = getOpReferenceDateStr(op).split('-');
+      if (refParts.length >= 2) {
+        const y = parseInt(refParts[0], 10);
+        const m0 = parseInt(refParts[1], 10) - 1;
+        if (!isNaN(y) && !isNaN(m0)) {
+          opYear = y;
+          opMonth0 = m0;
         }
       }
 
@@ -1522,6 +1689,33 @@ export const createLine = async (name: string): Promise<ProductionLine> => {
 // ---------------- PRODUCTION ORDERS (OPS) ----------------
 
 /**
+ * Executa um insert/update que leva `completed_at` e, se a tabela ainda não
+ * tiver essa coluna (sql/add_completed_at.sql ainda não rodado), repete a
+ * gravação SEM ela — pra nunca perder o status/quantidade por causa disso.
+ *
+ * Por que isso importa: o getAllOPs lê de `production_orders`, e antes o
+ * completed_at nunca era gravado lá. Resultado: toda OP fechada voltava do
+ * banco sem data de conclusão, e o dashboard caía no dia PROGRAMADO (ou no dia
+ * de criação) — uma OP programada pra ontem e fechada hoje não aparecia no Hoje.
+ */
+async function runWithCompletedAtFallback(
+  run: (payload: any) => PromiseLike<{ error: any }>,
+  payload: any
+): Promise<{ error: any }> {
+  const res = await run(payload);
+  if (
+    res?.error &&
+    payload &&
+    Object.prototype.hasOwnProperty.call(payload, 'completed_at') &&
+    /completed_at/i.test(String(res.error.message || ''))
+  ) {
+    const { completed_at: _omit, ...rest } = payload;
+    return await run(rest);
+  }
+  return res;
+}
+
+/**
  * Deriva o tipo de documento a partir do setor.
  * Todos os setores agora utilizam a nomenclatura padrão OP (Ordem de Produção).
  */
@@ -1691,7 +1885,7 @@ export const createOP = async (newOpData: {
   producedQuantity?: number;
   status?: 'pending' | 'in_progress' | 'paused' | 'completed';
   leaderId?: string;
-}): Promise<ProductionOrder> => {
+}, options: { reuseExisting?: boolean } = {}): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
 
   if (trainingModeActive) {
@@ -1724,9 +1918,26 @@ export const createOP = async (newOpData: {
     return trainingOp;
   }
 
+  const trimmedNumber = newOpData.number.trim();
+  const targetSetor = newOpData.setor || null;
+  const isSameKey = (o: ProductionOrder) =>
+    (o.number || '').trim().toLowerCase() === trimmedNumber.toLowerCase() &&
+    (o.setor || null) === targetSetor;
+
+  // Já existe uma OP com o mesmo número + setor (regra UNIQUE(number, setor) do banco)?
+  // - Materialização da Manipulação (reuseExisting): reaproveita a linha existente
+  //   SEM sobrescrever produção/status — só acompanha a programação do Cronograma.
+  // - Qualquer outro caso (cadastro manual, Pesagem, saldo de parcial): é outra OP
+  //   de verdade com o mesmo número — avisa em vez de sobrescrever.
+  const existingLocal = inMemoryOps.find(isSameKey);
+  if (existingLocal) {
+    if (options.reuseExisting) return adoptExistingOp(existingLocal.id, newOpData);
+    throw new DuplicateOpError(trimmedNumber, targetSetor);
+  }
+
   const newOp: ProductionOrder = {
     id: `prod-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-    number: newOpData.number.trim(),
+    number: trimmedNumber,
     product: newOpData.product.trim(),
     lote: (newOpData.lote || '').trim(),
     plannedQuantity: Number(newOpData.plannedQuantity) || 0,
@@ -1750,24 +1961,6 @@ export const createOP = async (newOpData: {
     createdAt: new Date().toISOString(),
   };
 
-  // Se o ID constava no blacklist de excluídos, remove-o
-  deletedOpIds.delete(newOp.id);
-  saveDeletedOpIds();
-
-  // 1. Immediately persist locally
-  inMemoryOps = [newOp, ...inMemoryOps];
-  persistOps();
-
-  // 2. Synchronize with Supabase — grava nas duas tabelas (production_orders e ops)
-  // sequencialmente, com log de erro por tabela. NÃO usar Promise.allSettled aqui:
-  // uma falha silenciosa em uma das duas é exatamente a causa da dessincronização
-  // entre elas (ver investigação em ops vs production_orders).
-  //
-  // Payload restrito às colunas que existem confirmadamente em `ops` E em
-  // `production_orders` (confirmado em produção: `production_orders` espelha
-  // exatamente as mesmas colunas de `ops`, sem scheduled_end_date/scheduled_days/
-  // completed_at — ver o erro "Could not find the 'scheduled_days' column of
-  // 'production_orders'"). As DUAS tabelas recebem este mesmo payload restrito.
   const opsPayload: any = {
     id: newOp.id,
     number: newOp.number,
@@ -1792,18 +1985,42 @@ export const createOP = async (newOpData: {
     industria: newOp.industria || null,
     created_at: newOp.createdAt,
   };
+  if (newOp.completedAt) opsPayload.completed_at = newOp.completedAt;
 
+  // 1. production_orders (tabela que o app lê) — grava ANTES de mostrar na tela,
+  // pra não exibir uma OP que o banco recusou.
   try {
-    const resProductionOrders = await supabase.from('production_orders').insert(opsPayload);
+    const resProductionOrders = await runWithCompletedAtFallback(
+      (payload) => supabase.from('production_orders').insert(payload),
+      opsPayload
+    );
     if (resProductionOrders.error) {
+      if (isDuplicateKeyError(resProductionOrders.error)) {
+        // Existe no banco mas não estava na memória (ex.: escondida pela lista
+        // de excluídas depois de uma exclusão que o banco recusou).
+        const existing = await findOpIdByNumberAndSetor(trimmedNumber, targetSetor);
+        if (options.reuseExisting && existing) return adoptExistingOp(existing.id, newOpData, existing.status);
+        throw new DuplicateOpError(trimmedNumber, targetSetor);
+      }
       console.error(`[createOP] Falha ao gravar em production_orders (OP ${newOp.id}):`, resProductionOrders.error.message);
     }
   } catch (err) {
+    if (err instanceof DuplicateOpError) throw err;
     console.error(`[createOP] Erro inesperado ao gravar em production_orders (OP ${newOp.id}):`, err);
   }
 
+  // 2. Memória/cache local
+  deletedOpIds.delete(newOp.id);
+  saveDeletedOpIds();
+  inMemoryOps = [newOp, ...inMemoryOps];
+  persistOps();
+
+  // 3. Espelho em `ops`
   try {
-    const resOps = await supabase.from('ops').insert(opsPayload);
+    const resOps = await runWithCompletedAtFallback(
+      (payload) => supabase.from('ops').insert(payload),
+      opsPayload
+    );
     if (resOps.error) {
       console.error(`[createOP] Falha ao gravar em ops (OP ${newOp.id}):`, resOps.error.message);
     }
@@ -1813,6 +2030,56 @@ export const createOP = async (newOpData: {
 
   return newOp;
 };
+
+/** Já existe uma OP com esse número nesse setor (regra UNIQUE(number, setor)). */
+export class DuplicateOpError extends Error {
+  readonly isDuplicateOp = true;
+  constructor(number: string, setor: string | null) {
+    super(`Já existe uma OP ${number}${setor ? ` no setor ${setor}` : ''}. Nada foi alterado.`);
+    this.name = 'DuplicateOpError';
+  }
+}
+
+function isDuplicateKeyError(error: any): boolean {
+  return error?.code === '23505' || /duplicate key/i.test(String(error?.message || ''));
+}
+
+async function findOpIdByNumberAndSetor(number: string, setor: string | null): Promise<{ id: string; status: string } | null> {
+  try {
+    let query = supabase.from('production_orders').select('id, status').eq('number', number);
+    query = setor ? query.eq('setor', setor) : query.is('setor', null);
+    const { data } = await query.limit(1);
+    return data && data[0]?.id ? { id: String(data[0].id), status: String(data[0].status || '') } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reaproveita uma OP que já existe (mesmo número + setor) em vez de criar outra.
+ * NÃO mexe em status, quantidades, datas de conclusão nem em nada que já
+ * aconteceu — só tira da lista de excluídas deste navegador e acompanha a
+ * programação atual (reator/linha, ordem na fila e dia) se ela ainda não saiu da fila.
+ */
+async function adoptExistingOp(
+  opId: string,
+  data: { lineId: string | null; sequence?: number; scheduledDate?: string },
+  dbStatus?: string
+): Promise<ProductionOrder> {
+  deletedOpIds.delete(opId);
+  saveDeletedOpIds();
+  const local = inMemoryOps.find(o => o.id === opId);
+  const currentStatus = local?.status || dbStatus;
+  const stillQueued = currentStatus === 'pending';
+  if (stillQueued) {
+    const updates: Partial<ProductionOrder> = { lineId: data.lineId };
+    if (data.sequence !== undefined) updates.sequence = data.sequence;
+    if (data.scheduledDate) updates.scheduledDate = data.scheduledDate;
+    await updateOP(opId, updates);
+  }
+  return inMemoryOps.find(o => o.id === opId) || ({ ...(local || {}), id: opId } as ProductionOrder);
+}
+
 
 export const importOPsBatch = async (
   items: Array<{
@@ -1983,10 +2250,13 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   const opsPayload: any = { ...fullPayload };
   delete opsPayload.scheduled_end_date;
   delete opsPayload.scheduled_days;
-  delete opsPayload.completed_at;
+  // completed_at agora vai pras duas tabelas (com fallback se a coluna não existir).
 
   try {
-    const resProductionOrders = await supabase.from('production_orders').update(opsPayload).eq('id', opId);
+    const resProductionOrders = await runWithCompletedAtFallback(
+      (payload) => supabase.from('production_orders').update(payload).eq('id', opId),
+      opsPayload
+    );
     if (resProductionOrders.error) {
       console.error(`[updateOP] Falha ao atualizar production_orders (OP ${opId}):`, resProductionOrders.error.message);
     }
@@ -1995,7 +2265,10 @@ export const updateOP = async (opId: string, updates: Partial<ProductionOrder>) 
   }
 
   try {
-    const resOps = await supabase.from('ops').update(opsPayload).eq('id', opId);
+    const resOps = await runWithCompletedAtFallback(
+      (payload) => supabase.from('ops').update(payload).eq('id', opId),
+      opsPayload
+    );
     if (resOps.error) {
       console.error(`[updateOP] Falha ao atualizar ops (OP ${opId}):`, resOps.error.message);
     }
@@ -2212,23 +2485,35 @@ export const deleteOP = async (opId: string) => {
     return;
   }
 
-  // 1. Marca no blacklist persistente para nunca mais ressurgir em cache ou retorno de API
+  // 1. Exclui PRIMEIRO no banco e confere se de fato saiu. Antes a OP era
+  // escondida neste navegador (lista de excluídas) antes de saber se o banco
+  // aceitou — quando o banco recusava (permissão), a OP continuava lá, sumia
+  // só da tela e depois dava "duplicate key" ao tentar recriá-la.
+  // Obs.: quando a permissão (RLS) barra um DELETE o Supabase NÃO devolve erro,
+  // só apaga 0 linhas — por isso o `.select('id')` pra contar o que saiu.
+  const [resPO, resOps] = await Promise.all([
+    supabase.from('production_orders').delete().eq('id', opId).select('id'),
+    supabase.from('ops').delete().eq('id', opId).select('id'),
+  ]);
+  const removedFromPO = (resPO.data || []).length > 0;
+  if (!removedFromPO) {
+    // Nada apagado: ou a OP não existia em production_orders, ou o banco recusou.
+    const { data: stillThere } = await supabase.from('production_orders').select('id').eq('id', opId).limit(1);
+    if (resPO.error || (stillThere && stillThere.length > 0)) {
+      const reason = resPO.error?.message || 'sem permissão para excluir esta OP';
+      console.error(`[deleteOP] Banco não excluiu a OP ${opId}:`, reason);
+      throw new Error(`O banco não excluiu a OP (${reason}). Ela continua no sistema.`);
+    }
+  }
+  if (resOps.error) {
+    console.warn(`[deleteOP] Falha ao excluir espelho em ops (OP ${opId}):`, resOps.error.message);
+  }
+
+  // 2. Só agora tira da memória e marca como excluída neste navegador
   deletedOpIds.add(opId);
   saveDeletedOpIds();
-
-  // 2. Remove da memória
   inMemoryOps = inMemoryOps.filter(op => op.id !== opId);
   persistOps();
-
-  // 3. Exclui das tabelas do Supabase
-  try {
-    await Promise.allSettled([
-      supabase.from('production_orders').delete().eq('id', opId),
-      supabase.from('ops').delete().eq('id', opId),
-    ]);
-  } catch (err) {
-    console.warn('Remoção de OP no Supabase:', err);
-  }
 };
 
 export const getActiveOP = async (lineId: string): Promise<ProductionOrder | null> => {
@@ -2667,12 +2952,29 @@ export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
       fetchAllEventRows('events'),
     ]);
 
+    // Cada evento AO VIVO é gravado nas duas tabelas (recordEventRemote), cada
+    // uma com o seu próprio id — unir só por id duplicava todo evento do uso
+    // real (2x STARTED, 2x FINISHED...), bagunçando tempo trabalhado/ocioso
+    // do dia. Agora a chave é (OP + tipo + instante): as duas cópias saem do
+    // mesmo createdAt. `events` entra primeiro porque guarda o line_id em texto
+    // ("line-1", "reator-1"), que `production_events` (line_id UUID) descarta.
     const byId = new Map<string, any>();
-    for (const row of prodEventsRes.data || []) {
-      if (row && row.id != null) byId.set(String(row.id), row);
-    }
+    const eventKey = (row: any) => {
+      const t = row?.created_at ? new Date(row.created_at).getTime() : NaN;
+      if (row?.op_id == null || !row?.type || isNaN(t)) return `id:${String(row?.id)}`;
+      return `${String(row.op_id)}|${String(row.type)}|${t}`;
+    };
     for (const row of eventsRes.data || []) {
-      if (row && row.id != null && !byId.has(String(row.id))) byId.set(String(row.id), row);
+      if (row && row.id != null) {
+        const key = eventKey(row);
+        if (!byId.has(key)) byId.set(key, row);
+      }
+    }
+    for (const row of prodEventsRes.data || []) {
+      if (row && row.id != null) {
+        const key = eventKey(row);
+        if (!byId.has(key)) byId.set(key, row);
+      }
     }
 
     const data = byId.size > 0 ? Array.from(byId.values()) : null;
@@ -2710,6 +3012,111 @@ export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
   }
   return inMemoryEvents;
 };
+
+// ---------------- EXPEDIENTE (work_sessions) ----------------
+// Controle de início/fim de expediente por linha. Tabela criada por
+// sql/add_work_sessions.sql. Enquanto a tabela não existir, as funções só
+// registram um aviso e o dashboard continua funcionando sem expediente.
+
+let trainingWorkSessions: WorkSession[] = [];
+
+const mapWorkSessionRow = (r: any): WorkSession => ({
+  id: String(r.id),
+  lineId: String(r.line_id),
+  startedAt: r.started_at,
+  endedAt: r.ended_at || null,
+  startedBy: r.started_by || null,
+  endedBy: r.ended_by || null,
+});
+
+/** Expedientes iniciados nos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getWorkSessions = async (sinceDays = 400): Promise<WorkSession[]> => {
+  if (trainingModeActive) return trainingWorkSessions.map(s => ({ ...s }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('work_sessions')
+        .select('*')
+        .gte('started_at', since)
+        .order('started_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getWorkSessions] Não foi possível ler work_sessions (rodou sql/add_work_sessions.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map(mapWorkSessionRow);
+  } catch (err) {
+    console.warn('[getWorkSessions] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Abre o expediente nas linhas informadas (ignora as que já estão abertas). */
+export const startWorkSession = async (lineIds: string[], userId?: string | null): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    const open = new Set(trainingWorkSessions.filter(s => !s.endedAt).map(s => s.lineId));
+    lineIds.filter(id => !open.has(id)).forEach(lineId => {
+      trainingWorkSessions.push({ id: `sim-ws-${Date.now()}-${lineId}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, endedBy: null });
+    });
+    return { error: null };
+  }
+  try {
+    const { data: openRows, error: readError } = await supabase
+      .from('work_sessions')
+      .select('line_id')
+      .in('line_id', lineIds)
+      .is('ended_at', null);
+    if (readError) return { error: readError.message };
+    const alreadyOpen = new Set((openRows || []).map((r: any) => String(r.line_id)));
+    const toOpen = lineIds.filter(id => !alreadyOpen.has(id));
+    if (toOpen.length === 0) return { error: null };
+    const { error } = await supabase
+      .from('work_sessions')
+      .insert(toOpen.map(line_id => ({ line_id, started_at: nowIso, started_by: userId || null })));
+    return { error: error ? error.message : null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Encerra o expediente aberto nas linhas informadas. */
+export const endWorkSession = async (lineIds: string[], userId?: string | null): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingWorkSessions = trainingWorkSessions.map(s =>
+      !s.endedAt && lineIds.includes(s.lineId) ? { ...s, endedAt: nowIso, endedBy: userId || null } : s
+    );
+    return { error: null };
+  }
+  try {
+    const { error } = await supabase
+      .from('work_sessions')
+      .update({ ended_at: nowIso, ended_by: userId || null })
+      .in('line_id', lineIds)
+      .is('ended_at', null);
+    return { error: error ? error.message : null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Expediente aberto (sem ended_at) de uma linha, se houver. */
+export function getOpenWorkSession(sessions: WorkSession[], lineId: string): WorkSession | null {
+  const open = sessions.filter(s => s.lineId === lineId && !s.endedAt);
+  if (open.length === 0) return null;
+  return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
+}
 
 // ---------------- OP ACTIONS ----------------
 export const startOP = async (opId: string, lineId: string, leaderId: string) => {
@@ -2932,8 +3339,18 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
 // "-R" no número deixa claro, no Estoque/Cronograma, que ela é o resto de
 // outra OP.
 function buildRemainderOpData(sourceOp: ProductionOrder, remainderQty: number) {
+  // Número livre para o saldo: X-R, X-R2, X-R3... (a mesma OP pode ter mais de
+  // uma conclusão parcial, e o banco não aceita dois "X-R" no mesmo setor).
+  const base = String(sourceOp.number || '').trim().replace(/-R\d*$/i, '');
+  const taken = new Set(
+    inMemoryOps
+      .filter(o => (o.setor || null) === (sourceOp.setor || null))
+      .map(o => String(o.number || '').trim().toLowerCase())
+  );
+  let remainderNumber = `${base}-R`;
+  for (let n = 2; taken.has(remainderNumber.toLowerCase()); n++) remainderNumber = `${base}-R${n}`;
   return {
-    number: `${sourceOp.number}-R`,
+    number: remainderNumber,
     product: sourceOp.product,
     lote: sourceOp.lote,
     plannedQuantity: remainderQty,
@@ -2992,7 +3409,9 @@ export const finishOP = async (
       // Parcial + Sleev: o saldo que não foi pro Sleev fica disponível como
       // uma OP nova, comum (sem Sleev), pronta para um novo envase.
       if (effectivePartial && currentOp) {
-        await createOP(buildRemainderOpData(currentOp, remainderQty));
+        await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
+    });
       }
     } else if (effectivePartial && currentOp) {
       // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
@@ -3130,6 +3549,9 @@ export const finishOP = async (
     lineName: currentLine?.name || lineId,
     leaderId,
     type: 'FINISHED',
+    // Quantidade apontada nesta conclusão — é dela que o dashboard tira a
+    // produção de uma conclusão PARCIAL (a OP volta pro estoque zerada).
+    quantity: finalProducedQty,
     observation,
     createdAt: new Date().toISOString(),
   };
@@ -3140,7 +3562,9 @@ export const finishOP = async (
   // (sem Sleev), pronta para um novo envase — feito depois de persistir o
   // registro principal, e via createOP (que já cuida de Supabase sozinha).
   if (sendToSleeve && effectivePartial && currentOp) {
-    await createOP(buildRemainderOpData(currentOp, remainderQty));
+    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
+    });
   }
 
   const opPayload: any = sendToSleeve
@@ -3172,29 +3596,25 @@ export const finishOP = async (
         completed_at: completedAtIso,
       };
 
-  // `production_orders` não tem a coluna `completed_at` (confirmado em produção
-  // — mesma causa do erro "Could not find the 'scheduled_days' column of
-  // 'production_orders'"). Envia o payload restrito para ela e o completo (com
-  // completed_at) só para `ops`.
-  const opPayloadForProductionOrders: any = { ...opPayload };
-  delete opPayloadForProductionOrders.completed_at;
-
+  // completed_at agora é gravado nas DUAS tabelas — antes ia só pra `ops`,
+  // mas o getAllOPs lê de `production_orders`, então a data de fechamento
+  // sumia ao recarregar e o dashboard jogava a OP no dia programado.
+  // runWithCompletedAtFallback repete sem a coluna se ela ainda não existir.
   try {
-    // Tenta production_orders primeiro — se falhar, tenta ops
-    const { error: err1 } = await supabase
-      .from('production_orders')
-      .update(opPayloadForProductionOrders)
-      .eq('id', opId);
+    const { error: err1 } = await runWithCompletedAtFallback(
+      (payload) => supabase.from('production_orders').update(payload).eq('id', opId),
+      opPayload
+    );
 
     if (err1) {
       console.warn('[finishOP] production_orders falhou, tentando ops:', err1.message);
     }
 
     // Sempre tenta ops também (as duas tabelas precisam estar sincronizadas)
-    const { error: err2 } = await supabase
-      .from('ops')
-      .update(opPayload)
-      .eq('id', opId);
+    const { error: err2 } = await runWithCompletedAtFallback(
+      (payload) => supabase.from('ops').update(payload).eq('id', opId),
+      opPayload
+    );
 
     if (err2) {
       console.warn('[finishOP] ops falhou:', err2.message);

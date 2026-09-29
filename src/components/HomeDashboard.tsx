@@ -8,9 +8,10 @@ import {
   FlaskConical,
   Sparkles,
   Filter,
+  Boxes,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE } from '../services/db';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession } from '../types';
+import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -125,27 +126,6 @@ export function formatElapsedTimer(ms: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
-/**
- * Resolve o rótulo/cor do badge de status da Manipulação. Por enquanto só
- * existe o status "Em Produção" (atribuído automaticamente ao iniciar a OP);
- * quando o botão de status manual for adicionado na tela de Manipulação, o
- * valor salvo em `op.manipulacaoStatus` já será exibido aqui automaticamente.
- */
-function getManipulacaoStatusBadge(status?: string): { label: string; className: string } {
-  const label = (status && status.trim()) || 'Em Produção';
-  const key = label.toLowerCase();
-  if (key.includes('laborat')) {
-    return { label, className: 'text-purple-300 bg-purple-950/80 border-purple-800/50' };
-  }
-  if (key.includes('corre')) {
-    return { label, className: 'text-orange-300 bg-orange-950/80 border-orange-800/50' };
-  }
-  if (key.includes('dren')) {
-    return { label, className: 'text-cyan-300 bg-cyan-950/80 border-cyan-800/50' };
-  }
-  return { label, className: 'text-blue-300 bg-blue-950/80 border-blue-800/50' };
-}
-
 export function HomeDashboard({
   lines,
   ops,
@@ -161,8 +141,6 @@ export function HomeDashboard({
   onOpenShareModal,
   isReadOnly = false,
 }: HomeDashboardProps) {
-  // Constante para indicar estimativa visual nas métricas operacionais não auditadas
-  const WORK_HOURS_ARE_ESTIMATED = true;
 
   const currentCalendarYear = new Date().getFullYear();
   const currentCalendarMonth = new Date().getMonth() + 1;
@@ -174,7 +152,8 @@ export function HomeDashboard({
         return found.reduce((acc, g) => acc + (g.goalQuantity || 0), 0);
       }
     }
-    return 100000;
+    // Sem meta cadastrada = 0 (sem meta). Antes caía num valor fixo de 100.000.
+    return 0;
   }, [goals, currentCalendarYear, currentCalendarMonth]);
 
   // Meta mensal: prioriza a meta ÚNICA da fábrica (factory_monthly_goal,
@@ -237,10 +216,16 @@ export function HomeDashboard({
     return null;
   }, [rotations, leaders]);
 
-  // OPs de Manipulação atualmente em produção (para o espelho em tempo real)
-  const manipulacaoActiveOps = useMemo(
-    () => ops.filter(o => o.setor === 'Manipulação' && o.status === 'in_progress'),
-    [ops]
+  // Divide as linhas cadastradas em dois grupos pro espelho em tempo real:
+  // Reatores da Manipulação (reator-1/2/3) de um lado, Envase/Sleeve do outro
+  // — pra não misturar os dois setores num grid só e confundir quem olha.
+  const reactorLines = useMemo(
+    () => lines.filter(l => /reator/i.test(l.id) || /reator/i.test(l.name)),
+    [lines]
+  );
+  const envaseLines = useMemo(
+    () => lines.filter(l => !(/reator/i.test(l.id) || /reator/i.test(l.name))),
+    [lines]
   );
 
   // ---------------- CÁLCULOS DAS 8 MÉTRICAS PRINCIPAIS ----------------
@@ -248,23 +233,33 @@ export function HomeDashboard({
   const currentMonth = now.getMonth();
   const currentYear = now.getFullYear();
 
+  // ---------------- CONCLUSÕES PARCIAIS ----------------
+  // A produção de cada conclusão parcial entra nas SOMAS e gráficos como um
+  // registro virtual (partialRecords), no dia/hora em que foi apontada — mas
+  // NÃO conta como OP finalizada (os contadores de OPs usam só `ops`).
+  const partialRecords = useMemo(() => buildPartialProductionRecords(ops, events), [ops, events]);
+  const productionOps = useMemo(() => (partialRecords.length > 0 ? [...ops, ...partialRecords] : ops), [ops, partialRecords]);
+
+  // OPs parciais que ainda estão no estoque aguardando o resto do envase —
+  // o contador some do dashboard quando não sobra nenhuma.
+  const partialOpsInStock = useMemo(() => getPartialOpsInStock(ops, events), [ops, events]);
+
   // 1. Total Produzidos e Planejados
   const totalProduced = useMemo(() => {
-    return ops.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
-  }, [ops]);
+    return productionOps.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
+  }, [productionOps]);
 
   const totalPlanned = useMemo(() => {
     return ops.reduce((acc, o) => acc + (o.plannedQuantity || 0), 0);
   }, [ops]);
 
   // Volume do Mês Atual
+  // Conta no mês em que a produção aconteceu (fechamento/parcial), não no mês
+  // em que a OP foi criada.
   const opsThisMonth = useMemo(() => {
-    return ops.filter((o) => {
-      if (!o.createdAt) return true;
-      const d = new Date(o.createdAt);
-      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-    });
-  }, [ops, currentMonth, currentYear]);
+    const monthKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`;
+    return productionOps.filter((o) => getOpReferenceDateStr(o).startsWith(monthKey));
+  }, [productionOps, currentMonth, currentYear]);
 
   const monthProducedQuantity = useMemo(() => {
     return opsThisMonth.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
@@ -301,18 +296,18 @@ export function HomeDashboard({
   const totalDelayedOpsCount = delayedOps.length;
 
   // 4. Tempos de Trabalho e Ociosidade (Dia e Total) - Baseados em Eventos Reais (OEE)
-  const todayDateStr = useMemo(() => {
-    const d = new Date();
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
-  }, []);
+  // Recalculado a partir do relógio (nowTick): antes era fixado uma única vez
+  // ao abrir a tela ([] nas dependências), então um dashboard deixado aberto
+  // (TV da fábrica, tablet) continuava mostrando ONTEM como "Hoje" depois da
+  // meia-noite. Como o valor é uma string, os cálculos que dependem dele só
+  // recalculam quando o dia de fato muda.
+  const todayDateStr = toLocalDateStr(new Date(nowTick).toISOString());
 
   const completedOpsTodayCount = useMemo(() => {
     return ops.filter((o) => {
       if (o.status !== 'completed') return false;
-      const opDate = o.completedAt ? o.completedAt.split('T')[0] : (o.scheduledDate || (o.createdAt ? o.createdAt.split('T')[0] : ''));
+      // Dia LOCAL do fechamento (antes era o dia em UTC: OP fechada após as 21h caía amanhã)
+      const opDate = getOpReferenceDateStr(o);
       return opDate === todayDateStr && /^4/.test(String(o.number).trim());
     }).length;
   }, [ops, todayDateStr]);
@@ -320,12 +315,29 @@ export function HomeDashboard({
   // Métricas exatas de Tempo de HOJE (calculadas a partir dos eventos reais gravados no sistema)
   // — usadas pelo espelho de produção em tempo real (Manipulação/linhas), que
   // é sempre "agora", independente do filtro de período do dashboard.
+  // ---------------- EXPEDIENTE (Iniciar / Encerrar expediente) ----------------
+  // Com o expediente, o ocioso de cada linha passa a ser "tempo de expediente
+  // − tempo trabalhado": uma OP pausada no fim do dia não conta mais como
+  // parada a noite inteira. Enquanto a tabela work_sessions não existir, vem
+  // lista vazia e cada dia usa só o trecho entre o 1º e o último trabalho.
+  const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getWorkSessions().then(list => { if (!cancelled) setWorkSessions(list); }).catch(() => {});
+    };
+    load();
+    const timer = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
+
   const todayProductionTime = useMemo(() => {
     return calculateProductionTime(events, ops, lines, {
       targetDate: todayDateStr,
       referenceTime: nowTick,
+      workSessions,
     });
-  }, [events, ops, lines, todayDateStr, nowTick]);
+  }, [events, ops, lines, todayDateStr, nowTick, workSessions]);
 
   // Total de pausas registradas hoje
   const totalTodayPausesCount = useMemo(() => {
@@ -403,8 +415,9 @@ export function HomeDashboard({
       rangeStart: periodDateRange.rangeStart,
       rangeEnd: periodDateRange.rangeEnd,
       referenceTime: nowTick,
+      workSessions,
     });
-  }, [events, ops, lines, periodDateRange, nowTick]);
+  }, [events, ops, lines, periodDateRange, nowTick, workSessions]);
 
   // Duração de um turno de trabalho (8h) — multiplicada pelos dias do
   // período para virar a base do Índice de Ociosidade (% das horas perdidas)
@@ -416,16 +429,22 @@ export function HomeDashboard({
   // (3 linhas trabalhando ao mesmo tempo não significa "24h trabalhadas no
   // dia"), enquanto a média representa o comportamento típico de uma linha.
   const avgLineProductionTime = useMemo(() => {
-    const lineIds = lines.map(l => l.id);
+    // Só as linhas de Envase/Sleeve — os reatores da Manipulação têm outro
+    // ritmo (e o próprio card diz "média entre Envase 1, Envase 2 e Sleeve").
+    const lineIds = envaseLines.map(l => l.id);
 
     let sumWorkingMs = 0;
     let sumIdleMs = 0;
+    let sumSessionMs = 0;
+    let sumOvertimeMs = 0;
     let matchedLines = 0;
     for (const lineId of lineIds) {
       const metrics = periodProductionTime.byLine[lineId];
       if (metrics && (metrics.workingMs > 0 || metrics.idleMs > 0)) {
         sumWorkingMs += metrics.workingMs;
         sumIdleMs += metrics.idleMs;
+        sumSessionMs += metrics.sessionMs || 0;
+        sumOvertimeMs += metrics.overtimeMs || 0;
         matchedLines += 1;
       }
     }
@@ -434,6 +453,8 @@ export function HomeDashboard({
       return {
         avgWorkingMs: sumWorkingMs / matchedLines,
         avgIdleMs: sumIdleMs / matchedLines,
+        avgSessionMs: sumSessionMs / matchedLines,
+        avgOvertimeMs: sumOvertimeMs / matchedLines,
       };
     }
 
@@ -445,22 +466,26 @@ export function HomeDashboard({
     // do total bruto da fábrica — somar Pesagem + Manipulação + Envase como
     // se fosse 1 recurso só inflava o total acima das horas de calendário do
     // próprio período (ex.: "3226h trabalhadas" num mês de 730h).
-    const resourceEntries: Array<{ workingMs: number; idleMs: number }> = Object.values(
-      periodProductionTime.byResource || {}
-    );
-    if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0 };
+    const resourceEntries = Object.values(periodProductionTime.byResource || {}) as { workingMs: number; idleMs: number }[];
+    if (resourceEntries.length === 0) return { avgWorkingMs: 0, avgIdleMs: 0, avgSessionMs: 0, avgOvertimeMs: 0 };
 
-    const totalResourceWorkingMs = resourceEntries.reduce((sum, r) => sum + r.workingMs, 0);
-    const totalResourceIdleMs = resourceEntries.reduce((sum, r) => sum + r.idleMs, 0);
+    const totalResourceWorkingMs = resourceEntries.reduce((sum, r) => sum + (r.workingMs || 0), 0);
+    const totalResourceIdleMs = resourceEntries.reduce((sum, r) => sum + (r.idleMs || 0), 0);
     return {
       avgWorkingMs: totalResourceWorkingMs / resourceEntries.length,
       avgIdleMs: totalResourceIdleMs / resourceEntries.length,
+      avgSessionMs: 0,
+      avgOvertimeMs: 0,
     };
-  }, [lines, periodProductionTime]);
+  }, [envaseLines, periodProductionTime]);
 
   // Índice de Ociosidade: % das horas de turno do período perdidas em paradas (média das 3 linhas), capado em 100%
+  // Base: o EXPEDIENTE real das linhas no período (inclui hora extra). Só cai
+  // pro turno fixo de 8h/dia quando não há expediente calculado (histórico
+  // importado sem linha).
   const idlenessIndexPercent = useMemo(() => {
-    return Math.min(100, Math.round((avgLineProductionTime.avgIdleMs / periodWorkdayMs) * 1000) / 10);
+    const base = avgLineProductionTime.avgSessionMs > 0 ? avgLineProductionTime.avgSessionMs : periodWorkdayMs;
+    return Math.min(100, Math.round((avgLineProductionTime.avgIdleMs / base) * 1000) / 10);
   }, [avgLineProductionTime, periodWorkdayMs]);
 
   // Disponibilidade OEE recalculada sobre os mesmos valores médios (trabalhado vs. ocioso)
@@ -478,13 +503,18 @@ export function HomeDashboard({
 
     const startStr = periodDateRange.rangeStart || todayDateStr;
     const endStr = periodDateRange.rangeEnd || todayDateStr;
+    // Compara sempre no dia LOCAL — `split('T')[0]` pegava o dia em UTC e
+    // jogava tudo que fechava depois das 21h (turno da noite) pro dia seguinte.
     const inRange = (dateStr?: string) => {
       if (!dateStr) return false;
-      const d = dateStr.split('T')[0];
+      const d = toLocalDateStr(dateStr);
       return d >= startStr && d <= endStr;
     };
 
-    const periodOps = ops.filter(op => inRange(op.completedAt || op.scheduledDate || op.createdAt));
+    const periodOps = ops.filter(op => {
+      const d = getOpReferenceDateStr(op);
+      return !!d && d >= startStr && d <= endStr;
+    });
     const periodEvents = events.filter(ev => inRange(ev.createdAt));
     return { periodOps, periodEvents };
   }, [ops, events, dashboardPeriod, periodDateRange, todayDateStr]);
@@ -501,9 +531,19 @@ export function HomeDashboard({
   // Disponibilidade × Performance × Qualidade — cálculo já existente em
   // services/db.ts (calculateOEE), agora exibido no card 6 e nos 3 retângulos
   // de componentes logo abaixo dos cards, recalculado dentro do período do filtro.
+  // OEE das LINHAS DE ENVASE: fica de fora a Pesagem (OSM nasce concluída com
+  // produzido 0 e derrubava a Performance) e a Manipulação (Kg, reatores),
+  // pra não misturar unidades e setores numa conta só.
+  const isEnvaseLineOp = useCallback((op: ProductionOrder) => {
+    if (op.setor === 'Pesagem' || op.setor === 'Manipulação') return false;
+    if (op.tipoDocumento === 'OSM') return false;
+    if (op.lineId && /reator|pesagem|manipula/i.test(op.lineId)) return false;
+    return true;
+  }, []);
+
   const oeeMetrics = useMemo(
-    () => calculateOEE(periodOpsAndEvents.periodOps, periodOpsAndEvents.periodEvents),
-    [periodOpsAndEvents]
+    () => calculateOEE(periodOpsAndEvents.periodOps.filter(isEnvaseLineOp), periodOpsAndEvents.periodEvents, workSessions),
+    [periodOpsAndEvents, isEnvaseLineOp, workSessions]
   );
 
   const oeeDisponibilidadePct = oeeMetrics.disponibilidade !== null
@@ -537,18 +577,14 @@ export function HomeDashboard({
 
     const result: { monthName: string; disponibilidade: number | null; performance: number | null; qualidade: number | null }[] = [];
     for (let m = 0; m <= currentMonth; m++) {
-      const monthOps = ops.filter(op => {
-        const dStr = op.completedAt || op.scheduledDate || op.createdAt;
-        if (!dStr) return false;
-        const d = new Date(dStr);
-        return !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === m;
-      });
+      const monthKey = `${currentYear}-${String(m + 1).padStart(2, '0')}`;
+      const monthOps = ops.filter(op => getOpReferenceDateStr(op).startsWith(monthKey));
       const monthEvents = events.filter(ev => {
         if (!ev.createdAt) return false;
         const d = new Date(ev.createdAt);
         return !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === m;
       });
-      const metrics = calculateOEE(monthOps, monthEvents);
+      const metrics = calculateOEE(monthOps.filter(isEnvaseLineOp), monthEvents, workSessions);
       result.push({
         monthName: MONTH_LABELS_SHORT[m],
         disponibilidade: metrics.disponibilidade !== null ? Math.round(metrics.disponibilidade * 1000) / 10 : null,
@@ -557,7 +593,7 @@ export function HomeDashboard({
       });
     }
     return result;
-  }, [dashboardPeriod, ops, events, currentYear, currentMonth]);
+  }, [dashboardPeriod, ops, events, currentYear, currentMonth, isEnvaseLineOp, workSessions]);
 
   // Métricas de Tempo TOTAIS acumuladas
   const totalProductionTime = useMemo(() => {
@@ -576,7 +612,16 @@ export function HomeDashboard({
     let manipQtd = 0;
     let envaseQtd = 0;
 
-    for (const op of periodOpsAndEvents.periodOps) {
+    // Produção das conclusões parciais do período (só soma quantidade — não é OSM/OP nova)
+    const startStr = periodDateRange.rangeStart || '';
+    const endStr = periodDateRange.rangeEnd || '9999-12-31';
+    const periodPartials = partialRecords.filter(r => {
+      if (dashboardPeriod === 'geral') return true;
+      const d = getOpReferenceDateStr(r);
+      return d >= startStr && d <= endStr;
+    });
+
+    for (const op of [...periodOpsAndEvents.periodOps, ...periodPartials]) {
       const qty = Number(op.producedQuantity || 0);
       const s = op.setor;
       if (s === 'Pesagem') {
@@ -598,7 +643,7 @@ export function HomeDashboard({
       manipulacao: { valor: manipQtd, unidade: 'Kg' },
       envase: { valor: envaseQtd, unidade: 'Un' },
     };
-  }, [periodOpsAndEvents]);
+  }, [periodOpsAndEvents, partialRecords, periodDateRange, dashboardPeriod]);
 
   // 2. Meta Diária do Mês Atual
   const daysInCurrentMonth = useMemo(() => {
@@ -617,16 +662,19 @@ export function HomeDashboard({
 
   // 4. Gráfico Mensal (12 Meses) com Média/Realizado e Meta
   const monthlyChartData = useMemo(() => {
-    const grouped = groupProductionByMonth(ops, currentYear);
-    const avgHistorical = Math.round(activeMonthGoal * 0.85); // Referência de média anterior
+    const grouped = groupProductionByMonth(productionOps, currentYear);
 
-    return grouped.map((item) => {
-      // Prioridade igual à do card de meta mensal atual (linha ~185): meta
-      // ÚNICA da fábrica daquele mês específico primeiro; só cai pro cálculo
-      // legado por linha (monthly_goals) enquanto aquele mês ainda não tiver
-      // meta da fábrica configurada; e só usa o valor do mês atual como
-      // último recurso, pra mês sem nenhuma meta cadastrada.
-      let goalVal = activeMonthGoal;
+    return grouped.map((item, idx) => {
+      // Média Anterior REAL: média do realizado dos meses anteriores do ano
+      // que tiveram produção. Antes era 85% da meta — um número inventado.
+      const previousWithData = grouped.slice(0, idx).filter(g => g.quantity > 0);
+      const mediaAnterior = previousWithData.length > 0
+        ? Math.round(previousWithData.reduce((acc, g) => acc + g.quantity, 0) / previousWithData.length)
+        : null;
+      // Meta ÚNICA da fábrica daquele mês primeiro; senão a meta legada por
+      // linha (monthly_goals) daquele mês. Mês sem meta cadastrada fica SEM
+      // meta (antes repetia a meta do mês atual, que nunca foi a meta dele).
+      let goalVal: number | null = null;
       const gForMonth = goals && goals.length > 0
         ? goals.filter(g => g.year === currentYear && g.month === (item.month + 1))
         : [];
@@ -643,25 +691,25 @@ export function HomeDashboard({
         monthName: item.label,
         month: item.month,
         realizado: item.quantity,
-        mediaAnterior: avgHistorical,
+        mediaAnterior,
         meta: goalVal,
         isCurrent: item.month === currentMonth,
       };
     });
-  }, [ops, goals, factoryMonthlyGoals, currentYear, currentMonth, activeMonthGoal]);
+  }, [productionOps, goals, factoryMonthlyGoals, currentYear, currentMonth]);
 
   // 4b. Gráfico "por hora" (0h–23h) — usado quando o filtro de período é
   // "Dia", no lugar do gráfico de 12 meses (que não faz sentido pro recorte
   // de um único dia).
   const hourlyChartData = useMemo(() => {
-    return groupProductionByHour(ops, todayDateStr);
-  }, [ops, todayDateStr]);
+    return groupProductionByHour(productionOps, todayDateStr);
+  }, [productionOps, todayDateStr]);
 
   // 4c. Gráfico "por dia" do mês selecionado — usado quando o filtro de
   // período é "Mês", no lugar do gráfico de 12 meses (que também não faz
   // sentido pro recorte de um único mês: cada barra já seria só um ponto).
   const dailyChartData = useMemo(() => {
-    const byDaySetor = groupProductionByDayAndSetor(ops, selectedMonth + 1, currentYear);
+    const byDaySetor = groupProductionByDayAndSetor(productionOps, selectedMonth + 1, currentYear);
     const totalsByDay = new Map<number, number>();
     for (const row of byDaySetor) {
       totalsByDay.set(row.day, (totalsByDay.get(row.day) || 0) + row.quantity);
@@ -675,7 +723,224 @@ export function HomeDashboard({
         quantity: totalsByDay.get(day) || 0,
       };
     });
-  }, [ops, selectedMonth, currentYear]);
+  }, [productionOps, selectedMonth, currentYear]);
+
+  // Renderiza o card de "produção em tempo real" de uma linha/reator — usado
+  // tanto pra Envase/Sleeve quanto pra cada reator da Manipulação (mesmo
+  // estilo do envase, conforme pedido). `hideOee` esconde a linha de
+  // Trab/Ocioso/OEE no rodapé do card (usada pros reatores, onde essa métrica
+  // agregada por "linha" ainda não se aplica direito).
+  const renderProductionLineCard = (line: ProductionLine, opts: { hideOee?: boolean } = {}) => {
+    const { hideOee = false } = opts;
+    const lineOps = ops.filter((o) => o.lineId === line.id);
+    const lineMetrics = todayProductionTime.byLine[line.id];
+
+    // OP ativa da linha agora
+    // OP da linha agora: em produção OU pausada. Antes a pausada só aparecia
+    // se a linha ainda guardasse o currentOpId — quando não guardava, o card
+    // dizia "Parada / Nenhuma OP" enquanto o chão de fábrica mostrava a OP pausada.
+    const currentFromLine = line.currentOpId ? ops.find(o => o.id === line.currentOpId && o.status !== 'completed') : undefined;
+    const activeLineOp = currentFromLine
+      || lineOps.find(o => o.status === 'in_progress')
+      || lineOps.find(o => o.status === 'paused')
+      || null;
+    const isPausedNow = activeLineOp?.status === 'paused';
+    // Desde quando está pausada + motivo (último evento PAUSED da OP)
+    const lastPauseEvent = isPausedNow && activeLineOp
+      ? (events || [])
+          .filter(e => e.opId === activeLineOp.id && e.type === 'PAUSED')
+          .reduce<ProductionEvent | null>((latest, e) =>
+            !latest || new Date(e.createdAt).getTime() > new Date(latest.createdAt).getTime() ? e : latest, null)
+      : null;
+    const pausedSinceMs = lastPauseEvent ? new Date(lastPauseEvent.createdAt).getTime() : NaN;
+    // Expediente da linha hoje: aberto / encerrado / não iniciado
+    const openSession = getOpenWorkSession(workSessions, line.id);
+    const lastSessionToday = workSessions
+      .filter(ws => ws.lineId === line.id && toLocalDateStr(ws.startedAt) === todayDateStr)
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0];
+    const hhmm = (iso?: string | null) => iso ? new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+    const sessionLabel = openSession
+      ? `Expediente aberto desde ${hhmm(openSession.startedAt)}${toLocalDateStr(openSession.startedAt) !== todayDateStr ? ' (ontem ou antes — não foi encerrado)' : ''}`
+      : lastSessionToday
+      ? `Expediente encerrado às ${hhmm(lastSessionToday.endedAt)}`
+      : 'Expediente não iniciado';
+    const sessionLabelClass = openSession
+      ? (toLocalDateStr(openSession.startedAt) !== todayDateStr ? 'text-rose-400' : 'text-emerald-400')
+      : lastSessionToday ? 'text-[#a1a1aa]' : 'text-[#52525b]';
+
+    const start = activeLineOp ? getOpStartTime(activeLineOp.id) : null;
+    const produced = activeLineOp?.producedQuantity || 0;
+    const planned = activeLineOp?.plannedQuantity || 0;
+    // Pode passar de 100% quando o rendimento da linha supera a meta prevista da OP
+    const percent = planned > 0 ? Math.round((produced / planned) * 100) : 0;
+    const isSleeve = /sleeve/i.test(line.name);
+    const sleeveRate = isSleeve ? calculateProductionRatePerHour(produced, lineMetrics?.workingMs || 0) : null;
+
+    return (
+      <div
+        key={line.id}
+        onClick={() => !isReadOnly && onNavigateTab && onNavigateTab('cronograma')}
+        className={`bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col justify-between transition-all duration-150 ${
+          !isReadOnly && onNavigateTab
+            ? 'cursor-pointer hover:border-blue-500/50 hover:bg-[#15151c]'
+            : 'cursor-default'
+        }`}
+      >
+        <div>
+          {/* Cabeçalho do Card */}
+          <div className="border-b border-[#1f1f28] pb-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0">
+                {line.name}
+              </h4>
+              <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
+                isPausedNow
+                  ? 'text-amber-300 bg-amber-950/80'
+                  : activeLineOp ? 'text-emerald-400 bg-emerald-950/80' : 'text-[#71717a] bg-[#1a1a22]'
+              }`}>
+                {isPausedNow ? 'Pausada' : activeLineOp ? 'Produzindo' : 'Parada'}
+              </span>
+            </div>
+            <p className={`text-[10px] font-semibold mt-1 truncate ${sessionLabelClass}`} title={sessionLabel}>
+              {sessionLabel}
+            </p>
+          </div>
+
+          {activeLineOp ? (
+            <div className="py-3 space-y-3">
+              <div className="p-2 rounded-lg bg-[#181824] border border-[#262638]">
+                <span className="font-mono font-bold text-blue-400 text-[11px]">OP {activeLineOp.number}</span>
+                <p className="text-[#f4f4f5] font-medium text-xs truncate mt-1" title={activeLineOp.product}>
+                  {activeLineOp.product}
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
+                <span className="font-mono font-black text-white text-sm tabular-nums">
+                  {start ? formatElapsedTimer(nowTick - start.getTime()) : '--:--:--'}
+                </span>
+              </div>
+
+              {/* Há quanto tempo a OP está pausada, e por quê */}
+              {isPausedNow && (
+                <div className="p-2 rounded-lg bg-amber-950/40 border border-amber-800/50 space-y-0.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-amber-300 font-bold">Pausada há</span>
+                    <span className="font-mono font-black text-amber-200 tabular-nums">
+                      {!isNaN(pausedSinceMs) ? formatElapsedTimer(nowTick - pausedSinceMs) : '--:--:--'}
+                    </span>
+                  </div>
+                  {lastPauseEvent && (
+                    <p className="text-[10px] text-amber-200/80 truncate" title={[lastPauseEvent.reason, lastPauseEvent.observation].filter(Boolean).join(' — ')}>
+                      desde {new Date(lastPauseEvent.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                      {lastPauseEvent.reason ? ` • ${lastPauseEvent.reason}` : ''}
+                      {lastPauseEvent.observation ? ` • ${lastPauseEvent.observation}` : ''}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* MOSTRADOR DE QUANTIDADE: DEDICADO DO SLEEV (Apenas produção por hora) VS PADRÃO */}
+              {isSleeve ? (
+                <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-800/40 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase font-black text-purple-300 tracking-wider flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-purple-400" />
+                      Produção por Hora (Sleev)
+                    </span>
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-700/60 uppercase">
+                      Rendimento
+                    </span>
+                  </div>
+                  <div className="flex items-baseline gap-1.5 pt-0.5">
+                    <span className="text-2xl font-black font-mono text-white tracking-tight">
+                      {sleeveRate?.producedPerHour.toLocaleString('pt-BR') || 0}
+                    </span>
+                    <span className="text-xs font-bold font-mono text-purple-300">un/h</span>
+                  </div>
+                  <div className="text-[9.5px] text-[#a1a1aa] font-medium pt-0.5">
+                    Métrica: {produced.toLocaleString('pt-BR')} un ÷ {sleeveRate?.workingHours && sleeveRate.workingHours > 0 ? `${sleeveRate.workingHours.toFixed(1)}h trab.` : 'tempo trab.'}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-[#71717a]">Produzido</span>
+                  <span className="font-bold text-white">{produced.toLocaleString()} un</span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-[11px] text-[#52525b]">
+              Nenhuma OP em produção nesta linha
+            </div>
+          )}
+        </div>
+
+        {/* Rodapé do Card: % da produção da OP ativa + Barra de Progresso + OEE */}
+        <div className="pt-2.5 border-t border-[#1f1f28] space-y-2">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="font-bold text-[#71717a] uppercase tracking-wider truncate">
+              {isSleeve ? 'Rendimento Sleev' : 'Meta da OP'}
+            </span>
+            {isSleeve ? (
+              <span className="text-sm font-black text-purple-400 font-mono">
+                {sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h
+              </span>
+            ) : (
+              <span className={`text-base font-black ${
+                percent > 100 ? 'text-cyan-400' : percent >= 70 ? 'text-emerald-400' : percent >= 35 ? 'text-orange-400' : 'text-rose-500'
+              }`}>
+                {percent}%
+              </span>
+            )}
+          </div>
+
+          <div className="w-full h-1.5 bg-[#1f1f28] rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${
+                isSleeve
+                  ? 'bg-purple-500'
+                  : percent > 100 ? 'bg-cyan-500' : percent >= 70 ? 'bg-emerald-500' : percent >= 35 ? 'bg-orange-500' : 'bg-rose-600'
+              }`}
+              style={{ width: `${activeLineOp ? Math.min(Math.max(percent, 4), 100) : 0}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[10px] text-[#71717a] font-medium pt-0.5">
+            {isSleeve ? (
+              <>
+                <span className="text-purple-300 font-mono font-bold">{sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h</span>
+                <span>{lineMetrics?.workingFormatted || '0h 00m'} trab.</span>
+              </>
+            ) : (
+              <>
+                <span>{produced.toLocaleString()} un</span>
+                <span>{isSleeve ? 'concluído no envase' : 'previsto'} {planned.toLocaleString()} un</span>
+              </>
+            )}
+          </div>
+
+          {/* Linha OEE de Hoje: Tempo Trabalhado vs Ocioso (escondida quando hideOee) */}
+          {!hideOee && (
+            <div className="px-2 py-1.5 rounded-lg bg-[#0e0e14] border border-[#1c1c26] flex items-center justify-between text-[10px] font-mono">
+              <span title="Tempo trabalhado nesta linha hoje">
+                Trab: <strong className="text-purple-300 font-bold">{lineMetrics?.workingFormatted || '0h 00m'}</strong>
+              </span>
+              <span className="text-[#3f3f46]">|</span>
+              <span title="Tempo ocioso / paradas nesta linha hoje">
+                Ocioso: <strong className="text-amber-300 font-bold">{lineMetrics?.idleFormatted || '0h 00m'}</strong>
+              </span>
+              <span className="text-[#3f3f46]">|</span>
+              <span title="Disponibilidade OEE da linha hoje" className="text-emerald-400 font-bold">
+                {lineMetrics?.disponibilidade ?? 0}%
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
@@ -884,6 +1149,15 @@ export function HomeDashboard({
               <span title="Disponibilidade = Tempo Trabalhado / (Tempo Trabalhado + Tempo Ocioso), média das 3 linhas">Disponibilidade OEE</span>
               <span className="font-mono font-bold">{avgLineDisponibilidade}%</span>
             </div>
+            {avgLineProductionTime.avgOvertimeMs >= 60000 && (
+              <div
+                className="text-[10px] text-purple-100/90 font-medium truncate flex items-center justify-between pt-0.5"
+                title="Tempo de expediente fora da jornada padrão (seg–qui 7h–17h, sex 7h–16h), média por linha"
+              >
+                <span>Hora extra (média/linha)</span>
+                <span className="font-mono font-bold">{formatMsToHoursMinutes(avgLineProductionTime.avgOvertimeMs)}</span>
+              </div>
+            )}
           </div>
 
           {/* CARD 5: VERDE ESMERALDA CLARO (OP Finalizadas) */}
@@ -906,6 +1180,17 @@ export function HomeDashboard({
               <span>Concluídas hoje</span>
               <span className="font-mono font-bold">{completedOpsTodayCount} OP(s)</span>
             </div>
+            {/* Contador de OPs parciais no estoque — só aparece quando existe alguma.
+                Não entram no total de finalizadas; somem daqui quando forem finalizadas de vez. */}
+            {partialOpsInStock.length > 0 && (
+              <div
+                className="mt-1.5 text-[10px] font-bold flex items-center justify-between gap-1 px-1.5 py-0.5 rounded bg-amber-400/90 text-amber-950"
+                title={`OPs com conclusão parcial aguardando o restante do envase: ${partialOpsInStock.map(o => o.number).join(', ')}`}
+              >
+                <span className="truncate">Parciais no estoque</span>
+                <span className="font-mono">{partialOpsInStock.length} OP(s)</span>
+              </div>
+            )}
           </div>
 
           {/* CARD 6: OEE (Overall Equipment Effectiveness) — cor muda conforme a faixa */}
@@ -1158,7 +1443,9 @@ export function HomeDashboard({
                     <Tooltip
                       contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
                       formatter={(value: any, name: any) => [
-                        `${Number(value || 0).toLocaleString('pt-BR')} un`,
+                        value === null || value === undefined
+                          ? (name === 'meta' ? 'sem meta cadastrada' : 'sem dados')
+                          : `${Number(value).toLocaleString('pt-BR')} un`,
                         name === 'realizado' ? 'Realizado' : name === 'mediaAnterior' ? 'Média Anterior' : name === 'meta' ? 'Meta do mês' : name
                       ]}
                     />
@@ -1167,7 +1454,7 @@ export function HomeDashboard({
                       {monthlyChartData.map((entry) => (
                         <Cell
                           key={entry.month}
-                          fill={dashboardPeriod === 'mes' && entry.month === selectedMonth ? '#f97316' : '#ef4444'}
+                          fill={entry.isCurrent ? '#f97316' : '#ef4444'}
                           cursor="pointer"
                         />
                       ))}
@@ -1194,7 +1481,8 @@ export function HomeDashboard({
       </div>
 
       {/* ========================================================================= */}
-      {/* 4. PRODUÇÃO EM TEMPO REAL — MANIPULAÇÃO + LINHAS DE ENVASE E SLEEVE */}
+      {/* 4. PRODUÇÃO EM TEMPO REAL — DUAS PARTES SEPARADAS: ENVASE E MANIPULAÇÃO   */}
+      {/* (separadas pra não ficar confuso pra quem não entende o sistema)         */}
       {/* ========================================================================= */}
       <div className="space-y-3 pt-2">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
@@ -1206,253 +1494,51 @@ export function HomeDashboard({
               </span>
             </h3>
             <p className="text-[11px] text-[#71717a]">
-              Espelho do que está sendo produzido agora: Manipulação, Envase 1, Envase 2 e Sleeve
+              Espelho do que está sendo produzido agora, separado por setor
             </p>
           </div>
 
           <div className="text-[11px] text-[#a1a1aa] font-medium">
             <strong className="text-white">{ops.length} OPs no total</strong> •{' '}
             <strong className="text-emerald-400">{monthProducedQuantity.toLocaleString()} un entregues</strong> (todo o volume já apontado no mês) •{' '}
-            meta combinada <strong className="text-white">{monthlyGoal.toLocaleString()} un</strong>
+            {monthlyGoal > 0
+              ? <>meta combinada <strong className="text-white">{monthlyGoal.toLocaleString()} un</strong></>
+              : <span className="text-[#71717a]">sem meta mensal cadastrada</span>}
           </div>
         </div>
 
-        {/* Grid de Cards: Manipulação + cada Linha de Produção (Envase 1, Envase 2, Sleeve) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* ---------------------- PARTE 1: ENVASE (+ SLEEVE) ---------------------- */}
+        <div className="space-y-2">
+          <h4 className="text-[11px] font-black text-blue-300 uppercase tracking-wider flex items-center gap-1.5">
+            <Boxes className="w-3.5 h-3.5 text-blue-400" />
+            Envase
+          </h4>
+          {envaseLines.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {envaseLines.map((line) => renderProductionLineCard(line))}
+            </div>
+          ) : (
+            <div className="py-6 text-center text-[11px] text-[#52525b] bg-[#121217] border border-[#22222b] rounded-2xl">
+              Nenhuma linha de envase cadastrada
+            </div>
+          )}
+        </div>
 
-          {/* Card especial: Manipulação (não é uma "linha", é um setor) */}
-          {(() => {
-            const manipulacaoOp = manipulacaoActiveOps[0] || null;
-            const manipulacaoStart = manipulacaoOp ? getOpStartTime(manipulacaoOp.id) : null;
-            const statusBadge = getManipulacaoStatusBadge(manipulacaoOp?.manipulacaoStatus);
-            const manipMetrics = todayProductionTime.byLine['area-manipulacao'] || todayProductionTime.byLine['manipulacao'];
-
-            return (
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col justify-between">
-                <div>
-                  <div className="border-b border-[#1f1f28] pb-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0 flex items-center gap-1.5">
-                        <FlaskConical className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                        Manipulação
-                      </h4>
-                      <span className="text-[10px] text-[#71717a] font-semibold shrink-0">
-                        {manipulacaoActiveOps.length} em produção
-                      </span>
-                    </div>
-                  </div>
-
-                  {manipulacaoOp ? (
-                    <div className="py-3 space-y-3">
-                      <div className="p-2 rounded-lg bg-[#181824] border border-[#262638]">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-mono font-bold text-cyan-400 text-[11px] shrink-0">OP {manipulacaoOp.number}</span>
-                          <span className={`px-1.5 py-0.5 rounded font-bold uppercase text-[9px] border truncate ${statusBadge.className}`} title={statusBadge.label}>
-                            {statusBadge.label}
-                          </span>
-                        </div>
-                        <p className="text-[#f4f4f5] font-medium text-xs truncate mt-1" title={manipulacaoOp.product}>
-                          {manipulacaoOp.product}
-                        </p>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
-                        <span className="font-mono font-black text-white text-sm tabular-nums">
-                          {manipulacaoStart ? formatElapsedTimer(nowTick - manipulacaoStart.getTime()) : '--:--:--'}
-                        </span>
-                      </div>
-
-                      {manipulacaoActiveOps.length > 1 && (
-                        <p className="text-[10px] text-[#52525b]">
-                          + {manipulacaoActiveOps.length - 1} outra(s) OP(s) em manipulação
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="py-8 text-center text-[11px] text-[#52525b]">
-                      Nenhuma OP em manipulação agora
-                    </div>
-                  )}
-                </div>
-
-                {/* Resumo OEE Hoje da Manipulação */}
-                <div className="pt-2.5 border-t border-[#1f1f28] space-y-1.5">
-                  <div className="px-2 py-1.5 rounded-lg bg-[#0e0e14] border border-[#1c1c26] flex items-center justify-between text-[10px] font-mono">
-                    <span title="Tempo trabalhado na manipulação hoje">
-                      Trab: <strong className="text-purple-300 font-bold">{manipMetrics?.workingFormatted || '0h 00m'}</strong>
-                    </span>
-                    <span className="text-[#3f3f46]">|</span>
-                    <span title="Tempo ocioso na manipulação hoje">
-                      Ocioso: <strong className="text-amber-300 font-bold">{manipMetrics?.idleFormatted || '0h 00m'}</strong>
-                    </span>
-                    <span className="text-[#3f3f46]">|</span>
-                    <span title="Disponibilidade OEE da manipulação hoje" className="text-cyan-400 font-bold">
-                      {manipMetrics?.disponibilidade ?? 0}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Cards por Linha: Envase 1, Envase 2, Sleeve */}
-          {lines.map((line) => {
-            const lineOps = ops.filter((o) => o.lineId === line.id);
-            const lineMetrics = todayProductionTime.byLine[line.id];
-
-            // OP ativa da linha agora
-            const activeLineOp = line.currentOpId
-              ? ops.find(o => o.id === line.currentOpId) || null
-              : lineOps.find(o => o.status === 'in_progress') || null;
-
-            const start = activeLineOp ? getOpStartTime(activeLineOp.id) : null;
-            const produced = activeLineOp?.producedQuantity || 0;
-            const planned = activeLineOp?.plannedQuantity || 0;
-            // Pode passar de 100% quando o rendimento da linha supera a meta prevista da OP
-            const percent = planned > 0 ? Math.round((produced / planned) * 100) : 0;
-            const isSleeve = /sleeve/i.test(line.name);
-            const sleeveRate = isSleeve ? calculateProductionRatePerHour(produced, lineMetrics?.workingMs || 0) : null;
-
-            return (
-              <div
-                key={line.id}
-                onClick={() => !isReadOnly && onNavigateTab && onNavigateTab('cronograma')}
-                className={`bg-[#121217] border border-[#22222b] rounded-2xl p-4 flex flex-col justify-between transition-all duration-150 ${
-                  !isReadOnly && onNavigateTab
-                    ? 'cursor-pointer hover:border-blue-500/50 hover:bg-[#15151c]'
-                    : 'cursor-default'
-                }`}
-              >
-                <div>
-                  {/* Cabeçalho do Card */}
-                  <div className="border-b border-[#1f1f28] pb-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-black text-white uppercase tracking-wider truncate min-w-0">
-                        {line.name}
-                      </h4>
-                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full shrink-0 ${
-                        activeLineOp ? 'text-emerald-400 bg-emerald-950/80' : 'text-[#71717a] bg-[#1a1a22]'
-                      }`}>
-                        {activeLineOp ? 'Produzindo' : 'Parada'}
-                      </span>
-                    </div>
-                  </div>
-
-                  {activeLineOp ? (
-                    <div className="py-3 space-y-3">
-                      <div className="p-2 rounded-lg bg-[#181824] border border-[#262638]">
-                        <span className="font-mono font-bold text-blue-400 text-[11px]">OP {activeLineOp.number}</span>
-                        <p className="text-[#f4f4f5] font-medium text-xs truncate mt-1" title={activeLineOp.product}>
-                          {activeLineOp.product}
-                        </p>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="text-[#71717a] flex items-center gap-1"><Clock className="w-3 h-3" /> Timer</span>
-                        <span className="font-mono font-black text-white text-sm tabular-nums">
-                          {start ? formatElapsedTimer(nowTick - start.getTime()) : '--:--:--'}
-                        </span>
-                      </div>
-
-                      {/* MOSTRADOR DE QUANTIDADE: DEDICADO DO SLEEV (Apenas produção por hora) VS PADRÃO */}
-                      {isSleeve ? (
-                        <div className="p-2.5 rounded-xl bg-purple-950/30 border border-purple-800/40 space-y-1">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] uppercase font-black text-purple-300 tracking-wider flex items-center gap-1">
-                              <Sparkles className="w-3 h-3 text-purple-400" />
-                              Produção por Hora (Sleev)
-                            </span>
-                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-900/80 text-purple-200 border border-purple-700/60 uppercase">
-                              Rendimento
-                            </span>
-                          </div>
-                          <div className="flex items-baseline gap-1.5 pt-0.5">
-                            <span className="text-2xl font-black font-mono text-white tracking-tight">
-                              {sleeveRate?.producedPerHour.toLocaleString('pt-BR') || 0}
-                            </span>
-                            <span className="text-xs font-bold font-mono text-purple-300">un/h</span>
-                          </div>
-                          <div className="text-[9.5px] text-[#a1a1aa] font-medium pt-0.5">
-                            Métrica: {produced.toLocaleString('pt-BR')} un ÷ {sleeveRate?.workingHours && sleeveRate.workingHours > 0 ? `${sleeveRate.workingHours.toFixed(1)}h trab.` : 'tempo trab.'}
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-[#71717a]">Produzido</span>
-                          <span className="font-bold text-white">{produced.toLocaleString()} un</span>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="py-8 text-center text-[11px] text-[#52525b]">
-                      Nenhuma OP em produção nesta linha
-                    </div>
-                  )}
-                </div>
-
-                {/* Rodapé do Card: % da produção da OP ativa + Barra de Progresso + OEE */}
-                <div className="pt-2.5 border-t border-[#1f1f28] space-y-2">
-                  <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-bold text-[#71717a] uppercase tracking-wider truncate">
-                      {isSleeve ? 'Rendimento Sleev' : 'Meta da OP'}
-                    </span>
-                    {isSleeve ? (
-                      <span className="text-sm font-black text-purple-400 font-mono">
-                        {sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h
-                      </span>
-                    ) : (
-                      <span className={`text-base font-black ${
-                        percent > 100 ? 'text-cyan-400' : percent >= 70 ? 'text-emerald-400' : percent >= 35 ? 'text-orange-400' : 'text-rose-500'
-                      }`}>
-                        {percent}%
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="w-full h-1.5 bg-[#1f1f28] rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full transition-all duration-500 ${
-                        isSleeve
-                          ? 'bg-purple-500'
-                          : percent > 100 ? 'bg-cyan-500' : percent >= 70 ? 'bg-emerald-500' : percent >= 35 ? 'bg-orange-500' : 'bg-rose-600'
-                      }`}
-                      style={{ width: `${activeLineOp ? Math.min(Math.max(percent, 4), 100) : 0}%` }}
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between text-[10px] text-[#71717a] font-medium pt-0.5">
-                    {isSleeve ? (
-                      <>
-                        <span className="text-purple-300 font-mono font-bold">{sleeveRate?.producedPerHour.toLocaleString('pt-BR')} un/h</span>
-                        <span>{lineMetrics?.workingFormatted || '0h 00m'} trab.</span>
-                      </>
-                    ) : (
-                      <>
-                        <span>{produced.toLocaleString()} un</span>
-                        <span>{isSleeve ? 'concluído no envase' : 'previsto'} {planned.toLocaleString()} un</span>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Linha OEE de Hoje: Tempo Trabalhado vs Ocioso */}
-                  <div className="px-2 py-1.5 rounded-lg bg-[#0e0e14] border border-[#1c1c26] flex items-center justify-between text-[10px] font-mono">
-                    <span title="Tempo trabalhado nesta linha hoje">
-                      Trab: <strong className="text-purple-300 font-bold">{lineMetrics?.workingFormatted || '0h 00m'}</strong>
-                    </span>
-                    <span className="text-[#3f3f46]">|</span>
-                    <span title="Tempo ocioso / paradas nesta linha hoje">
-                      Ocioso: <strong className="text-amber-300 font-bold">{lineMetrics?.idleFormatted || '0h 00m'}</strong>
-                    </span>
-                    <span className="text-[#3f3f46]">|</span>
-                    <span title="Disponibilidade OEE da linha hoje" className="text-emerald-400 font-bold">
-                      {lineMetrics?.disponibilidade ?? 0}%
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+        {/* ---------------------- PARTE 2: MANIPULAÇÃO (REATORES) ---------------------- */}
+        <div className="space-y-2 pt-1">
+          <h4 className="text-[11px] font-black text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
+            <FlaskConical className="w-3.5 h-3.5 text-cyan-400" />
+            Manipulação
+          </h4>
+          {reactorLines.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {reactorLines.map((line) => renderProductionLineCard(line, { hideOee: true }))}
+            </div>
+          ) : (
+            <div className="py-6 text-center text-[11px] text-[#52525b] bg-[#121217] border border-[#22222b] rounded-2xl">
+              Nenhum reator cadastrado
+            </div>
+          )}
         </div>
       </div>
 

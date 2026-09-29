@@ -30,6 +30,8 @@ import {
   Sparkles,
   Plus,
   XCircle,
+  Sunrise,
+  Sunset,
 } from 'lucide-react';
 import {
   getLines,
@@ -46,15 +48,24 @@ import {
   getPauseReasons,
   updateOP,
   DEFAULT_PAUSE_REASONS,
+  getWorkSessions,
+  startWorkSession,
+  endWorkSession,
+  getOpenWorkSession,
+  getLineDailyGoals,
+  computeProductionByLineAndDay,
+  toLocalDateStr,
+  getOpReferenceDateStr,
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
-import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason } from '../types';
+import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 import { Input } from '../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import {
   ResponsiveContainer,
+  ReferenceLine,
   BarChart,
   Bar,
   AreaChart,
@@ -140,6 +151,12 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const [isCancelFinishConfirmOpen, setIsCancelFinishConfirmOpen] = useState(false);
   const [isLineSelectOpen, setIsLineSelectOpen] = useState(false);
   const [isAssignStockOpen, setIsAssignStockOpen] = useState(false);
+  // Expediente (Iniciar / Encerrar expediente da linha)
+  const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
+  const [lineDailyGoals, setLineDailyGoals] = useState<LineDailyGoal[]>([]);
+  const [isEndShiftOpen, setIsEndShiftOpen] = useState(false);
+  const [isShiftBusy, setIsShiftBusy] = useState(false);
+  const [shiftError, setShiftError] = useState<string | null>(null);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -186,11 +203,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
         setLoading(true);
       }
 
-      const [loadedLines, loadedOps, loadedEvents, loadedReasons] = await Promise.all([
+      const [loadedLines, loadedOps, loadedEvents, loadedReasons, loadedSessions, loadedLineGoals] = await Promise.all([
         getLines(),
         getAllOPs(),
         getRecentEvents(),
         getPauseReasons(),
+        getWorkSessions(3),
+        getLineDailyGoals().catch(() => [] as LineDailyGoal[]),
       ]);
 
       // Uma chamada mais nova já assumiu enquanto esperávamos — descarta esta
@@ -200,8 +219,13 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       setLines(loadedLines);
       setAllOps(loadedOps);
       setRecentEvents(loadedEvents);
+      setWorkSessions(loadedSessions);
+      setLineDailyGoals(loadedLineGoals || []);
       if (loadedReasons && loadedReasons.length > 0) {
-        setPauseReasonsList(loadedReasons);
+        // "Intervalo" precisa sempre existir: é a pausa de almoço/café que
+        // não conta como ociosidade (até 1h por pausa).
+        const hasBreak = loadedReasons.some(r => /^\s*intervalo/i.test(r.name || ''));
+        setPauseReasonsList(hasBreak ? loadedReasons : [{ id: 'intervalo', name: 'Intervalo' }, ...loadedReasons]);
       }
 
       // As OPs agora são atribuídas à LINHA (pelo cronograma de envase), não
@@ -366,8 +390,54 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   // -------------------------------------------------------------
   // HANDLERS OPERACIONAIS DE PRODUÇÃO (INÍCIO, PAUSA, RETOMADA, APONTAMENTO, FIM)
   // -------------------------------------------------------------
+  // ---------------- EXPEDIENTE DA LINHA ----------------
+  // O expediente diz ao dashboard quando a linha estava "valendo": parada
+  // dentro do expediente conta como ociosidade; fora dele, não. A OP pausada
+  // no fim do dia deixa de virar ociosidade a noite inteira.
+  const openShift = useMemo(
+    () => (currentLine ? getOpenWorkSession(workSessions, currentLine.id) : null),
+    [workSessions, currentLine]
+  );
+
+  const handleStartShift = async () => {
+    if (!currentLine || !profile) return;
+    setIsShiftBusy(true);
+    setShiftError(null);
+    const res = await startWorkSession([currentLine.id], profile.uid);
+    if (res.error) setShiftError(`Não foi possível iniciar o expediente: ${res.error}`);
+    setIsShiftBusy(false);
+    await fetchData(true);
+  };
+
+  // Iniciar/retomar uma OP com o expediente fechado abre o expediente
+  // sozinho — assim esquecer de apertar "Iniciar expediente" não perde a manhã.
+  const ensureShiftOpen = async () => {
+    if (!currentLine || !profile || openShift) return;
+    const res = await startWorkSession([currentLine.id], profile.uid);
+    if (res.error) console.warn('[LeaderScreen] Expediente não aberto automaticamente:', res.error);
+  };
+
+  const handleEndShift = async () => {
+    if (!currentLine || !profile) return;
+    setIsShiftBusy(true);
+    setShiftError(null);
+    // OP ainda rodando: pausa com o motivo "Fim de Expediente" antes de encerrar
+    if (activeOp && activeOp.status === 'in_progress') {
+      await pauseOP(activeOp.id, currentLine.id, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
+    }
+    const res = await endWorkSession([currentLine.id], profile.uid);
+    setIsShiftBusy(false);
+    if (res.error) {
+      setShiftError(`Não foi possível encerrar o expediente: ${res.error}`);
+      return;
+    }
+    setIsEndShiftOpen(false);
+    await fetchData(true);
+  };
+
   const handleStart = async () => {
     if (!currentLine || !activeOp || !profile) return;
+    await ensureShiftOpen();
     await startOP(activeOp.id, currentLine.id, profile.uid);
     await fetchData(true);
   };
@@ -385,6 +455,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
 
   const handleResume = async () => {
     if (!currentLine || !activeOp || !profile) return;
+    await ensureShiftOpen();
     await resumeOP(activeOp.id, currentLine.id, profile.uid);
     await fetchData(true);
   };
@@ -448,116 +519,125 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   // -------------------------------------------------------------
   // CÁLCULOS DO DASHBOARD DIÁRIO (HOJE)
   // -------------------------------------------------------------
-  const todayDateStr = useMemo(() => getLocalDateStr(), []);
+  // Dia de hoje acompanhando o relógio da tela (vira sozinho à meia-noite)
+  const todayDateStr = useMemo(
+    () => getLocalDateStr(currentTime),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [currentTime.getFullYear(), currentTime.getMonth(), currentTime.getDate()]
+  );
+
+  // Produção REAL desta linha por dia (a partir dos apontamentos, pausas e
+  // conclusões gravados). Nada é estimado: dia sem registro = 0.
+  const productionByDay = useMemo(() => {
+    if (!currentLine) return {} as Record<string, number>;
+    return computeProductionByLineAndDay(recentEvents, allOps)[currentLine.id] || {};
+  }, [recentEvents, allOps, currentLine]);
+
+  // Meta diária da linha cadastrada em "Metas de Produção" (line_daily_goals).
+  // Sem meta cadastrada = sem meta (não inventamos um número).
+  const lineDailyGoal = useMemo(() => {
+    if (!currentLine) return null;
+    const found = lineDailyGoals.find(g => g.lineId === currentLine.id);
+    return found && found.goalQuantity > 0 ? found.goalQuantity : null;
+  }, [lineDailyGoals, currentLine]);
 
   const dailyMetrics = useMemo(() => {
-    // Apontamentos de hoje na linha
-    const todayEvents = lineEvents.filter(e => e.createdAt && e.createdAt.startsWith(todayDateStr));
-    
-    // Total de peças apontadas hoje
-    const totalReportedToday = todayEvents
-      .filter(e => e.type === 'QUANTITY_REPORTED')
-      .reduce((acc, curr) => acc + (curr.quantity || 0), 0);
+    // Eventos de hoje na linha (dia LOCAL — o createdAt vem em UTC)
+    const todayEvents = lineEvents.filter(e => e.createdAt && toLocalDateStr(e.createdAt) === todayDateStr);
 
-    // Se não houver eventos granulares, somar das OPs em andamento ou finalizadas hoje
-    const fallbackProducedToday = lineOps
-      .filter(o => o.status === 'in_progress' || (o.status === 'completed' && o.createdAt?.startsWith(todayDateStr)))
-      .reduce((acc, curr) => acc + curr.producedQuantity, 0);
+    const producedToday = productionByDay[todayDateStr] || 0;
 
-    const producedToday = totalReportedToday > 0 ? totalReportedToday : fallbackProducedToday;
+    // OPs do dia nesta linha: programadas pra hoje, em andamento/pausadas ou fechadas hoje
+    const isClosedToday = (o: ProductionOrder) => o.status === 'completed' && !!o.completedAt && toLocalDateStr(o.completedAt) === todayDateStr;
+    const opsToday = lineOps.filter(o =>
+      o.scheduledDate === todayDateStr || o.status === 'in_progress' || o.status === 'paused' || isClosedToday(o)
+    );
+    const plannedToday = opsToday.reduce((acc, curr) => acc + (curr.plannedQuantity || 0), 0);
+    const completedTodayCount = lineOps.filter(isClosedToday).length;
 
-    // OPs programadas para hoje
-    const opsToday = lineOps.filter(o => o.scheduledDate === todayDateStr || o.status === 'in_progress');
-    const plannedToday = opsToday.reduce((acc, curr) => acc + curr.plannedQuantity, 0) || 5000;
-    const completedTodayCount = lineOps.filter(o => o.status === 'completed' && o.createdAt?.startsWith(todayDateStr)).length;
-    
-    // Atingimento da meta diária
-    const dailyTarget = plannedToday > 0 ? plannedToday : 5000;
-    const progressPercent = Math.min(Math.round((producedToday / dailyTarget) * 100), 100);
+    // Meta do dia: a meta diária cadastrada da linha; sem ela, o planejado das OPs do dia; sem nenhum dos dois, 0 (sem meta)
+    const dailyTarget = lineDailyGoal ?? plannedToday;
+    const progressPercent = dailyTarget > 0 ? Math.min(Math.round((producedToday / dailyTarget) * 100), 100) : 0;
 
-    // Contagem de pausas hoje
     const pauseEventsToday = todayEvents.filter(e => e.type === 'PAUSED');
 
     return {
       producedToday,
       dailyTarget,
+      targetSource: lineDailyGoal !== null ? 'meta' as const : (plannedToday > 0 ? 'planejado' as const : 'nenhuma' as const),
       progressPercent,
       completedTodayCount,
-      totalOpsToday: opsToday.length || lineOps.length,
+      totalOpsToday: opsToday.length,
       pauseCountToday: pauseEventsToday.length,
       todayEvents,
     };
-  }, [lineEvents, lineOps, todayDateStr]);
+  }, [lineEvents, lineOps, todayDateStr, productionByDay, lineDailyGoal]);
 
   // -------------------------------------------------------------
   // CÁLCULOS DO DASHBOARD MENSAL
   // -------------------------------------------------------------
-  const currentMonthStr = useMemo(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  }, []);
+  const currentMonthStr = todayDateStr.slice(0, 7);
 
   const currentMonthName = useMemo(() => {
-    return new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date());
-  }, []);
+    const [y, m] = currentMonthStr.split('-').map(Number);
+    return new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date(y, m - 1, 1));
+  }, [currentMonthStr]);
 
   const monthlyMetrics = useMemo(() => {
-    // Todas as OPs da linha no mês atual
-    const monthOps = lineOps.filter(o => {
-      const d = o.scheduledDate || o.createdAt || '';
-      return d.startsWith(currentMonthStr);
-    });
+    // OPs da linha que pertencem a este mês (fechadas no mês; abertas pelo dia programado)
+    const monthOps = lineOps.filter(o => getOpReferenceDateStr(o).startsWith(currentMonthStr));
+    const completedMonthOps = monthOps.filter(o => o.status === 'completed');
 
-    const totalProducedMonth = lineOps.reduce((acc, curr) => acc + curr.producedQuantity, 0);
-    const totalPlannedMonth = lineOps.reduce((acc, curr) => acc + curr.plannedQuantity, 0) || 25000;
-    const completedOpsMonth = lineOps.filter(o => o.status === 'completed').length;
-    const efficiencyMonth = totalPlannedMonth > 0 ? Math.min(Math.round((totalProducedMonth / totalPlannedMonth) * 100), 100) : 0;
+    // Produzido no mês = soma real dos dias do mês (inclui parciais e OPs ainda abertas)
+    const totalProducedMonth = Object.entries(productionByDay)
+      .filter(([day]) => day.startsWith(currentMonthStr))
+      .reduce((acc, [, qty]) => acc + Number(qty || 0), 0);
+    const totalPlannedMonth = monthOps.reduce((acc, curr) => acc + (curr.plannedQuantity || 0), 0);
+    const completedOpsMonth = completedMonthOps.length;
 
-    // Gráfico de produção diária acumulada nos dias do mês
-    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-    const currentDay = new Date().getDate();
+    // Aderência ao plano: produzido ÷ planejado das OPs CONCLUÍDAS no mês
+    const plannedCompleted = completedMonthOps.reduce((acc, o) => acc + (o.plannedQuantity || 0), 0);
+    const producedCompleted = completedMonthOps.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
+    const efficiencyMonth = plannedCompleted > 0 ? Math.min(Math.round((producedCompleted / plannedCompleted) * 100), 100) : 0;
 
-    const chartData = [];
-    for (let day = 1; day <= Math.min(currentDay, daysInMonth); day++) {
+    // Qualidade real: (produzido − perdido) ÷ produzido das OPs concluídas no mês
+    const rejectedCompleted = completedMonthOps.reduce((acc, o) => acc + (o.rejectedQuantity || 0), 0);
+    const qualityMonth = producedCompleted > 0
+      ? Math.round(((producedCompleted - rejectedCompleted) / producedCompleted) * 1000) / 10
+      : null;
+
+    // Gráfico de produção diária do mês — só valores registrados
+    const [y, m] = currentMonthStr.split('-').map(Number);
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const lastDay = todayDateStr.startsWith(currentMonthStr) ? Number(todayDateStr.slice(8, 10)) : daysInMonth;
+    const chartData: Array<{ dia: string; produzido: number; meta: number | null }> = [];
+    for (let day = 1; day <= Math.min(lastDay, daysInMonth); day++) {
       const dayStr = `${currentMonthStr}-${String(day).padStart(2, '0')}`;
-      
-      // Eventos desse dia
-      const dayEvents = lineEvents.filter(e => e.createdAt && e.createdAt.startsWith(dayStr));
-      const reportedDay = dayEvents
-        .filter(e => e.type === 'QUANTITY_REPORTED')
-        .reduce((acc, curr) => acc + (curr.quantity || 0), 0);
-
-      // Simulação coerente para histórico do mês caso não haja eventos anteriores
-      let producedVal = reportedDay;
-      if (producedVal === 0 && day <= currentDay) {
-        // Gera valor proporcional consistente baseado no total do mês
-        const baseEstimate = Math.round(totalProducedMonth / Math.max(currentDay, 1));
-        producedVal = day === currentDay ? dailyMetrics.producedToday : Math.max(baseEstimate, 800);
-      }
-
       chartData.push({
         dia: `Dia ${day}`,
-        produzido: producedVal,
-        meta: 2500, // Meta média diária por linha
+        produzido: productionByDay[dayStr] || 0,
+        meta: lineDailyGoal,
       });
     }
 
-    // Distribuição por Produto
+    // Distribuição por Produto (OPs concluídas no mês)
     const productStatsMap = new Map<string, { product: string; produced: number; planned: number }>();
-    lineOps.forEach(op => {
+    completedMonthOps.forEach(op => {
       const existing = productStatsMap.get(op.product) || { product: op.product, produced: 0, planned: 0 };
-      existing.produced += op.producedQuantity;
-      existing.planned += op.plannedQuantity;
+      existing.produced += op.producedQuantity || 0;
+      existing.planned += op.plannedQuantity || 0;
       productStatsMap.set(op.product, existing);
     });
     const topProducts = Array.from(productStatsMap.values()).sort((a, b) => b.produced - a.produced).slice(0, 5);
 
     // Principais Motivos de Parada do Mês
     const reasonCounts: Record<string, number> = {};
-    lineEvents.filter(e => e.type === 'PAUSED' && e.reason).forEach(e => {
-      const r = e.reason || 'Outros';
-      reasonCounts[r] = (reasonCounts[r] || 0) + 1;
-    });
+    lineEvents
+      .filter(e => e.type === 'PAUSED' && e.reason && toLocalDateStr(e.createdAt).startsWith(currentMonthStr))
+      .forEach(e => {
+        const r = e.reason || 'Outros';
+        reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+      });
 
     const topReasons = Object.entries(reasonCounts)
       .map(([reason, count]) => ({ reason, count }))
@@ -567,13 +647,14 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       totalProducedMonth,
       totalPlannedMonth,
       completedOpsMonth,
-      totalOpsMonth: lineOps.length,
+      totalOpsMonth: monthOps.length,
       efficiencyMonth,
+      qualityMonth,
       chartData,
       topProducts,
       topReasons,
     };
-  }, [lineOps, lineEvents, currentMonthStr, dailyMetrics.producedToday]);
+  }, [lineOps, lineEvents, currentMonthStr, todayDateStr, productionByDay, lineDailyGoal]);
 
   // Tempo trabalhado da OP ativa em milissegundos (baseado no histórico cronológico de eventos reais)
   //
@@ -588,13 +669,8 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
   const activeOpWorkingMs = useMemo(() => {
     if (!activeOp) return 0;
     const opEvents = recentEvents.filter(e => e.opId === activeOp.id);
-    if (!opEvents.length) {
-      if (activeOp.status === 'in_progress' && activeOp.startedAt) {
-        const s = new Date(activeOp.startedAt).getTime();
-        return isNaN(s) ? 0 : Math.max(0, Date.now() - s);
-      }
-      return 0;
-    }
+    // Sem eventos da OP não há como saber o tempo trabalhado — mostra 0 em vez de estimar
+    if (!opEvents.length) return 0;
 
     const sorted = [...opEvents].sort(
       (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
@@ -844,15 +920,58 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 </div>
               </div>
 
-              {/* Botão de Trocar Linha */}
-              <button
-                onClick={() => setIsLineSelectOpen(true)}
-                className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-xs font-bold text-[#f4f4f5] flex items-center justify-center gap-2 transition-all"
-              >
-                <Layers className="w-4 h-4 text-blue-400" />
-                <span>Trocar de Linha</span>
-              </button>
+              <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2">
+                {/* Botão de Expediente da linha */}
+                {openShift ? (
+                  <button
+                    onClick={() => { setShiftError(null); setIsEndShiftOpen(true); }}
+                    disabled={isShiftBusy}
+                    title={`Expediente aberto desde ${new Date(openShift.startedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`}
+                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/50 border border-rose-800/50 text-xs font-bold text-rose-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                  >
+                    <Sunset className="w-4 h-4 text-rose-400" />
+                    <span>Encerrar Expediente</span>
+                    <span className="font-mono text-[10px] text-rose-300/80">
+                      (desde {new Date(openShift.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleStartShift}
+                    disabled={isShiftBusy}
+                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                  >
+                    <Sunrise className="w-4 h-4 text-emerald-400" />
+                    <span>{isShiftBusy ? 'Iniciando...' : 'Iniciar Expediente'}</span>
+                  </button>
+                )}
+
+                {/* Botão de Trocar Linha */}
+                <button
+                  onClick={() => setIsLineSelectOpen(true)}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-xs font-bold text-[#f4f4f5] flex items-center justify-center gap-2 transition-all"
+                >
+                  <Layers className="w-4 h-4 text-blue-400" />
+                  <span>Trocar de Linha</span>
+                </button>
+              </div>
             </div>
+
+            {openShift && new Date(openShift.startedAt).toDateString() !== new Date().toDateString() && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-200">
+                  O expediente desta linha foi aberto em {new Date(openShift.startedAt).toLocaleDateString('pt-BR')} e não foi encerrado.
+                  Encerre e inicie um novo expediente para hoje.
+                </p>
+              </div>
+            )}
+            {shiftError && !isEndShiftOpen && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-2xl px-4 py-3">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-rose-200">{shiftError}</p>
+              </div>
+            )}
 
             {/* CARD PRINCIPAL DA ORDEM DE PRODUÇÃO ATIVA */}
             {activeOp ? (
@@ -1307,7 +1426,9 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                     {dailyMetrics.progressPercent}%
                   </span>
                   <span className="text-xs text-[#71717a] font-mono">
-                    / {dailyMetrics.dailyTarget.toLocaleString('pt-BR')} un
+                    {dailyMetrics.targetSource === 'nenhuma'
+                      ? 'sem meta cadastrada'
+                      : `/ ${dailyMetrics.dailyTarget.toLocaleString('pt-BR')} un${dailyMetrics.targetSource === 'planejado' ? ' (planejado do dia)' : ''}`}
                   </span>
                 </div>
                 <div className="w-full h-1.5 bg-[#1a1a24] rounded-full overflow-hidden">
@@ -1350,7 +1471,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   <span className="text-xs text-[#71717a] font-mono">pausas</span>
                 </div>
                 <div className="text-[11px] text-[#a1a1aa] font-medium">
-                  {dailyMetrics.pauseCountToday === 0 ? 'Sem interrupções hoje' : 'Pausas sob controle'}
+                  {dailyMetrics.pauseCountToday === 0 ? 'Sem interrupções hoje' : `${dailyMetrics.pauseCountToday} pausa(s) registrada(s) hoje`}
                 </div>
               </div>
 
@@ -1475,7 +1596,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 </div>
                 <div className="text-[11px] text-blue-400 font-semibold flex items-center gap-1">
                   <ArrowUpRight className="w-3 h-3" />
-                  <span>Meta: {monthlyMetrics.totalPlannedMonth.toLocaleString('pt-BR')} un</span>
+                  <span>Planejado no mês: {monthlyMetrics.totalPlannedMonth.toLocaleString('pt-BR')} un</span>
                 </div>
               </div>
 
@@ -1523,13 +1644,17 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                 </span>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono">
-                    99.4%
+                    {monthlyMetrics.qualityMonth !== null ? `${monthlyMetrics.qualityMonth}%` : '—'}
                   </span>
                   <span className="text-xs text-[#71717a] font-mono">qualidade</span>
                 </div>
                 <div className="text-[11px] text-emerald-400 flex items-center gap-1 font-semibold">
                   <ShieldCheck className="w-3 h-3" />
-                  <span>Conforme padrões</span>
+                  <span>
+                    {monthlyMetrics.qualityMonth !== null
+                      ? '(produzido − perdido) ÷ produzido das OPs concluídas'
+                      : 'Sem OPs concluídas no mês'}
+                  </span>
                 </div>
               </div>
 
@@ -1544,7 +1669,7 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                     Curva Diária de Produção no Mês ({currentMonthName})
                   </h3>
                   <p className="text-[11px] text-[#71717a]">
-                    Volume produzido por dia vs Meta diária planejada
+                    Volume registrado por dia (apontamentos, pausas e conclusões){lineDailyGoal !== null ? ' vs meta diária da linha' : ''}
                   </p>
                 </div>
 
@@ -1553,10 +1678,12 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                     <span className="w-3 h-3 rounded-sm bg-blue-500" />
                     Volume Produzido
                   </span>
-                  <span className="flex items-center gap-1.5 text-slate-400">
-                    <span className="w-3 h-1 bg-slate-500" />
-                    Meta de Referência
-                  </span>
+                  {lineDailyGoal !== null && (
+                    <span className="flex items-center gap-1.5 text-slate-400">
+                      <span className="w-3 h-1 bg-slate-500" />
+                      Meta diária ({lineDailyGoal.toLocaleString('pt-BR')} un)
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -1589,6 +1716,9 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                       formatter={(val: any) => [`${Number(val).toLocaleString('pt-BR')} un`, 'Quantidade']}
                     />
                     <Bar dataKey="produzido" fill="#3b82f6" radius={[6, 6, 0, 0]} />
+                    {lineDailyGoal !== null && (
+                      <ReferenceLine y={lineDailyGoal} stroke="#64748b" strokeDasharray="5 3" />
+                    )}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1793,6 +1923,11 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
                   ))}
                 </SelectContent>
               </Select>
+              {/^\s*intervalo/i.test(pauseReason || '') && (
+                <p className="text-[11px] text-emerald-400 mt-1.5">
+                  Intervalo de até 1h não conta como ociosidade. Se passar de 1h, o excedente conta.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -1848,6 +1983,55 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
       </Dialog>
 
       {/* MODAL: CANCELAR OP INICIADA POR ENGANO */}
+      {/* MODAL: ENCERRAR EXPEDIENTE */}
+      <Dialog open={isEndShiftOpen} onOpenChange={(open) => { setIsEndShiftOpen(open); if (!open) setShiftError(null); }}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-rose-300 flex items-center gap-2">
+              <Sunset className="w-5 h-5" />
+              Encerrar Expediente — {currentLine?.name}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-3 py-3">
+            <p className="text-sm text-[#d4d4d8]">
+              O expediente desta linha começou às{' '}
+              <strong className="text-white">
+                {openShift ? new Date(openShift.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+              </strong>. A partir de agora, o tempo parado não conta mais como ociosidade.
+            </p>
+            {activeOp?.status === 'in_progress' && (
+              <p className="text-xs text-amber-300 bg-amber-950/40 border border-amber-800/40 rounded-lg px-3 py-2">
+                A {docTypeLabel} <strong>{activeOp.number}</strong> ainda está em produção — ela será pausada com o motivo "Fim de Expediente". Faça o apontamento da quantidade antes, se ainda não fez.
+              </p>
+            )}
+            {shiftError && (
+              <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-lg px-3 py-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-rose-300">{shiftError}</p>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => setIsEndShiftOpen(false)}
+              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={handleEndShift}
+              disabled={isShiftBusy}
+              className="bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              {isShiftBusy ? 'Encerrando...' : 'Encerrar Expediente'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={isCancelOpen} onOpenChange={(open) => { setIsCancelOpen(open); if (!open) setCancelError(null); }}>
         <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
           <DialogHeader>

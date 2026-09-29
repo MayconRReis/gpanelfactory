@@ -58,9 +58,11 @@ interface ManipulacaoGoals {
   weeklyKg: number;
 }
 
+// Sem meta até alguém cadastrar (antes vinha 10.000 Kg/dia e 50.000 Kg/semana
+// pré-preenchidos, como se fossem metas reais da fábrica).
 const DEFAULT_GOALS: ManipulacaoGoals = {
-  dailyKg: 10000,
-  weeklyKg: 50000,
+  dailyKg: 0,
+  weeklyKg: 0,
 };
 
 // Retorna string YYYY-MM-DD
@@ -73,16 +75,23 @@ function formatDateToIso(d: Date): string {
 
 // Helper para obter a data relevante da OP de manipulação
 function getOpDate(op: ProductionOrder): string {
+  // Dia LOCAL — completedAt/createdAt vêm em UTC (antes, OP fechada após as 21h caía no dia seguinte)
   if (op.completedAt) {
-    return op.completedAt.split('T')[0];
+    return isoToLocalDate(op.completedAt);
   }
   if (op.scheduledDate && op.scheduledDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
     return op.scheduledDate;
   }
   if (op.createdAt) {
-    return op.createdAt.split('T')[0];
+    return isoToLocalDate(op.createdAt);
   }
   return formatDateToIso(new Date());
+}
+
+function isoToLocalDate(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value.split('T')[0] : formatDateToIso(d);
 }
 
 // Normaliza o turno da OP ('1º Turno (Manhã)' ou '2º Turno (Tarde)')
@@ -288,7 +297,7 @@ export function ManipulacaoDashboard({
     let inProgressCount = 0;
 
     opsDoDia.forEach(op => {
-      const kg = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+      const kg = Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */;
       const shift = getNormalizedShift(op);
 
       if (op.status === 'completed') {
@@ -308,7 +317,7 @@ export function ManipulacaoDashboard({
     const prevDateIso = formatDateToIso(prevDateObj);
 
     const opsDiaAnterior = manipulacaoOps.filter(op => getOpDate(op) === prevDateIso && op.status === 'completed');
-    const totalKgDiaAnterior = opsDiaAnterior.reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
+    const totalKgDiaAnterior = opsDiaAnterior.reduce((acc, op) => acc + (Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */), 0);
 
     let variacaoOntem = 0;
     if (totalKgDiaAnterior > 0) {
@@ -340,7 +349,7 @@ export function ManipulacaoDashboard({
       let total = 0;
 
       opsDay.forEach(op => {
-        const kg = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+        const kg = Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */;
         const shift = getNormalizedShift(op);
         total += kg;
         if (shift === 'Manhã') manha += kg;
@@ -376,7 +385,7 @@ export function ManipulacaoDashboard({
     let totalKgSemanaAnterior = 0;
     const prevWeekDaysData = prevWeekInfo.days.map(d => {
       const opsDay = manipulacaoOps.filter(op => getOpDate(op) === d.dateStr && op.status === 'completed');
-      const total = opsDay.reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
+      const total = opsDay.reduce((acc, op) => acc + (Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */), 0);
       totalKgSemanaAnterior += total;
       return {
         dayName: d.dayName,
@@ -427,7 +436,7 @@ export function ManipulacaoDashboard({
       .filter(op => op.status === 'completed')
       .forEach(op => {
         const name = (op.product || op.granel || 'Granel Não Especificado').trim();
-        const kg = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+        const kg = Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */;
         const curr = map.get(name) || { name, totalKg: 0, osmCount: 0 };
         curr.totalKg += kg;
         curr.osmCount++;
@@ -756,7 +765,7 @@ export function ManipulacaoDashboard({
           </div>
 
           <div className="mt-3 pt-3 border-t border-[#222228] flex items-center justify-between text-xs">
-            <span className="text-[#71717a]">Meta: {goals.dailyKg.toLocaleString('pt-BR')} Kg</span>
+            <span className="text-[#71717a]">{goals.dailyKg > 0 ? `Meta: ${goals.dailyKg.toLocaleString('pt-BR')} Kg` : 'Sem meta cadastrada'}</span>
             {dailyData.variacaoOntem !== 0 && (
               <span className={`flex items-center font-bold font-mono ${dailyData.variacaoOntem > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {dailyData.variacaoOntem > 0 ? (
@@ -798,7 +807,7 @@ export function ManipulacaoDashboard({
           </div>
 
           <div className="mt-3 pt-3 border-t border-[#222228] flex items-center justify-between text-xs">
-            <span className="text-[#71717a]">Meta: {goals.weeklyKg.toLocaleString('pt-BR')} Kg</span>
+            <span className="text-[#71717a]">{goals.weeklyKg > 0 ? `Meta: ${goals.weeklyKg.toLocaleString('pt-BR')} Kg` : 'Sem meta cadastrada'}</span>
             {weeklyData.variacaoSemanaAnterior !== 0 && (
               <span className={`flex items-center font-bold font-mono ${weeklyData.variacaoSemanaAnterior > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {weeklyData.variacaoSemanaAnterior > 0 ? (
@@ -921,7 +930,7 @@ export function ManipulacaoDashboard({
                 <span>Produção Diária da Semana (Kg)</span>
               </h3>
               <p className="text-xs text-[#a1a1aa] mt-0.5">
-                Volume manipulado por turno de Segunda a Domingo · Meta de {goals.dailyKg.toLocaleString('pt-BR')} Kg/dia
+                Volume manipulado por turno de Segunda a Domingo{goals.dailyKg > 0 ? ` · Meta de ${goals.dailyKg.toLocaleString('pt-BR')} Kg/dia` : ''}
               </p>
             </div>
 
@@ -1017,12 +1026,14 @@ export function ManipulacaoDashboard({
                     return null;
                   }}
                 />
-                <ReferenceLine
-                  y={goals.dailyKg}
-                  stroke="#10b981"
-                  strokeDasharray="4 4"
-                  strokeWidth={1.5}
-                />
+                {goals.dailyKg > 0 && (
+                  <ReferenceLine
+                    y={goals.dailyKg}
+                    stroke="#10b981"
+                    strokeDasharray="4 4"
+                    strokeWidth={1.5}
+                  />
+                )}
                 <Bar
                   dataKey="manhaKg"
                   name="1º Turno (Manhã)"
@@ -1403,7 +1414,7 @@ export function ManipulacaoDashboard({
                   required
                 />
                 <span className="text-[10px] text-[#71717a] mt-1 block">
-                  Meta padrão sugerida: 10.000 Kg por dia
+                  Defina a meta diária de Kg da Manipulação
                 </span>
               </div>
 

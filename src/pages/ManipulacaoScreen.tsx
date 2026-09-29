@@ -21,7 +21,9 @@ import {
   Sparkles,
   History,
   BarChart3,
-  XCircle
+  XCircle,
+  Sunrise,
+  Sunset,
 } from 'lucide-react';
 import {
   getAllOPs,
@@ -32,10 +34,13 @@ import {
   finishOP,
   deleteOP,
   getLines,
-  getPauseReasons,
-  DEFAULT_PAUSE_REASONS,
+  getWorkSessions,
+  startWorkSession,
+  endWorkSession,
+  getOpenWorkSession,
+  getRecentEvents,
 } from '../services/db';
-import { ProductionOrder, ProductionLine, PauseReason } from '../types';
+import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
 
@@ -57,12 +62,28 @@ const DEFAULT_REACTOR_LINES: ProductionLine[] = [
   { id: 'reator-3', name: 'Reator 3', status: 'idle', currentOpId: null },
 ];
 
+// Motivos de pausa específicos da Manipulação — lista própria, separada da
+// tabela `pause_reasons` usada pelo Envase (LeaderScreen), já que os motivos
+// de parada de um reator são diferentes dos de uma linha de envase.
+// 'YYYY-MM-DD' de hoje no fuso local (toISOString daria o dia em UTC).
+function todayLocalStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const MANIPULACAO_PAUSE_REASONS: PauseReason[] = [
+  { id: 'mp-1', name: 'Aguardando Laboratório' },
+  { id: 'mp-2', name: 'Manutenção' },
+  { id: 'mp-3', name: 'Esquentando Reator' },
+  // Almoço/café: até 1h por pausa não conta como ociosidade
+  { id: 'mp-4', name: 'Intervalo' },
+];
+
 export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false }: ManipulacaoScreenProps = {}) {
   const { profile, signOut } = useAuthStore();
 
   const [ops, setOps] = useState<ProductionOrder[]>([]);
   const [lines, setLines] = useState<ProductionLine[]>(DEFAULT_REACTOR_LINES);
-  const [pauseReasonsList, setPauseReasonsList] = useState<PauseReason[]>(DEFAULT_PAUSE_REASONS);
   const [loading, setLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -98,6 +119,12 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
 
   // Toast
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  // Expediente dos reatores (work_sessions)
+  const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
+  // Eventos (pra mostrar o horário REAL de início de cada manipulação)
+  const [events, setEvents] = useState<ProductionEvent[]>([]);
+  const [isEndShiftOpen, setIsEndShiftOpen] = useState(false);
+  const [isShiftBusy, setIsShiftBusy] = useState(false);
 
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
@@ -134,12 +161,14 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
         setLoading(true);
       }
 
-      const [allOps, allLines] = await Promise.all([getAllOPs(), getLines()]);
+      const [allOps, allLines, allSessions, allEvents] = await Promise.all([getAllOPs(), getLines(), getWorkSessions(3), getRecentEvents()]);
 
       // Uma chamada mais nova já assumiu — descarta esta resposta desatualizada.
       if (requestId !== fetchRequestIdRef.current) return;
 
       setOps(allOps);
+      setWorkSessions(allSessions);
+      setEvents(allEvents);
       const reactorLinesFromDb = allLines.filter(l => l.id.startsWith('reator-'));
       if (reactorLinesFromDb.length > 0) setLines(reactorLinesFromDb);
     } catch (err) {
@@ -152,13 +181,6 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       }
     }
   }, [profile]);
-
-  // Motivos de pausa (mesma tabela/fallback usados no Envase).
-  useEffect(() => {
-    getPauseReasons()
-      .then(list => { if (list && list.length > 0) setPauseReasonsList(list); })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     fetchDataRef.current = fetchData;
@@ -208,8 +230,16 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   const manipulatedOsmNumbers = useMemo(() => {
     const set = new Set<string>();
     manipulacaoOps.forEach(op => {
-      if (op.number) set.add(op.number);
-      if (op.lote) set.add(op.lote);
+      if (op.number) {
+        const num = op.number.trim();
+        set.add(num);
+        set.add(num.toLowerCase());
+      }
+      if (op.lote) {
+        const lot = op.lote.trim();
+        set.add(lot);
+        set.add(lot.toLowerCase());
+      }
     });
     return set;
   }, [manipulacaoOps]);
@@ -226,12 +256,23 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   // fila ficando disponível sozinho assim que o atual é finalizado.
   // --------------------------------------------------------------------
   const materializationCandidates = useMemo(() => {
+    const seen = new Set<string>();
     return ops.filter(op => {
       if (op.id && op.id.startsWith('imp-')) return false;
       if (!op.lineId || !reactorLines.some(r => r.id === op.lineId)) return false;
       const isPesagemCompleted = (op.setor === 'Pesagem' || (!op.setor && op.tipoDocumento === 'OSM')) && op.status === 'completed';
       if (!isPesagemCompleted) return false;
-      if (manipulatedOsmNumbers.has(op.number) || manipulatedOsmNumbers.has(op.lote || '')) return false;
+      const numTrim = (op.number || '').trim();
+      const lotTrim = (op.lote || '').trim();
+      if (
+        (numTrim && (manipulatedOsmNumbers.has(numTrim) || manipulatedOsmNumbers.has(numTrim.toLowerCase()))) ||
+        (lotTrim && (manipulatedOsmNumbers.has(lotTrim) || manipulatedOsmNumbers.has(lotTrim.toLowerCase())))
+      ) {
+        return false;
+      }
+      const dedupKey = numTrim || lotTrim || op.id;
+      if (seen.has(dedupKey)) return false;
+      seen.add(dedupKey);
       return true;
     });
   }, [ops, reactorLines, manipulatedOsmNumbers]);
@@ -243,10 +284,17 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
 
   useEffect(() => {
     if (materializationCandidates.length === 0) return;
-    const toCreate = materializationCandidates.filter(op => !materializingRef.current.has(op.id));
+    const toCreate = materializationCandidates.filter(op => {
+      const numTrim = (op.number || '').trim();
+      return !materializingRef.current.has(op.id) && (!numTrim || !materializingRef.current.has(numTrim));
+    });
     if (toCreate.length === 0) return;
 
-    toCreate.forEach(op => materializingRef.current.add(op.id));
+    toCreate.forEach(op => {
+      materializingRef.current.add(op.id);
+      const numTrim = (op.number || '').trim();
+      if (numTrim) materializingRef.current.add(numTrim);
+    });
 
     (async () => {
       let anyCreated = false;
@@ -271,15 +319,13 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
             // Mesma ordem que o Coordenador já definiu ao organizar a fila
             // do reator no Cronograma (arrastar / setas ▲▼).
             sequence: pesagemOp.sequence || 0,
-            scheduledDate: pesagemOp.scheduledDate || new Date().toISOString().split('T')[0],
+            scheduledDate: pesagemOp.scheduledDate || todayLocalStr(),
             // Propaga a indústria da OSM de origem (Ybera/Carvalho/Macpaul).
             industria: pesagemOp.industria,
-          });
+          }, { reuseExisting: true });
           anyCreated = true;
         } catch (err) {
           console.error('Erro ao organizar fila de manipulação para a OSM', pesagemOp.number, err);
-        } finally {
-          materializingRef.current.delete(pesagemOp.id);
         }
       }
       if (anyCreated) await fetchDataRef.current?.(true);
@@ -323,15 +369,24 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   }, [manipulacaoOps]);
 
   // Data de hoje e total de Kg produzidos hoje na Manipulação
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  // Dia LOCAL, acompanhando o relógio da tela (antes era UTC e fixado ao abrir:
+  // depois das 21h o "hoje" já virava amanhã, e não virava de novo à meia-noite)
+  const todayStr = useMemo(() => {
+    const d = currentTime;
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }, [currentTime.getFullYear(), currentTime.getMonth(), currentTime.getDate()]);
   const totalKgHoje = useMemo(() => {
     return manipulacaoOps
       .filter(op => {
         if (op.status !== 'completed') return false;
-        const opDate = op.completedAt ? op.completedAt.split('T')[0] : (op.scheduledDate || (op.createdAt ? op.createdAt.split('T')[0] : ''));
+        const toLocal = (v: string) => {
+          const d = new Date(v);
+          return isNaN(d.getTime()) ? v.split('T')[0] : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        const opDate = op.completedAt ? toLocal(op.completedAt) : (op.scheduledDate || (op.createdAt ? toLocal(op.createdAt) : ''));
         return opDate === todayStr;
       })
-      .reduce((acc, op) => acc + (Number(op.producedQuantity) || Number(op.plannedQuantity) || 0), 0);
+      .reduce((acc, op) => acc + (Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */), 0);
   }, [manipulacaoOps, todayStr]);
 
   const emAndamentoCount = useMemo(
@@ -344,10 +399,61 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   // resumeOP/finishOP), só que operando sobre a OP de Manipulação do
   // reator em vez da OP de Envase de uma linha.
   // --------------------------------------------------------------------
+  // ---------------- EXPEDIENTE DOS REATORES ----------------
+  // Um botão só abre/encerra o expediente dos 3 reatores juntos (o líder
+  // da Manipulação cuida dos 3 ao mesmo tempo). Parada dentro do expediente
+  // conta como ociosidade no dashboard; fora dele, não.
+  const openReactorShifts = useMemo(
+    () => reactorLines
+      .map(r => getOpenWorkSession(workSessions, r.id))
+      .filter((ws): ws is WorkSession => !!ws),
+    [workSessions, reactorLines]
+  );
+  const shiftOpenSince = openReactorShifts.length > 0
+    ? openReactorShifts.reduce((a, b) => (new Date(a.startedAt).getTime() < new Date(b.startedAt).getTime() ? a : b)).startedAt
+    : null;
+
+  const handleStartShift = async () => {
+    if (!profile) return;
+    setIsShiftBusy(true);
+    const res = await startWorkSession(reactorLines.map(r => r.id), profile.uid);
+    setIsShiftBusy(false);
+    if (res.error) showToast(`Não foi possível iniciar o expediente: ${res.error}`, 'error');
+    else showToast('Expediente dos reatores iniciado.');
+    await fetchData(true);
+  };
+
+  const handleEndShift = async () => {
+    if (!profile) return;
+    setIsShiftBusy(true);
+    // Manipulação ainda rodando: pausa com o motivo "Fim de Expediente"
+    const running = manipulacaoOps.filter(op => op.status === 'in_progress' && op.lineId && reactorLines.some(r => r.id === op.lineId));
+    for (const op of running) {
+      await pauseOP(op.id, op.lineId as string, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
+    }
+    const res = await endWorkSession(reactorLines.map(r => r.id), profile.uid);
+    setIsShiftBusy(false);
+    if (res.error) {
+      showToast(`Não foi possível encerrar o expediente: ${res.error}`, 'error');
+      return;
+    }
+    setIsEndShiftOpen(false);
+    showToast('Expediente dos reatores encerrado.');
+    await fetchData(true);
+  };
+
+  // Iniciar/retomar com o expediente fechado abre o expediente daquele reator sozinho
+  const ensureShiftOpen = async (lineId: string) => {
+    if (!profile || getOpenWorkSession(workSessions, lineId)) return;
+    const res = await startWorkSession([lineId], profile.uid);
+    if (res.error) console.warn('[Manipulação] Expediente não aberto automaticamente:', res.error);
+  };
+
   const handleStart = async (op: ProductionOrder) => {
     if (!profile || !op.lineId) return;
     setActionBusyOpId(op.id);
     try {
+      await ensureShiftOpen(op.lineId);
       await startOP(op.id, op.lineId, profile.uid);
       await fetchData(true);
     } catch (err) {
@@ -384,6 +490,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
     if (!profile || !op.lineId) return;
     setActionBusyOpId(op.id);
     try {
+      await ensureShiftOpen(op.lineId);
       await resumeOP(op.id, op.lineId, profile.uid);
       await fetchData(true);
     } catch (err) {
@@ -443,7 +550,7 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
       await fetchData(true);
     } catch (err) {
       console.error('Erro ao cancelar OSM de Manipulação:', err);
-      showToast('Erro ao cancelar esta OP.', 'error');
+      showToast((err as any)?.message || 'Erro ao cancelar esta OP.', 'error');
     } finally {
       setIsCancellingSubmitting(false);
     }
@@ -453,10 +560,15 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
   // no mesmo estilo visual usado antes (bloco de observação/horário etc.).
   const renderActiveCard = (op: ProductionOrder) => {
     const isBusy = actionBusyOpId === op.id;
-    const formattedTime = op.startedAt
-      ? new Date(op.startedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
-      : op.createdAt
-      ? new Date(op.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    // Horário real de início = 1º evento STARTED da OP. Antes caía no horário
+    // em que a OP foi CRIADA (quando entrou na fila do reator), mostrando um
+    // "Início" que nunca aconteceu.
+    const startEvents = events.filter(e => e.opId === op.id && e.type === 'STARTED');
+    const firstStart = startEvents.length > 0
+      ? startEvents.reduce((a, b) => (new Date(a.createdAt).getTime() < new Date(b.createdAt).getTime() ? a : b)).createdAt
+      : null;
+    const formattedTime = firstStart
+      ? new Date(firstStart).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
       : '--:--';
 
     return (
@@ -772,8 +884,40 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
                   <h2 className="text-lg font-bold text-white tracking-tight">Reatores</h2>
                 </div>
-                <span className="text-xs text-cyan-400 font-medium">Processo de Mistura / Homogeneização</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-cyan-400 font-medium hidden md:inline">Processo de Mistura / Homogeneização</span>
+                  {shiftOpenSince ? (
+                    <button
+                      onClick={() => setIsEndShiftOpen(true)}
+                      disabled={isShiftBusy}
+                      className="px-3 py-2 rounded-xl bg-rose-950/50 hover:bg-rose-900/50 border border-rose-800/50 text-xs font-bold text-rose-200 flex items-center gap-2 transition-all disabled:opacity-60"
+                    >
+                      <Sunset className="w-4 h-4 text-rose-400" />
+                      Encerrar Expediente
+                      <span className="font-mono text-[10px] text-rose-300/80">
+                        (desde {new Date(shiftOpenSince).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })})
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleStartShift}
+                      disabled={isShiftBusy}
+                      className="px-3 py-2 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center gap-2 transition-all disabled:opacity-60"
+                    >
+                      <Sunrise className="w-4 h-4 text-emerald-400" />
+                      {isShiftBusy ? 'Iniciando...' : 'Iniciar Expediente'}
+                    </button>
+                  )}
+                </div>
               </div>
+              {shiftOpenSince && new Date(shiftOpenSince).toDateString() !== new Date().toDateString() && (
+                <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/40 rounded-xl px-3 py-2">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-rose-200">
+                    O expediente dos reatores foi aberto em {new Date(shiftOpenSince).toLocaleDateString('pt-BR')} e não foi encerrado. Encerre e inicie um novo para hoje.
+                  </p>
+                </div>
+              )}
 
               {loading ? (
                 <div className="flex flex-col items-center justify-center py-12 text-[#a1a1aa]">
@@ -914,6 +1058,36 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
         )}
       </main>
 
+      {/* MODAL: ENCERRAR EXPEDIENTE DOS REATORES */}
+      <Dialog open={isEndShiftOpen} onOpenChange={setIsEndShiftOpen}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-rose-300 flex items-center gap-2">
+              <Sunset className="w-5 h-5" />
+              Encerrar Expediente — Reatores
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-3">
+            <p className="text-sm text-[#d4d4d8]">
+              Encerra o expediente dos 3 reatores. A partir de agora, o tempo parado não conta mais como ociosidade.
+            </p>
+            {manipulacaoOps.some(op => op.status === 'in_progress') && (
+              <p className="text-xs text-amber-300 bg-amber-950/40 border border-amber-800/40 rounded-lg px-3 py-2">
+                Há manipulação em processo — ela será pausada com o motivo "Fim de Expediente".
+              </p>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setIsEndShiftOpen(false)} className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold">
+              Voltar
+            </Button>
+            <Button onClick={handleEndShift} disabled={isShiftBusy} className="bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-wider">
+              {isShiftBusy ? 'Encerrando...' : 'Encerrar Expediente'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* MODAL: PAUSAR OP */}
       <Dialog open={!!pausingOp} onOpenChange={(open) => !open && setPausingOp(null)}>
         <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
@@ -937,13 +1111,18 @@ export function ManipulacaoScreen({ embedded = false, hideDashboardTabs = false 
                   <SelectValue placeholder="Escolha o motivo da pausa..." />
                 </SelectTrigger>
                 <SelectContent className="bg-[#121215] border-[#27272a] text-[#f4f4f5] max-h-60">
-                  {pauseReasonsList.map(r => (
+                  {MANIPULACAO_PAUSE_REASONS.map(r => (
                     <SelectItem key={r.id || r.name} value={r.name} className="text-xs">
                       {r.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {/^\s*intervalo/i.test(pauseReason || '') && (
+                <p className="text-[11px] text-emerald-400 mt-1.5">
+                  Intervalo de até 1h não conta como ociosidade. Se passar de 1h, o excedente conta.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">

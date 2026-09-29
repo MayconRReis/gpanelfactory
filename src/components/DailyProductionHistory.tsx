@@ -37,6 +37,7 @@ import {
   Legend
 } from 'recharts';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
+import { buildPartialProductionRecords } from '../services/db';
 
 interface DailyProductionHistoryProps {
   ops: ProductionOrder[];
@@ -67,16 +68,24 @@ export function isPesagemOp(op: ProductionOrder): boolean {
  * Prioriza completedAt (se concluída), scheduledDate ou createdAt.
  */
 export function getOpDateString(op: ProductionOrder): string {
+  // Sempre no dia LOCAL: completedAt/createdAt são gravados em UTC, e
+  // `split('T')[0]` jogava toda OP fechada depois das 21h pro dia seguinte.
   if (op.completedAt) {
-    return op.completedAt.split('T')[0];
+    return isoToLocalDate(op.completedAt);
   }
   if (op.scheduledDate && op.scheduledDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
     return op.scheduledDate;
   }
   if (op.createdAt) {
-    return op.createdAt.split('T')[0];
+    return isoToLocalDate(op.createdAt);
   }
-  return new Date().toISOString().split('T')[0];
+  return formatDateToIso(new Date());
+}
+
+function isoToLocalDate(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? value.split('T')[0] : formatDateToIso(d);
 }
 
 /**
@@ -87,6 +96,22 @@ export function formatDateToIso(d: Date): string {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * Quantidade que conta como PRODUZIDA no histórico. Antes caía no planejado
+ * sempre que o produzido era 0 — então toda OP ainda na fila (inclusive o saldo
+ * de uma parcial que voltou pro estoque) aparecia como se já tivesse sido
+ * produzida no dia programado. Agora o planejado só vale para as OSMs da
+ * Pesagem, onde ele é o próprio Kg pesado.
+ */
+function getCountedQty(op: ProductionOrder): number {
+  const produced = Number(op.producedQuantity) || 0;
+  if (produced > 0) return produced;
+  // Pesagem: o "planejado" da OSM é o Kg realmente pesado/adicionado (dado real).
+  // Envase/Manipulação: sem apontamento = 0 — nunca usamos o planejado como se fosse produzido.
+  if (isPesagemOp(op)) return Number(op.plannedQuantity) || 0;
+  return 0;
 }
 
 export function DailyProductionHistory({
@@ -103,6 +128,14 @@ export function DailyProductionHistory({
   // Data selecionada para o histórico diário
   const todayIso = useMemo(() => formatDateToIso(new Date()), []);
   const [selectedDate, setSelectedDate] = useState<string>(initialDate || todayIso);
+
+  // OPs + a produção das conclusões parciais (registros virtuais no dia/hora
+  // em que a parcial foi apontada). Entram nas somas, gráficos e na tabela
+  // (marcadas como "Parcial"), mas não contam como OP concluída.
+  const productionOps = useMemo(
+    () => [...ops, ...buildPartialProductionRecords(ops, events)],
+    [ops, events]
+  );
 
   // Sub-abas do módulo: 'integrated' (Visão completa) | 'table' (Só Histórico) | 'daily_chart' | 'monthly_chart'
   const [activeView, setActiveView] = useState<'integrated' | 'table' | 'daily_chart' | 'monthly_chart'>('integrated');
@@ -214,7 +247,7 @@ export function DailyProductionHistory({
 
   // ---------------- 1. DADOS DE TODAS AS OPS NO DIA SELECIONADO ----------------
   const opsOfDay = useMemo(() => {
-    return ops.filter((op) => {
+    return productionOps.filter((op) => {
       // Data associada à OP
       const opDate = getOpDateString(op);
       if (opDate !== selectedDate) return false;
@@ -222,7 +255,7 @@ export function DailyProductionHistory({
       // Ter alguma quantidade produzida ou planejada
       return (Number(op.producedQuantity) > 0 || Number(op.plannedQuantity) > 0 || op.status === 'completed' || op.status === 'in_progress');
     });
-  }, [ops, selectedDate]);
+  }, [productionOps, selectedDate]);
 
   // Totais e KPIs do dia selecionado
   const dailySummary = useMemo(() => {
@@ -238,7 +271,7 @@ export function DailyProductionHistory({
       // Mesmo fallback usado em pesagemDailyStats/MonthStats/YearStats logo
       // abaixo — sem isso, este card e aqueles discordavam entre si para o
       // mesmo dia (um somava plannedQuantity como reserva, o outro não).
-      const qty = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+      const qty = getCountedQty(op);
       const setor = op.setor || 'Envase';
       const shift = (op.finishedShift || op.scheduledShift || '').toLowerCase();
 
@@ -256,7 +289,9 @@ export function DailyProductionHistory({
         totalTurno1 += qty;
       }
 
-      if (op.status === 'completed') {
+      if (op.isPartialRecord) {
+        // produção de conclusão parcial: soma na quantidade, não conta como OP concluída
+      } else if (op.status === 'completed') {
         completedCount++;
       } else if (op.status === 'in_progress') {
         inProgressCount++;
@@ -264,7 +299,7 @@ export function DailyProductionHistory({
     }
 
     return {
-      totalOpsCount: opsOfDay.length,
+      totalOpsCount: opsOfDay.filter(o => !o.isPartialRecord).length,
       completedCount,
       inProgressCount,
       totalProducedEnvase,
@@ -448,7 +483,8 @@ export function DailyProductionHistory({
         return found.reduce((acc, g) => acc + (g.goalQuantity || 0), 0);
       }
     }
-    return 100000;
+    // Sem meta cadastrada = 0 (sem meta). Antes caía num valor fixo de 100.000.
+    return 0;
   }, [goals, selectedYear, selectedMonthIndex]);
 
   const dailyGoalValue = useMemo(() => {
@@ -497,8 +533,8 @@ export function DailyProductionHistory({
       });
     }
 
-    for (const op of ops) {
-      const qty = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+    for (const op of productionOps) {
+      const qty = getCountedQty(op);
       if (qty <= 0 && op.status !== 'completed') continue;
 
       const dateStr = getOpDateString(op);
@@ -544,7 +580,7 @@ export function DailyProductionHistory({
     }
 
     return Array.from(map.values());
-  }, [ops, selectedYear, selectedMonthIndex, daysInSelectedMonth, selectedDayNum]);
+  }, [productionOps, selectedYear, selectedMonthIndex, daysInSelectedMonth, selectedDayNum]);
 
   // ---------------- 3. DADOS PARA O GRÁFICO DE PRODUÇÃO MENSAL (12 MESES) ----------------
   const monthlyChartData = useMemo(() => {
@@ -562,8 +598,8 @@ export function DailyProductionHistory({
       pesagemKg: 0,
     }));
 
-    for (const op of ops) {
-      const qty = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+    for (const op of productionOps) {
+      const qty = getCountedQty(op);
       if (qty <= 0 && op.status !== 'completed') continue;
 
       const dateStr = getOpDateString(op);
@@ -591,7 +627,7 @@ export function DailyProductionHistory({
     }
 
     return result;
-  }, [ops, selectedYear, selectedMonthIndex, monthGoal]);
+  }, [productionOps, selectedYear, selectedMonthIndex, monthGoal]);
 
   // Total acumulado no ano
   const totalYearProduced = useMemo(() => {
@@ -614,7 +650,7 @@ export function DailyProductionHistory({
       op.producedQuantity,
       op.unidade || 'Un',
       op.plannedQuantity,
-      op.status,
+      op.isPartialRecord ? 'parcial' : op.status,
       `"${op.leaderId ? (leaderMap.get(op.leaderId) || op.leaderId) : '-'}"`,
       `"${op.observation || ''}"`,
     ]);
@@ -1012,7 +1048,7 @@ export function DailyProductionHistory({
           </div>
 
           <div className="pt-2 border-t border-[#27272a]/60 text-[10px] text-[#71717a] flex items-center justify-between font-mono">
-            <span>Meta Diária: <strong>{dailyGoalValue.toLocaleString('pt-BR')} Un</strong></span>
+            <span>{dailyGoalValue > 0 ? <>Meta Diária: <strong>{dailyGoalValue.toLocaleString('pt-BR')} Un</strong></> : 'Sem meta cadastrada para o mês'}</span>
           </div>
         </div>
 
@@ -1211,9 +1247,11 @@ export function DailyProductionHistory({
                           <span className="w-2.5 h-2.5 rounded-sm bg-blue-600"></span> Volume Total Diário
                         </span>
                       )}
-                      <span className="flex items-center gap-1 text-red-400 font-medium ml-auto">
-                        <span className="w-3 h-0.5 bg-red-500 border-t border-dashed"></span> Meta ({dailyGoalValue.toLocaleString('pt-BR')})
-                      </span>
+                      {dailyGoalValue > 0 && (
+                        <span className="flex items-center gap-1 text-red-400 font-medium ml-auto">
+                          <span className="w-3 h-0.5 bg-red-500 border-t border-dashed"></span> Meta ({dailyGoalValue.toLocaleString('pt-BR')})
+                        </span>
+                      )}
                     </>
                   )}
                 </div>
@@ -1279,7 +1317,7 @@ export function DailyProductionHistory({
                       }}
                       labelFormatter={(label) => `Dia ${label} de ${selectedMonthIndex + 1}/${selectedYear}`}
                     />
-                    {!isPesagemMode && (
+                    {!isPesagemMode && dailyGoalValue > 0 && (
                       <ReferenceLine
                         y={dailyGoalValue}
                         stroke="#ef4444"
@@ -1379,7 +1417,9 @@ export function DailyProductionHistory({
                     <p className="text-[11px] text-[#71717a]">
                       {isPesagemMode
                         ? `Consolidado de OSMs e volume (Kg) adicionados mês a mês em ${selectedYear}.`
-                        : `Consolidado de 12 meses vs Meta Mensal (${monthGoal.toLocaleString('pt-BR')} un/mês).`}
+                        : monthGoal > 0
+                        ? `Consolidado de 12 meses vs Meta Mensal (${monthGoal.toLocaleString('pt-BR')} un/mês).`
+                        : 'Consolidado de 12 meses (sem meta mensal cadastrada).'}
                     </p>
                   </div>
                   <div className="text-right">
@@ -1396,7 +1436,7 @@ export function DailyProductionHistory({
                   <span className="flex items-center gap-1 text-purple-400 font-medium">
                     <span className="w-2.5 h-2.5 rounded-sm bg-purple-600"></span> {isPesagemMode ? 'OSMs no Mês' : 'Realizado no Mês'}
                   </span>
-                  {!isPesagemMode && (
+                  {!isPesagemMode && monthGoal > 0 && (
                     <span className="flex items-center gap-1 text-blue-400 font-medium">
                       <span className="w-3 h-0.5 bg-blue-500 border-t border-dashed"></span> Meta ({monthGoal.toLocaleString('pt-BR')})
                     </span>
@@ -1441,7 +1481,7 @@ export function DailyProductionHistory({
                       }}
                       labelFormatter={(label) => `Mês de ${label}/${selectedYear}`}
                     />
-                    {!isPesagemMode && (
+                    {!isPesagemMode && monthGoal > 0 && (
                       <ReferenceLine
                         y={monthGoal}
                         stroke="#3b82f6"
@@ -1734,13 +1774,15 @@ export function DailyProductionHistory({
                       {/* Status */}
                       <td className="py-3 px-3">
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                          op.status === 'completed'
+                          op.isPartialRecord
+                            ? 'bg-amber-950 text-amber-300 border border-amber-800/40'
+                            : op.status === 'completed'
                             ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/40'
                             : op.status === 'in_progress'
                             ? 'bg-blue-950 text-blue-300 border border-blue-800/40'
                             : 'bg-[#27272a] text-[#a1a1aa]'
                         }`}>
-                          {op.status === 'completed' ? 'Concluído' : op.status === 'in_progress' ? 'Em linha' : op.status}
+                          {op.isPartialRecord ? 'Parcial' : op.status === 'completed' ? 'Concluído' : op.status === 'in_progress' ? 'Em linha' : op.status}
                         </span>
                       </td>
 

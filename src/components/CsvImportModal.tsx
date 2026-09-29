@@ -434,14 +434,17 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
   const handleAddManualRow = () => {
     const newRow: ParsedCsvOp = {
       id: `manual-${Date.now()}`,
-      number: `OP-${Math.floor(10000 + Math.random() * 90000)}`,
-      product: 'Novo Produto',
-      lote: 'LT-24-001',
-      plannedQuantity: 2000,
-      granel: 'GR-001',
+      // Linha em branco: o usuário preenche os dados reais (antes vinha com
+      // número aleatório, produto/lote/granel de exemplo e 2.000 un, que
+      // podiam ser importados sem querer como se fossem uma OP real).
+      number: '',
+      product: '',
+      lote: '',
+      plannedQuantity: 0,
+      granel: '',
       priority: defaultPriority,
       status: 'pending',
-      isValid: true,
+      isValid: false,
     };
     setParsedRows((prev) => [newRow, ...prev]);
   };
@@ -496,7 +499,8 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
         priority: r.priority,
         status: r.status,
         lineId: null,
-        packageAvailability: 10000,
+        // Sem integração real com o estoque de embalagens: não inventamos saldo
+        packageAvailability: 0,
       }));
 
       const res = await importOPsBatch(itemsToImport);
@@ -749,10 +753,10 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
                       {INTEGRATIONS_ARE_MOCKED && (
                         <span
                           className="inline-flex items-center gap-1 bg-amber-950/60 text-amber-300 border border-amber-800/40 px-2 py-0.2 rounded-full text-[10px] font-semibold cursor-help"
-                          title="Estoque de embalagens (10.000 un) e prioridade Farol preenchidos em modo simulado"
+                          title="Ainda não há integração com o estoque de embalagens nem com o Farol: o saldo de embalagens entra como 0 (não informado) e a prioridade é a escolhida aqui."
                         >
                           <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
-                          Integração Simulada
+                          Sem integração de estoque
                         </span>
                       )}
                     </div>

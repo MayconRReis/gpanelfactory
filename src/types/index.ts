@@ -28,7 +28,7 @@ export interface UserProfile {
   area?: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação';
   rule?: AccessRule;
   allowedScreens?: DashboardTab[];
-  status?: 'active' | 'inactive' | 'pending' | 'first_access';
+  status?: 'active' | 'inactive' | 'pending' | 'first_access' | 'awaiting_confirmation';
   mustChangePassword?: boolean;
   defaultPassword?: string;
   createdAt: string;
@@ -73,6 +73,8 @@ export interface ProductionOrder {
   observation?: string;
   isSleeve?: boolean;
   manipulacaoStatus?: string;
+  /** Registro virtual (só em memória) da produção de uma conclusão parcial — soma na produção, não conta como OP finalizada. */
+  isPartialRecord?: boolean;
   createdAt: string;
 }
 
@@ -138,4 +140,14 @@ export interface PauseReason {
   id: string;
   name: string;
   category?: string;
+}
+
+/** Expediente de uma linha (tabela work_sessions): do "Iniciar" ao "Encerrar expediente". */
+export interface WorkSession {
+  id: string;
+  lineId: string;
+  startedAt: string;
+  endedAt?: string | null;
+  startedBy?: string | null;
+  endedBy?: string | null;
 }
