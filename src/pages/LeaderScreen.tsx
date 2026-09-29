@@ -336,23 +336,27 @@ export function LeaderScreen({ embedded = false, hideDashboardTabs = false }: Le
 
     const stable = () => fetchDataRef.current?.(true);
 
-    // Nota: "production_orders" e "production_events" são VIEWS sobre "ops" e
-    // "events" — o Supabase Realtime só emite postgres_changes para tabelas
-    // físicas (com REPLICA IDENTITY), então assinar o nome da view nunca
-    // disparava nada. Mantemos só as tabelas reais.
+    // Mudanças feitas por OUTRO líder na mesma linha aparecem na hora via
+    // Realtime (precisa das tabelas na publicação — sql/ativar_realtime.sql).
     const channel = supabase
       .channel('leader-realtime-' + profile.uid)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'ops' }, stable)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'production_orders' }, stable)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'events' }, stable)
       .subscribe();
 
-    // Fallback: polling a cada 15s mesmo se o Realtime cair (o Realtime agora
-    // cobre de fato as mudanças, então isso é só uma rede de segurança)
-    const interval = setInterval(() => fetchDataRef.current?.(true), 15000);
+    // Rede de segurança se o Realtime cair: atualiza a cada 10s e sempre que
+    // a tela volta a ficar visível (tablet que "dormiu", troca de aba).
+    const interval = setInterval(() => fetchDataRef.current?.(true), 10000);
+    const onVisible = () => { if (document.visibilityState === 'visible') fetchDataRef.current?.(true); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
 
     return () => {
       supabase.removeChannel(channel);
       clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
     };
   }, [profile?.uid]);
 

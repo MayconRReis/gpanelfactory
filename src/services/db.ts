@@ -2932,6 +2932,7 @@ export const recordEventRemote = async (eventData: {
     const resEvents = await supabase.from('events').insert(eventsPayload);
     if (resEvents.error) {
       console.warn(`[recordEventRemote] Aviso ao gravar em events (OP ${opId}):`, resEvents.error.message);
+      notifyDbWriteFailure(`Registrar evento ${type}`, resEvents.error.message);
     }
   } catch (err) {
     console.warn(`[recordEventRemote] Erro ao gravar em events (OP ${opId}):`, err);
@@ -3469,6 +3470,226 @@ export const endChangeover = async (
 };
 
 // ---------------- OP ACTIONS ----------------
+// ---------------- GRAVAÇÃO CONFERIDA + AVISO DE FALHA ----------------
+// Uma regra de segurança (RLS) do Supabase que não permite a alteração NÃO
+// dá erro: simplesmente não altera nenhuma linha. Por isso as ações do chão
+// de fábrica conferem quantas linhas o banco alterou e, se nenhuma, avisam
+// na tela (evento 'gpanel:db-write-error', exibido pelo DbWriteErrorNotice).
+
+export interface DbWriteFailure {
+  context: string;
+  message: string;
+  opNumber?: string;
+  at: string;
+}
+
+const DB_WRITE_ERROR_EVENT = 'gpanel:db-write-error';
+
+export function notifyDbWriteFailure(context: string, message: string, opNumber?: string): void {
+  console.error(`[${context}] Não gravou no banco${opNumber ? ` (OP ${opNumber})` : ''}:`, message);
+  if (typeof window === 'undefined') return;
+  const detail: DbWriteFailure = { context, message, opNumber, at: new Date().toISOString() };
+  window.dispatchEvent(new CustomEvent(DB_WRITE_ERROR_EVENT, { detail }));
+}
+
+export function onDbWriteFailure(cb: (f: DbWriteFailure) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (e: Event) => cb((e as CustomEvent<DbWriteFailure>).detail);
+  window.addEventListener(DB_WRITE_ERROR_EVENT, handler);
+  return () => window.removeEventListener(DB_WRITE_ERROR_EVENT, handler);
+}
+
+export interface OpConflict {
+  context: string;
+  opNumber?: string;
+  currentStatus: string;
+  byName?: string;
+  atIso?: string;
+}
+
+const OP_CONFLICT_EVENT = 'gpanel:op-conflict';
+
+export function onOpConflict(cb: (c: OpConflict) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (e: Event) => cb((e as CustomEvent<OpConflict>).detail);
+  window.addEventListener(OP_CONFLICT_EVENT, handler);
+  return () => window.removeEventListener(OP_CONFLICT_EVENT, handler);
+}
+
+type OpWriteResult = { ok: boolean; error: string; conflict?: { currentStatus: string } };
+
+/** Quem fez a última ação na OP (para o aviso de conflito). */
+async function lastActionOnOp(opId: string): Promise<{ byName?: string; atIso?: string }> {
+  try {
+    const { data } = await supabase
+      .from('events')
+      .select('leader_id, created_at')
+      .eq('op_id', opId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const row: any = data && data[0];
+    if (!row) return {};
+    let byName: string | undefined;
+    if (row.leader_id) {
+      const local = inMemoryProfiles.find(p => p.uid === String(row.leader_id));
+      if (local) byName = local.name;
+      else {
+        const { data: prof } = await supabase.from('profiles').select('name').eq('id', row.leader_id).limit(1);
+        byName = (prof && (prof[0] as any)?.name) || undefined;
+      }
+    }
+    return { byName, atIso: row.created_at };
+  } catch {
+    return {};
+  }
+}
+
+/** Avisa na tela: falha de gravação (vermelho) ou conflito com outro líder (âmbar). */
+async function reportOpWriteProblem(context: string, res: OpWriteResult, opId: string, opNumber?: string) {
+  if (res.conflict) {
+    const who = await lastActionOnOp(opId);
+    console.warn(`[${context}] OP ${opNumber || opId} já estava "${res.conflict.currentStatus}" — ação ignorada`);
+    if (typeof window !== 'undefined') {
+      const detail: OpConflict = { context, opNumber, currentStatus: res.conflict.currentStatus, ...who };
+      window.dispatchEvent(new CustomEvent(OP_CONFLICT_EVENT, { detail }));
+    }
+    return;
+  }
+  notifyDbWriteFailure(context, res.error, opNumber);
+}
+
+/**
+ * Atualiza a OP nas duas tabelas e diz se o banco alterou de fato alguma linha.
+ * `expectStatus`: só altera se a OP ainda estiver num desses status NO BANCO
+ * (ex.: pausar só se estiver "em andamento"). Assim, se outro líder já
+ * pausou/concluiu a mesma OP, a segunda ação não é gravada em dobro e volta
+ * como conflito.
+ */
+async function updateOpVerified(opId: string, payload: any, expectStatus?: string[]): Promise<OpWriteResult> {
+  let lastError = '';
+  // 1) production_orders (a tabela que o app lê) — com a condição de status
+  let primaryOk = false;
+  let primaryErrored = false;
+  try {
+    const res: any = await runWithCompletedAtFallback(
+      (p) => {
+        let q: any = supabase.from('production_orders').update(p).eq('id', opId);
+        if (expectStatus && expectStatus.length > 0) q = q.in('status', expectStatus);
+        return q.select('id');
+      },
+      payload
+    );
+    if (res.error) { lastError = res.error.message; primaryErrored = true; }
+    else if (Array.isArray(res.data) && res.data.length > 0) primaryOk = true;
+  } catch (err: any) {
+    lastError = String(err?.message || err);
+    primaryErrored = true;
+  }
+
+  if (!primaryOk && !primaryErrored && expectStatus && expectStatus.length > 0) {
+    // Nada alterado: a OP mudou de status (outro líder) ou falta permissão?
+    try {
+      const { data } = await supabase.from('production_orders').select('status').eq('id', opId).limit(1);
+      const current = data && (data[0] as any)?.status;
+      if (current && !expectStatus.includes(String(current))) {
+        return { ok: false, error: '', conflict: { currentStatus: String(current) } };
+      }
+    } catch { /* segue como falha de gravação */ }
+  }
+
+  // 2) ops — espelho. Se production_orders aceitou, grava sem condição (as
+  // duas precisam ficar iguais); se production_orders deu erro, tenta ops
+  // com a mesma condição de status.
+  let mirrorOk = false;
+  if (primaryOk || primaryErrored) {
+    try {
+      const res: any = await runWithCompletedAtFallback(
+        (p) => {
+          let q: any = supabase.from('ops').update(p).eq('id', opId);
+          if (!primaryOk && expectStatus && expectStatus.length > 0) q = q.in('status', expectStatus);
+          return q.select('id');
+        },
+        payload
+      );
+      if (res.error) lastError = res.error.message;
+      else if (Array.isArray(res.data) && res.data.length > 0) mirrorOk = true;
+    } catch (err: any) {
+      lastError = String(err?.message || err);
+    }
+  }
+
+  const ok = primaryOk || mirrorOk;
+  return {
+    ok,
+    error: ok ? '' : (lastError || 'o banco não permitiu alterar esta OP com este usuário (regra de permissão)'),
+  };
+}
+
+/**
+ * Soma um apontamento ao total da OP a partir do valor QUE ESTÁ NO BANCO (e
+ * não o da tela), com trava otimista: só grava se ninguém alterou o total
+ * entre a leitura e a gravação; se alterou, relê e tenta de novo. Dois
+ * líderes apontando ao mesmo tempo não se sobrescrevem.
+ */
+async function incrementOpQuantityVerified(
+  opId: string,
+  qty: number,
+  rejected: number
+): Promise<OpWriteResult & { finalQty?: number; finalRejected?: number }> {
+  let lastError = '';
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('produced_quantity, rejected_quantity, status')
+      .eq('id', opId)
+      .limit(1);
+    if (error) { lastError = error.message; break; }
+    const row: any = data && data[0];
+    if (!row) { lastError = 'OP não encontrada no banco'; break; }
+    if (row.status === 'completed' || row.status === 'pending') {
+      return { ok: false, error: '', conflict: { currentStatus: String(row.status) } };
+    }
+    const baseQty = Number(row.produced_quantity) || 0;
+    const baseRej = Number(row.rejected_quantity) || 0;
+    const finalQty = baseQty + qty;
+    const finalRejected = baseRej + rejected;
+    const res: any = await supabase
+      .from('production_orders')
+      .update({ produced_quantity: finalQty, rejected_quantity: finalRejected })
+      .eq('id', opId)
+      .eq('produced_quantity', baseQty)
+      .select('id');
+    if (res.error) { lastError = res.error.message; break; }
+    if (Array.isArray(res.data) && res.data.length > 0) {
+      try {
+        await supabase.from('ops').update({ produced_quantity: finalQty, rejected_quantity: finalRejected }).eq('id', opId);
+      } catch { /* espelho; production_orders é a referência */ }
+      return { ok: true, error: '', finalQty, finalRejected };
+    }
+    // 0 linhas: outro apontamento entrou no meio (tenta de novo) ou falta permissão
+    const { data: again } = await supabase.from('production_orders').select('produced_quantity').eq('id', opId).limit(1);
+    const nowQty = again && again[0] ? Number((again[0] as any).produced_quantity) || 0 : baseQty;
+    if (nowQty === baseQty) {
+      lastError = 'o banco não permitiu alterar esta OP com este usuário (regra de permissão)';
+      break;
+    }
+  }
+  return { ok: false, error: lastError || 'não foi possível gravar o apontamento' };
+}
+
+function snapshotLocalState() {
+  return { ops: inMemoryOps, lines: inMemoryLines, events: inMemoryEvents };
+}
+
+function restoreLocalState(snap: { ops: ProductionOrder[]; lines: ProductionLine[]; events: ProductionEvent[] }) {
+  inMemoryOps = snap.ops;
+  inMemoryLines = snap.lines;
+  inMemoryEvents = snap.events;
+  persistOps();
+  persistLines();
+  persistEvents();
+}
+
 export const startOP = async (opId: string, lineId: string, leaderId: string) => {
   if (trainingModeActive) {
     const currentOp = trainingOps.find(op => op.id === opId);
@@ -3490,6 +3711,7 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
 
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
 
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'in_progress', leaderId, lineId } : op);
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'active', currentOpId: opId } : l);
@@ -3510,11 +3732,17 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  const opWrite = await updateOpVerified(opId, { status: 'in_progress', leader_id: leaderId, line_id: lineId }, ['pending']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Iniciar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
   try {
-    await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'in_progress', leader_id: leaderId, line_id: lineId }).eq('id', opId),
-      supabase.from('ops').update({ status: 'in_progress', leader_id: leaderId, line_id: lineId }).eq('id', opId),
-    ]);
     await updateLineStatusRemote(lineId, 'active', opId);
     await recordEventRemote({
       opId,
@@ -3526,6 +3754,7 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
   } catch (error) {
     console.error('Erro ao iniciar OP:', error);
   }
+  return { ok: true as const };
 };
 
 export const pauseOP = async (
@@ -3564,6 +3793,7 @@ export const pauseOP = async (
 
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
   const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
 
   inMemoryOps = inMemoryOps.map(op =>
@@ -3601,11 +3831,17 @@ export const pauseOP = async (
     updateOpPayload.produced_quantity = updatedProducedQty;
   }
 
+  const opWrite = await updateOpVerified(opId, updateOpPayload, ['in_progress']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Pausar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
   try {
-    await Promise.allSettled([
-      supabase.from('production_orders').update(updateOpPayload).eq('id', opId),
-      supabase.from('ops').update(updateOpPayload).eq('id', opId),
-    ]);
     await updateLineStatusRemote(lineId, 'paused', null);
     await recordEventRemote({
       opId,
@@ -3620,6 +3856,7 @@ export const pauseOP = async (
   } catch (error) {
     console.error('Erro ao pausar OP:', error);
   }
+  return { ok: true as const };
 };
 
 export const resumeOP = async (opId: string, lineId: string, leaderId: string) => {
@@ -3643,6 +3880,7 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
 
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
 
   inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'in_progress' } : op);
   inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'active' } : l);
@@ -3663,11 +3901,17 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
+  const opWrite = await updateOpVerified(opId, { status: 'in_progress' }, ['paused']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Retomar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
   try {
-    await Promise.allSettled([
-      supabase.from('production_orders').update({ status: 'in_progress' }).eq('id', opId),
-      supabase.from('ops').update({ status: 'in_progress' }).eq('id', opId),
-    ]);
     await updateLineStatusRemote(lineId, 'active', opId);
     await recordEventRemote({
       opId,
@@ -3679,6 +3923,7 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
   } catch (error) {
     console.error('Erro ao retomar OP:', error);
   }
+  return { ok: true as const };
 };
 
 // Monta os dados de uma nova OP "resto" a partir da OP original, usada tanto
@@ -3814,6 +4059,7 @@ export const finishOP = async (
 
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
   const completedAtIso = new Date().toISOString();
   const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
   // Quantidade perdida informada AGORA (na conclusão desta etapa). Sem
@@ -3908,15 +4154,6 @@ export const finishOP = async (
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
-  // Parcial + Sleev: o saldo que não foi pro Sleev vira uma OP nova, comum
-  // (sem Sleev), pronta para um novo envase — feito depois de persistir o
-  // registro principal, e via createOP (que já cuida de Supabase sozinha).
-  if (sendToSleeve && effectivePartial && currentOp) {
-    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
-      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
-    });
-  }
-
   const opPayload: any = sendToSleeve
     ? {
         status: 'pending',
@@ -3946,34 +4183,27 @@ export const finishOP = async (
         completed_at: completedAtIso,
       };
 
-  // completed_at agora é gravado nas DUAS tabelas — antes ia só pra `ops`,
-  // mas o getAllOPs lê de `production_orders`, então a data de fechamento
-  // sumia ao recarregar e o dashboard jogava a OP no dia programado.
-  // runWithCompletedAtFallback repete sem a coluna se ela ainda não existir.
+  // completed_at vai para as DUAS tabelas (updateOpVerified repete sem a
+  // coluna se ela não existir) e o app CONFERE se o banco aceitou.
+  const opWrite = await updateOpVerified(opId, opPayload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    markOpAsSleeve(opId, Boolean(currentOp?.isSleeve));
+    await reportOpWriteProblem('Concluir OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  // Parcial + Sleev: o saldo que não foi pro Sleev vira uma OP nova, comum
+  // (sem Sleev), pronta para um novo envase — só depois de a OP principal
+  // ter sido gravada.
+  if (sendToSleeve && effectivePartial && currentOp) {
+    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
+      notifyDbWriteFailure('Criar OP de saldo', String(err?.message || err), currentOp?.number);
+    });
+  }
+
   try {
-    const { error: err1 } = await runWithCompletedAtFallback(
-      (payload) => supabase.from('production_orders').update(payload).eq('id', opId),
-      opPayload
-    );
-
-    if (err1) {
-      console.warn('[finishOP] production_orders falhou, tentando ops:', err1.message);
-    }
-
-    // Sempre tenta ops também (as duas tabelas precisam estar sincronizadas)
-    const { error: err2 } = await runWithCompletedAtFallback(
-      (payload) => supabase.from('ops').update(payload).eq('id', opId),
-      opPayload
-    );
-
-    if (err2) {
-      console.warn('[finishOP] ops falhou:', err2.message);
-    }
-
-    if (err1 && err2) {
-      console.error('[finishOP] Falha ao gravar nas duas tabelas. Status salvo apenas localmente.');
-    }
-
     // Atualizar linha e gravar evento
     await updateLineStatusRemote(lineId, 'idle', null);
     await recordEventRemote({
@@ -3988,6 +4218,7 @@ export const finishOP = async (
   } catch (error) {
     console.error('[finishOP] Erro inesperado ao finalizar OP:', error);
   }
+  return { ok: true as const };
 };
 
 /**
@@ -4143,6 +4374,7 @@ export const reportQuantity = async (
 
   const currentOp = inMemoryOps.find(op => op.id === opId);
   const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
   const newQty = (currentOp?.producedQuantity || 0) + quantity;
   // Rejeito informado pelo líder junto com este apontamento (soma ao total já
   // registrado na OP) — enquanto o laboratório não entra no fluxo, é quem
@@ -4167,23 +4399,25 @@ export const reportQuantity = async (
   inMemoryEvents = [newEvent, ...inMemoryEvents];
   persistEvents();
 
-  // Grava sequencialmente com log de aviso por tabela
-  try {
-    const resProductionOrders = await supabase.from('production_orders').update({ produced_quantity: newQty, rejected_quantity: newRejectedQty }).eq('id', opId);
-    if (resProductionOrders.error) {
-      console.warn(`[reportQuantity] Falha ao gravar produced_quantity em production_orders (OP ${opId}):`, resProductionOrders.error.message);
-    }
-  } catch (err) {
-    console.warn(`[reportQuantity] Erro inesperado ao gravar em production_orders (OP ${opId}):`, err);
+  // Grava o total da OP e CONFERE se o banco aceitou. Se recusar, o
+  // apontamento não é registrado (nem o evento) — antes o evento entrava e o
+  // total não, e o líder repetia o apontamento achando que não tinha ido.
+  const opWrite = await incrementOpQuantityVerified(opId, quantity, rejectedQty || 0);
+
+  if (opWrite.ok && opWrite.finalQty !== undefined) {
+    // Total real do banco (pode incluir apontamento de outro líder feito ao mesmo tempo)
+    inMemoryOps = inMemoryOps.map(op => op.id === opId
+      ? { ...op, producedQuantity: opWrite.finalQty as number, rejectedQuantity: opWrite.finalRejected ?? op.rejectedQuantity }
+      : op);
+    persistOps();
   }
 
-  try {
-    const resOps = await supabase.from('ops').update({ produced_quantity: newQty, rejected_quantity: newRejectedQty }).eq('id', opId);
-    if (resOps.error) {
-      console.warn(`[reportQuantity] Falha ao gravar produced_quantity em ops (OP ${opId}):`, resOps.error.message);
-    }
-  } catch (err) {
-    console.warn(`[reportQuantity] Erro inesperado ao gravar em ops (OP ${opId}):`, err);
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Apontar produção', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
   }
 
   // Grava em events e production_events com schemas validados
@@ -4196,6 +4430,7 @@ export const reportQuantity = async (
     observation: newEvent.observation,
     createdAt: newEvent.createdAt,
   });
+  return { ok: true as const };
 };
 
 export const updateProducedQuantityDirect = async (
