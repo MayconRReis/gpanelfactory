@@ -33,7 +33,7 @@ import {
 } from 'lucide-react';
 import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonthlyGoals, getRecentEvents, logPesagemHistory, findOpsByNumber, findOpsByLote } from '../services/db';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, PesagemHistoryChange } from '../types';
-import { getUserRule } from '../lib/permissions';
+import { getUserRule, isAdminRule } from '../lib/permissions';
 import { PesagemMovimentacoes } from '../components/PesagemMovimentacoes';
 import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { getIndustriaBadgeClass, isManualExitEligible } from '../lib/industria';
@@ -57,7 +57,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
 
   // Histórico de movimentações: quem fez cada ação é o nome do usuário
   // logado. A aba "Movimentações" aparece para a Coordenação e para os líderes da Pesagem.
-  const isCoordinatorUser = getUserRule(profile) === 'admin';
+  const isCoordinatorUser = isAdminRule(getUserRule(profile));
   // Aba Movimentações: Coordenação e líderes da Pesagem
   const canSeeMovimentacoes = isCoordinatorUser || getUserRule(profile) === 'pesagem';
 

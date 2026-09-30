@@ -19,7 +19,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { UserProfile, DashboardTab } from '../types';
-import { getUserAllowedTabs, getUserRule, ACCESS_RULES } from '../lib/permissions';
+import { getUserAllowedTabs, getUserRule, ACCESS_RULES, isAdminRule } from '../lib/permissions';
 
 export type { DashboardTab };
 
@@ -66,7 +66,7 @@ export function Sidebar({
 
   // Edição de metas (mensal única + diária por linha) é restrita ao
   // Coordenador Geral — só ele tem permissão de escrita nessas tabelas via RLS.
-  const canManageGoals = userRule === 'admin';
+  const canManageGoals = isAdminRule(userRule);
 
   // Todos os itens do menu unificado do GPanel Factory
   const allMenuItems = [

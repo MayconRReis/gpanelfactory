@@ -29,6 +29,14 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'events',
     ],
   },
+  diretor: {
+    id: 'diretor',
+    name: 'Diretor Industrial (Acesso Total)',
+    shortName: 'Diretoria',
+    description: 'Mesmo acesso do Coordenador Geral a todas as telas, cadastros e configurações industriais',
+    badgeClass: 'bg-indigo-950/90 text-indigo-300 border border-indigo-700/50',
+    tabs: [],
+  },
   pesagem: {
     id: 'pesagem',
     name: 'Líder de Pesagem',
@@ -135,6 +143,10 @@ export function getUserRule(profile: UserProfile | null): AccessRule {
   // ex.: "Assistente de Coordenação de Estoque". Por isso exigimos que o
   // cargo comece com "coordenador" (ex.: "Coordenador Geral", "Coordenador
   // de Produção"), não apenas contenha o radical em qualquer posição.
+  // Diretor Industrial — mesmo acesso do Coordenador, só muda o cargo
+  if (cargo.startsWith('diretor')) {
+    return 'diretor';
+  }
   if (role === 'coordinator' || role === 'coordenador' || cargo.startsWith('coordenador') || area === 'coordenação' || area === 'coordenacao') {
     return 'admin';
   }
@@ -198,7 +210,15 @@ export function getCronogramaAccess(profile: UserProfile | null): {
   if (!canUserAccessTab(profile, 'cronograma')) return { editable: false, modes: [] };
   const hasCustomScreens = !!(profile?.allowedScreens && Array.isArray(profile.allowedScreens) && profile.allowedScreens.length > 0);
   const rule = getUserRule(profile);
-  if (rule === 'admin' || (rule === 'custom' && hasCustomScreens)) return { editable: true, modes: ['envase', 'manipulacao'] };
+  if (isAdminRule(rule) || (rule === 'custom' && hasCustomScreens)) return { editable: true, modes: ['envase', 'manipulacao'] };
   if (rule === 'manipulacao' || rule === 'pesagem') return { editable: false, modes: ['manipulacao'] };
   return { editable: false, modes: ['envase'] };
 }
+
+/** Regras com acesso total (Coordenador Geral e Diretor Industrial). */
+export function isAdminRule(rule: AccessRule | string | null | undefined): boolean {
+  return rule === 'admin' || rule === 'diretor';
+}
+
+// O Diretor Industrial enxerga exatamente as mesmas telas do Coordenador.
+ACCESS_RULES.diretor.tabs = [...ACCESS_RULES.admin.tabs];

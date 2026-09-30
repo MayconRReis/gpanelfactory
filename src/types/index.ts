@@ -2,6 +2,7 @@ export type Role = 'coordinator' | 'leader';
 
 export type AccessRule = 
   | 'admin'           // Coordenador Geral (Acesso total)
+  | 'diretor'         // Diretor Industrial (mesmo acesso total do Coordenador)
   | 'pesagem'         // Líder de Pesagem (Home + Pesagem)
   | 'manipulacao'     // Líder de Manipulação (Home + Manipulação)
   | 'envase'          // Líder de Envase (Home + Chão de Fábrica)

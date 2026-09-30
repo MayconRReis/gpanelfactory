@@ -2404,7 +2404,7 @@ WHERE email IN (
                               <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
                                 isCoordinator ? 'bg-blue-950/60 text-blue-400 border border-blue-900/40' : 'bg-[#1a1a22] text-[#a1a1aa] border border-[#2b2b36]'
                               }`}>
-                                {isCoordinator ? 'Coordenador Geral' : 'Líder de Produção'}
+                                {user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}
                               </span>
                             </div>
 

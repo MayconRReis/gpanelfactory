@@ -911,7 +911,7 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
       .maybeSingle();
 
     if (data && !error) {
-      const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && data.cargo.toLowerCase().includes('coordenador'));
+      const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && /coordenador|^diretor/i.test(String(data.cargo).trim()));
       let isFirstAccess = false;
       if (data.must_change_password === true || data.status === 'first_access') {
         isFirstAccess = true;
@@ -928,7 +928,7 @@ export const getProfile = async (uid: string): Promise<UserProfile | null> => {
         role: isCoord ? 'coordinator' : 'leader',
         cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
         area: data.area || undefined,
-        rule: data.rule || (isCoord ? 'admin' : data.area === 'Pesagem' ? 'pesagem' : data.area === 'Manipulação' ? 'manipulacao' : 'envase'),
+        rule: data.rule || (/^diretor/i.test(String(data.cargo || '').trim()) ? 'diretor' : isCoord ? 'admin' : data.area === 'Pesagem' ? 'pesagem' : data.area === 'Manipulação' ? 'manipulacao' : 'envase'),
         allowedScreens: data.allowed_screens || undefined,
         status: isFirstAccess ? 'first_access' : (data.status || 'active'),
         mustChangePassword: isFirstAccess,
@@ -962,7 +962,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
 
     if (data && data.length > 0 && !error) {
       const remoteUsers: UserProfile[] = data.map((d: any) => {
-        const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && d.cargo.toLowerCase().includes('coordenador'));
+        const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && /coordenador|^diretor/i.test(String(d.cargo).trim()));
         const localMatch = inMemoryProfiles.find(p => p.uid === d.id || (d.email && p.email?.toLowerCase() === d.email.toLowerCase()));
         
         let isFirstAccess = false;
@@ -981,7 +981,7 @@ export const getAllUsers = async (): Promise<UserProfile[]> => {
           role: isCoord ? 'coordinator' : 'leader',
           cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
           area: d.area || localMatch?.area || undefined,
-          rule: d.rule || localMatch?.rule || (isCoord ? 'admin' : (d.area || localMatch?.area) === 'Pesagem' ? 'pesagem' : (d.area || localMatch?.area) === 'Manipulação' ? 'manipulacao' : 'envase'),
+          rule: d.rule || (/^diretor/i.test(String(d.cargo || '').trim()) ? 'diretor' : localMatch?.rule) || (isCoord ? 'admin' : (d.area || localMatch?.area) === 'Pesagem' ? 'pesagem' : (d.area || localMatch?.area) === 'Manipulação' ? 'manipulacao' : 'envase'),
           allowedScreens: d.allowed_screens || localMatch?.allowedScreens || undefined,
           status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
           mustChangePassword: isFirstAccess,
@@ -1099,14 +1099,15 @@ export const updateUserRule = async (
   allowedScreens?: DashboardTab[]
 ): Promise<boolean> => {
   try {
-    const isCoord = newRule === 'admin';
+    const isCoord = newRule === 'admin' || newRule === 'diretor';
     const targetArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação' | undefined = 
       newRule === 'pesagem' ? 'Pesagem' 
       : newRule === 'manipulacao' ? 'Manipulação' 
       : newRule === 'envase' ? 'Envase' 
       : isCoord ? 'Coordenação' : undefined;
 
-    const targetCargo = newRule === 'admin' ? 'Coordenador Geral'
+    const targetCargo = newRule === 'diretor' ? 'Diretor Industrial'
+      : newRule === 'admin' ? 'Coordenador Geral'
       : newRule === 'pesagem' ? 'Líder de Pesagem'
       : newRule === 'manipulacao' ? 'Líder de Manipulação'
       : newRule === 'envase' ? 'Líder de Envase'
