@@ -1481,7 +1481,6 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
-                showSetupHistory={getUserRule(profile) === 'admin'}
               />
             )}
 
@@ -1506,6 +1505,7 @@ WHERE email IN (
                 ops={ops}
                 lines={lines}
                 leaders={leaders}
+                allUsers={allUsers}
                 goals={goals}
                 events={events}
               />
@@ -1533,10 +1533,6 @@ WHERE email IN (
                     <h2 className="text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
                       {cronogramaMode === 'envase' ? 'Cronograma de Envase' : 'Cronograma de Manipulação'}
                     </h2>
-                    <span className="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      Tempo Real
-                    </span>
                     {cronogramaReadOnly && (
                       <span className="text-[10px] bg-[#1a1a22] text-[#a1a1aa] border border-[#2c2c3c] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                         <Eye className="w-3 h-3" />

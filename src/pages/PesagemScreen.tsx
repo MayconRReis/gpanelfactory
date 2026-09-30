@@ -813,27 +813,15 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
         ) : (
           <>
             {/* Barra Superior da Seção: Título e Botão de Ação */}
-            <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 sm:p-5 rounded-2xl shadow-sm">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-[#141418] border border-[#27272a] p-4 sm:p-5 rounded-2xl shadow-sm">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2.5">
                   <Scale className="w-5 h-5 text-purple-400 shrink-0" />
                   <h1 className="text-base sm:text-xl font-bold text-white tracking-tight">Estoque de OPs de Pesagem</h1>
                 </div>
-                <p className="text-xs text-[#a1a1aa] mt-1 line-clamp-2 sm:line-clamp-none">
-                  Registre as bateladas pesadas de granel para disponibilização à equipe de Manipulação. OPs pendentes ficam aqui até serem encaminhadas, mesmo de dias anteriores.
-                </p>
               </div>
 
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full lg:w-auto shrink-0">
-                <Button
-                  variant="outline"
-                  onClick={() => setActiveViewTab('historico')}
-                  className="h-10 sm:h-11 px-3.5 sm:px-4 rounded-xl border-[#27272a] bg-[#18181b] hover:bg-[#27272a] text-purple-300 hover:text-white text-xs font-bold flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap cursor-pointer"
-                >
-                  <BarChart3 className="w-4 h-4 text-purple-400 shrink-0" />
-                  <span>Ver Dashboard</span>
-                </Button>
-
+              <div className="flex items-center gap-2.5 w-full sm:w-auto shrink-0 justify-end">
                 <Button
                   onClick={handleOpenModal}
                   className="h-10 sm:h-11 px-4 sm:px-5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-purple-950/40 flex items-center justify-center gap-2 w-full sm:w-auto whitespace-nowrap transition-all transform active:scale-95 cursor-pointer"

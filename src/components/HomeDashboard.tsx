@@ -12,7 +12,6 @@ import {
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
 import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
-import { SetupHistory } from './SetupHistory';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -1778,18 +1777,6 @@ export function HomeDashboard({
             </div>
           )}
         </div>
-
-        {/* Setups do Envase no período do filtro — só para o coordenador */}
-        {showSetupHistory && <SetupHistory
-          changeovers={changeovers}
-          ops={ops}
-          lines={lines}
-          users={[...(allUsers || []), ...(leaders || [])]}
-          rangeStart={periodDateRange.rangeStart}
-          rangeEnd={periodDateRange.rangeEnd}
-          periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
-          nowMs={nowTick}
-        />}
 
         {/* ---------------------- PARTE 2: MANIPULAÇÃO (REATORES) ---------------------- */}
         <div className="space-y-2 pt-1">

@@ -976,9 +976,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                      activeOp?.status === 'paused' ? 'Linha Pausada' : 'Aguardando Início'}
                   </span>
                 </div>
-                <p className="text-xs text-[#71717a]">
-                  Acompanhamento de produção em tempo real
-                </p>
               </div>
             </div>
 

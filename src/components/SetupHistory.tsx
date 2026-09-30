@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { RefreshCcw, ChevronDown, ChevronUp } from 'lucide-react';
 import { LineChangeover, ProductionLine, ProductionOrder, UserProfile } from '../types';
 
@@ -19,6 +19,8 @@ interface SetupHistoryProps {
   rangeEnd?: string;
   periodLabel?: string;
   nowMs: number;
+  /** Botões ou controle de escopo (ex.: Dia vs Mês) */
+  scopeToggle?: React.ReactNode;
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -39,7 +41,7 @@ function fmtDuration(ms: number): string {
   return h > 0 ? `${h}h ${String(m).padStart(2, '0')}min` : `${m}min`;
 }
 
-export function SetupHistory({ changeovers, ops, lines, users, rangeStart, rangeEnd, periodLabel, nowMs }: SetupHistoryProps) {
+export function SetupHistory({ changeovers, ops, lines, users, rangeStart, rangeEnd, periodLabel, nowMs, scopeToggle }: SetupHistoryProps) {
   const [expanded, setExpanded] = useState(false);
 
   const rows = useMemo(() => {
@@ -84,7 +86,7 @@ export function SetupHistory({ changeovers, ops, lines, users, rangeStart, range
   return (
     <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-3">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <RefreshCcw className="w-4 h-4 text-orange-400" />
           <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">Setups do Envase</h3>
           {periodLabel && (
@@ -92,8 +94,9 @@ export function SetupHistory({ changeovers, ops, lines, users, rangeStart, range
               {periodLabel}
             </span>
           )}
+          {scopeToggle}
         </div>
-        <div className="flex flex-wrap gap-3 text-[11px] text-[#a1a1aa]">
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#a1a1aa]">
           <span><strong className="text-white">{summary.total}</strong> setup(s)</span>
           {summary.same.count > 0 && (
             <span>Mesmo tipo: <strong className="text-emerald-300">{summary.same.count}</strong> · média <strong className="text-white">{fmtDuration(summary.same.avg)}</strong></span>

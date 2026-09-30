@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Calendar,
   ChevronLeft,
@@ -22,7 +22,8 @@ import {
   CalendarDays,
   Hash,
   UserCheck,
-  Tag
+  Tag,
+  RefreshCcw,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -36,13 +37,15 @@ import {
   Cell,
   Legend
 } from 'recharts';
-import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent } from '../types';
-import { buildPartialProductionRecords } from '../services/db';
+import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, LineChangeover } from '../types';
+import { buildPartialProductionRecords, getChangeovers } from '../services/db';
+import { SetupHistory } from './SetupHistory';
 
 interface DailyProductionHistoryProps {
   ops: ProductionOrder[];
   lines?: ProductionLine[];
   leaders?: UserProfile[];
+  allUsers?: UserProfile[];
   goals?: MonthlyGoal[];
   events?: ProductionEvent[];
   initialDate?: string; // Formato YYYY-MM-DD
@@ -118,6 +121,7 @@ export function DailyProductionHistory({
   ops,
   lines = [],
   leaders = [],
+  allUsers = [],
   goals = [],
   events = [],
   initialDate,
@@ -137,8 +141,27 @@ export function DailyProductionHistory({
     [ops, events]
   );
 
-  // Sub-abas do módulo: 'integrated' (Visão completa) | 'table' (Só Histórico) | 'daily_chart' | 'monthly_chart'
-  const [activeView, setActiveView] = useState<'integrated' | 'table' | 'daily_chart' | 'monthly_chart'>('integrated');
+  // Sub-abas do módulo: 'integrated' (Visão completa) | 'table' (Só Histórico) | 'daily_chart' | 'monthly_chart' | 'setups' (Setups de Envase)
+  const [activeView, setActiveView] = useState<'integrated' | 'table' | 'daily_chart' | 'monthly_chart' | 'setups'>('integrated');
+
+  // Setups de Envase (troca de produto)
+  const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getChangeovers().then(list => {
+      if (!cancelled) setChangeovers(list);
+    }).catch(err => console.warn('[DailyProductionHistory] Erro ao buscar setups:', err));
+    return () => { cancelled = true; };
+  }, []);
+
+  const [nowTick, setNowTick] = useState<number>(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowTick(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Escopo de visualização dos setups: Dia (da data selecionada) vs Mês todo
+  const [setupScope, setSetupScope] = useState<'dia' | 'mes'>('dia');
 
   // Filtros da Tabela do Histórico Diário
   const [searchQuery, setSearchQuery] = useState('');
@@ -172,6 +195,33 @@ export function DailyProductionHistory({
       selectedMonthIndex: d.getMonth(),
       selectedDayNum: d.getDate(),
     };
+  }, [selectedDate]);
+
+  const monthStartStr = useMemo(() => {
+    return `${selectedYear}-${String(selectedMonthIndex + 1).padStart(2, '0')}-01`;
+  }, [selectedYear, selectedMonthIndex]);
+
+  const monthEndStr = useMemo(() => {
+    const lastDay = new Date(selectedYear, selectedMonthIndex + 1, 0).getDate();
+    return `${selectedYear}-${String(selectedMonthIndex + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  }, [selectedYear, selectedMonthIndex]);
+
+  const monthLabel = useMemo(() => {
+    try {
+      const d = new Date(selectedYear, selectedMonthIndex, 1);
+      return d.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    } catch {
+      return `${selectedMonthIndex + 1}/${selectedYear}`;
+    }
+  }, [selectedYear, selectedMonthIndex]);
+
+  const formattedDayShort = useMemo(() => {
+    try {
+      const [y, m, d] = selectedDate.split('-');
+      return `${d}/${m}`;
+    } catch {
+      return selectedDate;
+    }
   }, [selectedDate]);
 
   // Navegação de datas
@@ -834,6 +884,19 @@ export function DailyProductionHistory({
               <TrendingUp className="w-3.5 h-3.5" />
               Gráfico Mensal
             </button>
+            {!pesagemOnly && sectorFilter !== 'Pesagem' && (
+              <button
+                onClick={() => setActiveView('setups')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                  activeView === 'setups'
+                    ? 'bg-blue-600 text-white shadow'
+                    : 'text-[#a1a1aa] hover:text-white'
+                }`}
+              >
+                <RefreshCcw className="w-3.5 h-3.5 text-orange-400" />
+                Setups de Envase
+              </button>
+            )}
           </div>
 
           <div className="text-[11px] text-[#71717a] font-mono flex items-center gap-2">
@@ -846,7 +909,8 @@ export function DailyProductionHistory({
       </div>
 
       {/* ── CARDS DE RESUMO DO DIA SELECIONADO ── */}
-      {isPesagemMode ? (
+      {activeView !== 'setups' && (
+        isPesagemMode ? (
         /* CARDS EXCLUSIVOS DO SETOR DE PESAGEM */
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           
@@ -1122,10 +1186,10 @@ export function DailyProductionHistory({
         </div>
 
       </div>
-      )}
+      ))}
 
       {/* ── SEÇÃO DOS GRÁFICOS (DIÁRIO E MENSAL) ── */}
-      {(activeView === 'integrated' || activeView === 'daily_chart' || activeView === 'monthly_chart') && (
+      {activeView !== 'setups' && (activeView === 'integrated' || activeView === 'daily_chart' || activeView === 'monthly_chart') && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           
           {/* GRÁFICO DIÁRIO */}
@@ -1526,7 +1590,8 @@ export function DailyProductionHistory({
       )}
 
       {/* ── SEÇÃO PRINCIPAL: HISTÓRICO PRODUTIVO DIÁRIO (O QUE FOI PRODUZIDO E A QUANTIDADE) ── */}
-      <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-5 shadow-lg space-y-4">
+      {activeView !== 'setups' && (
+        <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-5 shadow-lg space-y-4">
         
         {/* Cabeçalho da Tabela com Filtros */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3 border-b border-[#27272a]">
@@ -1819,6 +1884,43 @@ export function DailyProductionHistory({
         )}
 
       </div>
+      )}
+
+      {/* ── SETUPS DO ENVASE (TROCA DE PRODUTO) ── */}
+      {(activeView === 'integrated' || activeView === 'setups') && !pesagemOnly && sectorFilter !== 'Pesagem' && (
+        <SetupHistory
+          changeovers={changeovers}
+          ops={ops}
+          lines={lines}
+          users={[...(allUsers || []), ...(leaders || [])]}
+          rangeStart={setupScope === 'dia' ? selectedDate : monthStartStr}
+          rangeEnd={setupScope === 'dia' ? selectedDate : monthEndStr}
+          periodLabel={setupScope === 'dia' ? `Dia: ${selectedDate.split('-').reverse().join('/')}` : `Mês: ${monthLabel}`}
+          nowMs={nowTick}
+          scopeToggle={
+            <div className="flex items-center gap-1 bg-[#181822] p-0.5 rounded-lg border border-[#2c2c3c]">
+              <button
+                type="button"
+                onClick={() => setSetupScope('dia')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  setupScope === 'dia' ? 'bg-orange-600 text-white shadow-sm' : 'text-[#a1a1aa] hover:text-white'
+                }`}
+              >
+                Do Dia ({formattedDayShort})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSetupScope('mes')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  setupScope === 'mes' ? 'bg-orange-600 text-white shadow-sm' : 'text-[#a1a1aa] hover:text-white'
+                }`}
+              >
+                Do Mês
+              </button>
+            </div>
+          }
+        />
+      )}
 
     </div>
   );
