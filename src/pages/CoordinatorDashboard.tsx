@@ -28,6 +28,7 @@ import {
   UserCheck,
   UserX,
   Award,
+  Crown,
   MailPlus,
   Mail,
   Copy,
@@ -53,6 +54,7 @@ import {
   getAllUsers,
   updateUserRole,
   updateUserArea,
+  updateUserCargo,
   updateUserStatus,
   preAuthorizeUser,
   syncPendingLeadersToSupabase,
@@ -435,6 +437,19 @@ export function CoordinatorDashboard() {
       await loadData();
     } else {
       showToast('Falha ao atualizar área do colaborador.', 'error');
+    }
+  };
+
+  // Cargo = só o título exibido (ex.: "Líder de Estoque"); o acesso vem da regra
+  const [cargoDraft, setCargoDraft] = useState<{ userKey: string; value: string } | null>(null);
+  const handleSaveUserCargo = async (user: UserProfile, value: string) => {
+    const res = await updateUserCargo(user.uid || user.email, value);
+    if (res.ok) {
+      showToast(`Cargo de ${user.name} alterado para ${value.trim()}!`);
+      setCargoDraft(null);
+      await loadData();
+    } else {
+      showToast(`Não foi possível alterar o cargo: ${res.error || 'erro desconhecido'}`, 'error');
     }
   };
 
@@ -2062,6 +2077,7 @@ WHERE email IN (
                   {filteredUsers.map((user) => {
                     const isSelf = user.uid === profile?.uid;
                     const isCoordinator = user.role === 'coordinator';
+                    const isDirector = /^diretor/i.test(String(user.cargo || '').trim()) || getUserRule(user) === 'diretor';
                     const isActive = user.status !== 'inactive';
                     const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
                     const activeRule = (user.rule || getUserRule(user)) as AccessRule;
@@ -2116,11 +2132,13 @@ WHERE email IN (
                         {/* Roles: Cargo/Área + Regra de Acesso */}
                         <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-[#1e1e24]">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                            isCoordinator
+                            isDirector
+                              ? 'bg-amber-500/15 text-amber-300 border border-amber-400/60 shadow-sm shadow-amber-900/40'
+                              : isCoordinator
                               ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
                               : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
                           }`}>
-                            {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
+                            {isDirector ? <Crown className="w-3 h-3 text-amber-300" /> : isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
                             <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
                           </span>
                           {!isCoordinator && (
@@ -2359,6 +2377,7 @@ WHERE email IN (
                   modalFilteredUsers.map((user) => {
                     const isSelf = user.uid === profile?.uid;
                     const isCoordinator = user.role === 'coordinator';
+                    const isDirector = /^diretor/i.test(String(user.cargo || '').trim()) || getUserRule(user) === 'diretor';
                     const isPending = user.status === 'pending';
                     const isInactive = user.status === 'inactive';
 
@@ -2402,7 +2421,7 @@ WHERE email IN (
 
                               {/* Badge de Cargo */}
                               <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold ${
-                                isCoordinator ? 'bg-blue-950/60 text-blue-400 border border-blue-900/40' : 'bg-[#1a1a22] text-[#a1a1aa] border border-[#2b2b36]'
+                                isDirector ? 'bg-amber-500/15 text-amber-300 border border-amber-400/60' : isCoordinator ? 'bg-blue-950/60 text-blue-400 border border-blue-900/40' : 'bg-[#1a1a22] text-[#a1a1aa] border border-[#2b2b36]'
                               }`}>
                                 {user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}
                               </span>
@@ -3427,6 +3446,7 @@ WHERE email IN (
 
         const isSelf = user.uid === profile?.uid;
         const isCoordinator = user.role === 'coordinator';
+        const isDirector = /^diretor/i.test(String(user.cargo || '').trim()) || getUserRule(user) === 'diretor';
         const isActive = user.status !== 'inactive';
         const isLocalOnly = (user as any).pendingSupabaseSync || user.uid?.startsWith('usr-');
         const isFirstAccess = user.status === 'first_access' || user.mustChangePassword;
@@ -3484,13 +3504,33 @@ WHERE email IN (
                 {/* Cargo & Área */}
                 <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5">
                   <span className="text-[10px] text-[#71717a] uppercase font-bold block">Cargo / Área</span>
+                  {/* Cargo = título exibido (não muda o acesso) */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={cargoDraft && cargoDraft.userKey === (user.uid || user.email) ? cargoDraft.value : (user.cargo || '')}
+                      onChange={(e) => setCargoDraft({ userKey: user.uid || user.email, value: e.target.value })}
+                      placeholder="Ex.: Líder de Estoque"
+                      className="flex-1 h-8 bg-[#14141a] border border-[#2c2c38] rounded-lg px-2.5 text-xs text-white focus:outline-none focus:border-blue-500"
+                      title="Título do cargo exibido para esta pessoa — não altera o acesso"
+                    />
+                    <button
+                      type="button"
+                      disabled={!cargoDraft || cargoDraft.userKey !== (user.uid || user.email) || !cargoDraft.value.trim() || cargoDraft.value.trim() === (user.cargo || '')}
+                      onClick={() => cargoDraft && handleSaveUserCargo(user, cargoDraft.value)}
+                      className="h-8 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-[11px] font-bold"
+                    >
+                      Salvar cargo
+                    </button>
+                  </div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded flex items-center gap-1 w-fit ${
-                      isCoordinator
+                      isDirector
+                        ? 'bg-amber-500/15 text-amber-300 border border-amber-400/60 shadow-sm shadow-amber-900/40'
+                        : isCoordinator
                         ? 'bg-blue-950/80 text-blue-400 border border-blue-800/40'
                         : 'bg-[#1c1c24] text-[#d4d4d8] border border-[#292934]'
                     }`}>
-                      {isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
+                      {isDirector ? <Crown className="w-3 h-3 text-amber-300" /> : isCoordinator ? <Award className="w-3 h-3 text-blue-400" /> : <Users className="w-3 h-3 text-[#71717a]" />}
                       <span>{user.cargo || (isCoordinator ? 'Coordenador Geral' : 'Líder de Produção')}</span>
                     </span>
 
@@ -3506,8 +3546,10 @@ WHERE email IN (
                         <option value="Manipulação" className="bg-[#121217] text-[#22d3ee]">Área: Manipulação</option>
                       </select>
                     ) : (
-                      <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider bg-blue-950/70 text-blue-400 border-blue-500/40">
-                        Coordenação Geral
+                      <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded border uppercase tracking-wider ${
+                        isDirector ? 'bg-amber-500/15 text-amber-300 border-amber-400/60' : 'bg-blue-950/70 text-blue-400 border-blue-500/40'
+                      }`}>
+                        {isDirector ? 'Diretoria Industrial' : 'Coordenação Geral'}
                       </span>
                     )}
                   </div>

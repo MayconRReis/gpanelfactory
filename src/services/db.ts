@@ -1048,6 +1048,28 @@ export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'l
   }
 };
 
+/** Atualiza só o CARGO (título exibido) do colaborador — não muda o acesso. */
+export const updateUserCargo = async (userId: string, newCargo: string): Promise<{ ok: boolean; error?: string }> => {
+  const cargo = String(newCargo || '').trim();
+  if (!cargo) return { ok: false, error: 'Informe o cargo.' };
+  try {
+    let res: any = await supabase.from('profiles').update({ cargo }).eq('id', userId).select('id');
+    if (res.error || !res.data || res.data.length === 0) {
+      res = await supabase.from('profiles').update({ cargo }).eq('email', userId).select('id');
+    }
+    if (res.error) return { ok: false, error: res.error.message };
+    if (!res.data || res.data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.cargo = cargo;
+      persistProfiles();
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
 export const updateUserArea = async (
   userId: string,
   newArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação',
@@ -1106,8 +1128,9 @@ export const updateUserRule = async (
       : newRule === 'envase' ? 'Envase' 
       : isCoord ? 'Coordenação' : undefined;
 
+    // ADM (acesso total) não troca o cargo: o cargo é só o título da pessoa
     const targetCargo = newRule === 'diretor' ? 'Diretor Industrial'
-      : newRule === 'admin' ? 'Coordenador Geral'
+      : newRule === 'admin' ? undefined
       : newRule === 'pesagem' ? 'Líder de Pesagem'
       : newRule === 'manipulacao' ? 'Líder de Manipulação'
       : newRule === 'envase' ? 'Líder de Envase'

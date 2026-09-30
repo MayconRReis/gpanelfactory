@@ -12,9 +12,9 @@ export interface AccessRuleConfig {
 export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
   admin: {
     id: 'admin',
-    name: 'Coordenador Geral (Acesso Total)',
-    shortName: 'Coordenação',
-    description: 'Acesso irrestrito a todas as telas, cadastros e configurações industriais',
+    name: 'ADM (Acesso Total)',
+    shortName: 'ADM',
+    description: 'Acesso irrestrito a todas as telas, cadastros e configurações industriais. O cargo exibido é o título informado para a pessoa.',
     badgeClass: 'bg-blue-950/90 text-blue-400 border border-blue-800/50',
     tabs: [
       'home',
@@ -34,7 +34,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     name: 'Diretor Industrial (Acesso Total)',
     shortName: 'Diretoria',
     description: 'Mesmo acesso do Coordenador Geral a todas as telas, cadastros e configurações industriais',
-    badgeClass: 'bg-indigo-950/90 text-indigo-300 border border-indigo-700/50',
+    badgeClass: 'bg-amber-500/15 text-amber-300 border border-amber-400/60',
     tabs: [],
   },
   pesagem: {
