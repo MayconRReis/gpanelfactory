@@ -11,7 +11,7 @@ import {
   Boxes,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
-import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
+import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -128,6 +128,85 @@ export function formatElapsedTimer(ms: number): string {
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
+/** Rosca (donut) de um componente do OEE — valor em % no centro. */
+function OeeDonut({ label, pct, color, glow, border, desc }: { label: string; pct: number | null; color: string; glow: string; border: string; desc: string }) {
+  const r = 42;
+  const c = 2 * Math.PI * r;
+  const v = Math.min(100, Math.max(0, pct ?? 0));
+  return (
+    <div className={`bg-[#18181b] border ${border} rounded-2xl p-4 flex flex-col items-center text-center`}>
+      <span className="text-[11px] font-black uppercase tracking-wider flex items-center gap-1.5 self-start" style={{ color }}>
+        <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ background: color, boxShadow: `0 0 8px ${glow}` }} />
+        {label}
+      </span>
+      <div className="relative w-[128px] h-[128px] my-2">
+        <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+          <circle cx="50" cy="50" r={r} fill="none" stroke="#27272a" strokeWidth="9" />
+          <circle
+            cx="50" cy="50" r={r} fill="none" stroke={color} strokeWidth="9" strokeLinecap="round"
+            strokeDasharray={`${(v / 100) * c} ${c}`}
+            style={{ transition: 'stroke-dasharray 0.6s ease' }}
+          />
+        </svg>
+        <div className="absolute inset-0 flex items-center justify-center">
+          <span className="text-2xl font-black font-mono" style={{ color }}>{pct !== null ? `${pct}%` : '—'}</span>
+        </div>
+      </div>
+      <p className="text-[10px] text-[#71717a] leading-snug">{desc}</p>
+    </div>
+  );
+}
+
+/** Velocímetro da meta de produção (vermelho → amarelo → verde). */
+function GoalGauge({ produced, goal, periodLabel, goalLabel }: { produced: number; goal: number | null; periodLabel: string; goalLabel: string }) {
+  const pct = goal && goal > 0 ? Math.round((produced / goal) * 1000) / 10 : null;
+  const frac = pct === null ? 0 : Math.min(1, Math.max(0, pct / 100));
+  // ponteiro: 180° (esquerda, 0%) → 0° (direita, 100%)
+  const angle = Math.PI * (1 - frac);
+  const cx = 100, cy = 100, needle = 70;
+  const nx = cx + needle * Math.cos(angle);
+  const ny = cy - needle * Math.sin(angle);
+  const pctColor = pct === null ? '#71717a' : pct >= 100 ? '#10b981' : pct >= 80 ? '#84cc16' : pct >= 50 ? '#eab308' : '#ef4444';
+  return (
+    <div className="bg-[#18181b] border border-[#2c2c3c] rounded-2xl p-4 flex flex-col items-center text-center">
+      <span className="text-[11px] font-black uppercase tracking-wider text-white self-start flex items-center gap-1.5">
+        <span className="w-2 h-2 rounded-full inline-block shrink-0 bg-white/70" />
+        Meta de Produção · {periodLabel}
+      </span>
+      <div className="relative w-full max-w-[210px] mt-2">
+        <svg viewBox="0 0 200 118" className="w-full">
+          <defs>
+            <linearGradient id="goalGaugeGrad" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor="#ef4444" />
+              <stop offset="50%" stopColor="#eab308" />
+              <stop offset="100%" stopColor="#10b981" />
+            </linearGradient>
+          </defs>
+          <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="#27272a" strokeWidth="16" strokeLinecap="round" />
+          <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="url(#goalGaugeGrad)" strokeWidth="16" strokeLinecap="round" opacity={pct === null ? 0.25 : 1} />
+          {pct !== null && (
+            <>
+              <line x1={cx} y1={cy} x2={nx} y2={ny} stroke="#f4f4f5" strokeWidth="3.5" strokeLinecap="round" style={{ transition: 'all 0.6s ease' }} />
+              <circle cx={cx} cy={cy} r="7" fill="#f4f4f5" />
+              <circle cx={cx} cy={cy} r="3" fill="#18181b" />
+            </>
+          )}
+          <text x="15" y="116" fill="#71717a" fontSize="9" textAnchor="middle">0%</text>
+          <text x="185" y="116" fill="#71717a" fontSize="9" textAnchor="middle">100%</text>
+        </svg>
+      </div>
+      <span className="text-2xl font-black font-mono -mt-1" style={{ color: pctColor }}>{pct !== null ? `${pct.toLocaleString('pt-BR')}%` : '—'}</span>
+      <p className="text-[10px] text-[#a1a1aa] mt-1 leading-snug">
+        {goal && goal > 0 ? (
+          <><strong className="text-white">{produced.toLocaleString('pt-BR')}</strong> de <strong className="text-white">{goal.toLocaleString('pt-BR')}</strong> un · {goalLabel}</>
+        ) : (
+          <>{goalLabel}</>
+        )}
+      </p>
+    </div>
+  );
+}
+
 export function HomeDashboard({
   lines,
   ops,
@@ -226,8 +305,10 @@ export function HomeDashboard({
     () => lines.filter(l => /reator/i.test(l.id) || /reator/i.test(l.name)),
     [lines]
   );
+  // Sleev fica FORA do Dashboard Geral (métrica separada: Relatório do Dia e
+  // Histórico & Gráficos) — aqui só as linhas de Envase.
   const envaseLines = useMemo(
-    () => lines.filter(l => !(/reator/i.test(l.id) || /reator/i.test(l.name))),
+    () => lines.filter(l => !(/reator/i.test(l.id) || /reator/i.test(l.name)) && !isSleeveLineId(l.id) && !isSleeveLineId(l.name)),
     [lines]
   );
 
@@ -240,8 +321,19 @@ export function HomeDashboard({
   // A produção de cada conclusão parcial entra nas SOMAS e gráficos como um
   // registro virtual (partialRecords), no dia/hora em que foi apontada — mas
   // NÃO conta como OP finalizada (os contadores de OPs usam só `ops`).
-  const partialRecords = useMemo(() => buildPartialProductionRecords(ops, events), [ops, events]);
-  const productionOps = useMemo(() => (partialRecords.length > 0 ? [...ops, ...partialRecords] : ops), [ops, partialRecords]);
+  //
+  // SLEEV é métrica separada (só no Histórico & Gráficos): as OPs do Sleev
+  // ficam fora das somas daqui, e o envase das OPs que seguiram para o Sleev
+  // entra como registro virtual no dia/linha em que foi envasado.
+  const opsNoSleeve = useMemo(() => ops.filter(o => !isSleeveLineId(o.lineId)), [ops]);
+  const partialRecords = useMemo(
+    () => [
+      ...buildPartialProductionRecords(opsNoSleeve, events).filter(r => !isSleeveLineId(r.lineId)),
+      ...buildSleeveHandoffRecords(ops, events),
+    ],
+    [ops, opsNoSleeve, events]
+  );
+  const productionOps = useMemo(() => (partialRecords.length > 0 ? [...opsNoSleeve, ...partialRecords] : opsNoSleeve), [opsNoSleeve, partialRecords]);
 
   // OPs parciais que ainda estão no estoque aguardando o resto do envase —
   // o contador some do dashboard quando não sobra nenhuma.
@@ -461,6 +553,7 @@ export function HomeDashboard({
       if (op.status !== 'completed') continue;
       if (op.setor === 'Pesagem' || op.setor === 'Manipulação' || op.tipoDocumento === 'OSM') continue;
       if (op.lineId && /reator|pesagem|manipula/i.test(op.lineId)) continue;
+      if (isSleeveLineId(op.lineId)) continue;
       if (dashboardPeriod !== 'geral') {
         const day = getOpReferenceDateStr(op);
         if (!day) continue;
@@ -501,7 +594,7 @@ export function HomeDashboard({
       dashboardPeriod === 'geral' ||
       ((!periodDateRange.rangeStart || day >= periodDateRange.rangeStart) &&
         (!periodDateRange.rangeEnd || day <= periodDateRange.rangeEnd));
-    const envaseIds = new Set<string>(envaseLines.map(l => String(l.id)));
+    const envaseIds = new Set<string>(envaseLines.filter(l => !isSleeveLineId(l.id) && !isSleeveLineId(l.name)).map(l => String(l.id)));
 
     // Absenteísmo: último registro de cada linha em cada dia
     const lastByLineDay = new Map<string, LineHeadcount>();
@@ -561,7 +654,7 @@ export function HomeDashboard({
   // dia"), enquanto a média representa o comportamento típico de uma linha.
   const avgLineProductionTime = useMemo(() => {
     // Só as linhas de Envase/Sleeve — os reatores da Manipulação têm outro
-    // ritmo (e o próprio card diz "média entre Envase 1, Envase 2 e Sleeve").
+    // ritmo (e o próprio card diz "média entre Envase 1 e Envase 2").
     const lineIds = envaseLines.map(l => l.id);
 
     let sumWorkingMs = 0;
@@ -673,6 +766,7 @@ export function HomeDashboard({
     if (op.setor === 'Pesagem' || op.setor === 'Manipulação') return false;
     if (op.tipoDocumento === 'OSM') return false;
     if (op.lineId && /reator|pesagem|manipula/i.test(op.lineId)) return false;
+    if (isSleeveLineId(op.lineId)) return false; // Sleev: métrica separada
     return true;
   }, []);
 
@@ -775,6 +869,7 @@ export function HomeDashboard({
     });
 
     for (const op of [...periodOpsAndEvents.periodOps, ...periodPartials]) {
+      if (isSleeveLineId(op.lineId)) continue; // Sleev fica só no Histórico & Gráficos
       const qty = Number(op.producedQuantity || 0);
       const s = op.setor;
       if (s === 'Pesagem') {
@@ -797,6 +892,32 @@ export function HomeDashboard({
       envase: { valor: envaseQtd, unidade: 'Un' },
     };
   }, [periodOpsAndEvents, partialRecords, periodDateRange, dashboardPeriod]);
+
+  // Velocímetro da meta: Dia = meta diária do Envase 1 + Envase 2; Mês = meta
+  // mensal da fábrica; Ano = soma das metas de cada mês do ano.
+  const goalGauge = useMemo(() => {
+    const monthGoalOf = (year: number, month1: number): number | null => {
+      const f = factoryMonthlyGoals.find(g => g.year === year && g.month === month1);
+      if (f && f.goalQuantity > 0) return f.goalQuantity;
+      const legacy = (goals || []).filter(g => g.year === year && g.month === month1).reduce((a, g) => a + (g.goalQuantity || 0), 0);
+      return legacy > 0 ? legacy : null;
+    };
+    if (dashboardPeriod === 'dia') {
+      const envLines = envaseLines.filter(l => /envase/i.test(l.name) && !/sle+v/i.test(l.name) && !/sle+v/i.test(l.id));
+      const g = envLines.reduce((a, l) => a + (getLineDailyGoal(l.id) || 0), 0);
+      return { goal: g > 0 ? g : null, label: g > 0 ? `meta do dia (${envLines.map(l => l.name).join(' + ')})` : 'Sem meta diária cadastrada para os Envases' };
+    }
+    if (dashboardPeriod === 'mes') {
+      const g = monthGoalOf(currentYear, selectedMonth + 1);
+      return { goal: g, label: g ? 'meta do mês' : 'Sem meta cadastrada para o mês' };
+    }
+    if (dashboardPeriod === 'ano') {
+      let total = 0;
+      for (let m = 1; m <= 12; m++) total += monthGoalOf(currentYear, m) || 0;
+      return { goal: total > 0 ? total : null, label: total > 0 ? `soma das metas de ${currentYear}` : 'Sem metas cadastradas no ano' };
+    }
+    return { goal: null, label: 'Escolha Dia, Mês ou Ano para ver a meta' };
+  }, [dashboardPeriod, envaseLines, getLineDailyGoal, factoryMonthlyGoals, goals, currentYear, selectedMonth]);
 
   // 2. Meta Diária do Mês Atual
   const daysInCurrentMonth = useMemo(() => {
@@ -1291,7 +1412,7 @@ export function HomeDashboard({
               </span>
               <span
                 className="bg-amber-950/60 text-amber-200 border border-amber-500/40 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
-                title={`% das horas de turno (8h/dia) perdidas em paradas no período — média entre Envase 1, Envase 2 e Sleeve`}
+                title={`% das horas de turno (8h/dia) perdidas em paradas no período — média entre Envase 1 e Envase 2`}
               >
                 {PERIOD_LABELS[dashboardPeriod]}
               </span>
@@ -1322,7 +1443,7 @@ export function HomeDashboard({
               </span>
               <span
                 className="bg-purple-950/60 text-purple-200 border border-purple-400/40 px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono"
-                title="Média de tempo efetivamente trabalhado no período entre Envase 1, Envase 2 e Sleeve"
+                title="Média de tempo efetivamente trabalhado no período entre Envase 1 e Envase 2"
               >
                 {PERIOD_LABELS[dashboardPeriod]}
               </span>
@@ -1482,66 +1603,19 @@ export function HomeDashboard({
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {/* Disponibilidade — Azul */}
-            <div className="bg-[#18181b] border border-blue-800/40 rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-2 gap-2">
-                <span className="text-[11px] font-black uppercase tracking-wider text-blue-400 flex items-center gap-1.5 truncate">
-                  <span className="w-2 h-2 rounded-full bg-blue-500 inline-block shadow-[0_0_8px_rgba(59,130,246,0.8)] shrink-0"></span>
-                  Disponibilidade
-                </span>
-                <span className="text-2xl font-black text-blue-400 font-mono shrink-0">
-                  {oeeDisponibilidadePct !== null ? `${oeeDisponibilidadePct}%` : '—'}
-                </span>
-              </div>
-              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
-                <div
-                  className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, Math.max(0, oeeDisponibilidadePct ?? 0))}%` }}
-                />
-              </div>
-              <p className="text-[10px] text-[#71717a]">Tempo real produzindo ÷ tempo planejado (descontadas as paradas)</p>
-            </div>
-
-            {/* Performance — Laranja */}
-            <div className="bg-[#18181b] border border-orange-800/40 rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-2 gap-2">
-                <span className="text-[11px] font-black uppercase tracking-wider text-orange-400 flex items-center gap-1.5 truncate">
-                  <span className="w-2 h-2 rounded-full bg-orange-500 inline-block shadow-[0_0_8px_rgba(249,115,22,0.8)] shrink-0"></span>
-                  Performance
-                </span>
-                <span className="text-2xl font-black text-orange-400 font-mono shrink-0">
-                  {oeePerformancePct !== null ? `${oeePerformancePct}%` : '—'}
-                </span>
-              </div>
-              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
-                <div
-                  className="h-full bg-orange-500 rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, Math.max(0, oeePerformancePct ?? 0))}%` }}
-                />
-              </div>
-              <p className="text-[10px] text-[#71717a]">Quantidade produzida ÷ quantidade planejada das OPs</p>
-            </div>
-
-            {/* Qualidade — Verde */}
-            <div className="bg-[#18181b] border border-emerald-800/40 rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-2 gap-2">
-                <span className="text-[11px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5 truncate">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block shadow-[0_0_8px_rgba(16,185,129,0.8)] shrink-0"></span>
-                  Qualidade
-                </span>
-                <span className="text-2xl font-black text-emerald-400 font-mono shrink-0">
-                  {oeeQualidadePct !== null ? `${oeeQualidadePct}%` : '—'}
-                </span>
-              </div>
-              <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden mb-2">
-                <div
-                  className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, Math.max(0, oeeQualidadePct ?? 0))}%` }}
-                />
-              </div>
-              <p className="text-[10px] text-[#71717a]">(Produzido − rejeitado) ÷ produzido</p>
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
+              desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
+            <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
+              desc="Quantidade produzida ÷ quantidade planejada das OPs" />
+            <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
+              desc="(Produzido − rejeitado) ÷ produzido" />
+            <GoalGauge
+              produced={sectorKpis.envase.valor}
+              goal={goalGauge.goal}
+              goalLabel={goalGauge.label}
+              periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
+            />
           </div>
 
           {/* No modo "Geral", mostra a evolução mensal dos 3 componentes juntos —

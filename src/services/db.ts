@@ -352,6 +352,50 @@ export function buildPartialProductionRecords(
   return records;
 }
 
+/** Linha do Sleev (acabamento) — métrica separada do Envase. */
+export function isSleeveLineId(lineId?: string | null): boolean {
+  return !!lineId && /sle+v/i.test(String(lineId));
+}
+
+/**
+ * ENVASE de OPs que seguiram para o Sleev: ao concluir o envase com "Sleev",
+ * a OP volta pro estoque zerada e só fica o evento FINISHED com a quantidade
+ * envasada. Para o Envase contar essa produção (sem somar o Sleev), cada um
+ * desses eventos vira um registro virtual no dia/linha do envase — igual às
+ * conclusões parciais. Nunca é gravado no banco.
+ */
+export function buildSleeveHandoffRecords(ops: ProductionOrder[], events: ProductionEvent[]): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const opById = new Map(ops.map(op => [String(op.id), op]));
+  const out: ProductionOrder[] = [];
+  for (const ev of events) {
+    if (ev?.type !== 'FINISHED' || !ev.opId) continue;
+    if (!/acabamento no sleev/i.test(String(ev.observation || ''))) continue;
+    if (isSleeveLineId(ev.lineId)) continue;
+    const qty = Number(ev.quantity || 0);
+    if (!(qty > 0)) continue;
+    const op = opById.get(String(ev.opId));
+    if (!op) continue;
+    out.push({
+      ...op,
+      id: `sleeve-handoff-${ev.id}`,
+      status: 'completed',
+      plannedQuantity: qty,
+      producedQuantity: qty,
+      rejectedQuantity: 0,
+      lineId: ev.lineId || null,
+      leaderId: ev.leaderId || op.leaderId,
+      completedAt: ev.createdAt,
+      createdAt: ev.createdAt,
+      scheduledDate: undefined,
+      finishedShift: undefined,
+      isSleeve: false,
+      isPartialRecord: true,
+    });
+  }
+  return out;
+}
+
 /**
  * OPs que estão no estoque por causa de uma conclusão parcial: ainda não
  * finalizadas e cuja ÚLTIMA conclusão registrada foi parcial. Quando a OP é

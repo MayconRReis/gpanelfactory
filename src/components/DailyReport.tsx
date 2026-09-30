@@ -181,13 +181,21 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
       m[day] = (m[day] || 0) + qty;
     }
     const byDay = new Map<string, number>();
+    const sleeveByDay = new Map<string, number>();
     for (const [lineId, days] of Object.entries(byLineDay)) {
       if (isReactorId(lineId)) continue;
-      for (const [day, q] of Object.entries(days)) byDay.set(day, (byDay.get(day) || 0) + Number(q || 0));
+      // Sleev é métrica separada (acabamento) — não soma no Envase
+      const target = /sle+v/i.test(lineId) ? sleeveByDay : byDay;
+      for (const [day, q] of Object.entries(days)) target.set(day, (target.get(day) || 0) + Number(q || 0));
     }
-    return { byDay, byLineDay };
+    return { byDay, sleeveByDay, byLineDay };
   }, [ops, events]);
 
+  const sumSleeve = (from: string, to: string) => {
+    let t = 0;
+    for (const [day, q] of envaseProduction.sleeveByDay.entries()) if (day >= from && day <= to) t += q;
+    return t;
+  };
   const sumEnvase = (from: string, to: string) => {
     let t = 0;
     for (const [day, q] of envaseProduction.byDay.entries()) if (day >= from && day <= to) t += q;
@@ -217,7 +225,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     let produced = 0;
     let expected = 0;
     for (const op of ops) {
-      if (op.status !== 'completed' || op.isPartialRecord || !isEnvaseOp(op)) continue;
+      if (op.status !== 'completed' || op.isPartialRecord || !isEnvaseOp(op) || /sle+v/i.test(String(op.lineId || ''))) continue;
       const d = getOpReferenceDateStr(op);
       if (!d || d < from || d > to) continue;
       const partial = partialQtyByOp.get(String(op.id)) || 0;
@@ -237,13 +245,17 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     manipMes: sumManip(monthStart, selectedDate),
     envaseDia: sumEnvase(selectedDate, selectedDate),
     envaseMes: sumEnvase(monthStart, selectedDate),
+    sleeveDia: sumSleeve(selectedDate, selectedDate),
+    sleeveMes: sumSleeve(monthStart, selectedDate),
     rendDia: rendimento(selectedDate, selectedDate),
     rendMes: rendimento(monthStart, selectedDate),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [ops, events, envaseProduction, selectedDate, monthStart]);
 
   // ---------- Linhas de envase no dia (tempos, equipe, setups) ----------
+  // Tabela de linhas mostra Envase + Sleev (Sleev como acabamento, fora dos totais do Envase)
   const envaseLines = useMemo(() => lines.filter(l => !isReactorId(l.id) && !/reator/i.test(l.name)), [lines]);
+  const isSleeveLine = (l: ProductionLine) => /sle+v/i.test(l.id) || /sle+v/i.test(l.name);
   const dayTime = useMemo(() => calculateProductionTime(events, ops, lines, {
     targetDate: selectedDate,
     referenceTime: Date.now(),
@@ -285,7 +297,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
   // ---------- Paradas do dia (Envase) por motivo ----------
   const pauseRows = useMemo(() => {
     const map = new Map<string, { count: number; ms: number }>();
-    for (const l of envaseLines) {
+    for (const l of envaseLines.filter(x => !isSleeveLine(x))) {
       for (const p of dayTime.byLine[l.id]?.pauses || []) {
         const k = p.reason || 'Sem motivo';
         const cur = map.get(k) || { count: 0, ms: 0 };
@@ -538,6 +550,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                 <tr><td className={td + ' font-bold'}>Manipulação</td><td className={tdc}>{nf(indicators.manipDia)} kg</td><td className={tdc}>{nf(indicators.manipMes)} kg</td></tr>
                 <tr><td className={td + ' font-bold'}>Envase</td><td className={tdc}>{nf(indicators.envaseDia)} un.</td><td className={tdc}>{nf(indicators.envaseMes)} un.</td></tr>
                 <tr><td className={td + ' font-bold'}>Rendimento do Envase</td><td className={tdc}>{pctf(indicators.rendDia)}</td><td className={tdc}>{pctf(indicators.rendMes)}</td></tr>
+                <tr><td className={td + ' font-bold'}>Sleev (acabamento)</td><td className={tdc}>{nf(indicators.sleeveDia)} un.</td><td className={tdc}>{nf(indicators.sleeveMes)} un.</td></tr>
               </tbody>
             </table>
 
@@ -599,7 +612,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               <tbody>
                 {lineRows.map(r => (
                   <tr key={r.id}>
-                    <td className={td + ' font-bold'}>{r.name}</td>
+                    <td className={td + ' font-bold'}>{r.name}{/sle+v/i.test(r.id) || /sle+v/i.test(r.name) ? <span className="font-normal text-[#6b7280]"> (acabamento)</span> : null}</td>
                     <td className={tdc}>{nf(r.produced)} un.</td>
                     <td className={tdc}>{r.goal > 0 ? `${nf(r.goal)} (${pctf(r.goalPct)})` : '—'}</td>
                     <td className={tdc}>{r.working > 0 ? formatMsToHoursMinutes(r.working) : '—'}</td>
