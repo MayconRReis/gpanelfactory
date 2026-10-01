@@ -207,6 +207,14 @@ function GoalGauge({ produced, goal, periodLabel, goalLabel }: { produced: numbe
   );
 }
 
+/** OP de Envase (sem Pesagem/Manipulação/OSM/reatores). */
+function isEnvaseLineOpBase(op: ProductionOrder): boolean {
+  if (op.setor === 'Pesagem' || op.setor === 'Manipulação') return false;
+  if (op.tipoDocumento === 'OSM') return false;
+  if (op.lineId && /reator|pesagem|manipula/i.test(op.lineId)) return false;
+  return true;
+}
+
 export function HomeDashboard({
   lines,
   ops,
@@ -305,11 +313,16 @@ export function HomeDashboard({
     () => lines.filter(l => /reator/i.test(l.id) || /reator/i.test(l.name)),
     [lines]
   );
-  // Sleev fica FORA do Dashboard Geral (métrica separada: Relatório do Dia e
-  // Histórico & Gráficos) — aqui só as linhas de Envase.
+  // Espelho em tempo real: Envase 1, Envase 2 e o card do Sleev (só status).
+  // As MÉTRICAS do Dashboard Geral usam só o Envase (envaseMetricLines) — o
+  // Sleev é métrica separada (Relatório do Dia e Histórico & Gráficos).
   const envaseLines = useMemo(
-    () => lines.filter(l => !(/reator/i.test(l.id) || /reator/i.test(l.name)) && !isSleeveLineId(l.id) && !isSleeveLineId(l.name)),
+    () => lines.filter(l => !(/reator/i.test(l.id) || /reator/i.test(l.name))),
     [lines]
+  );
+  const envaseMetricLines = useMemo(
+    () => envaseLines.filter(l => !isSleeveLineId(l.id) && !isSleeveLineId(l.name)),
+    [envaseLines]
   );
 
   // ---------------- CÁLCULOS DAS 8 MÉTRICAS PRINCIPAIS ----------------
@@ -655,7 +668,7 @@ export function HomeDashboard({
   const avgLineProductionTime = useMemo(() => {
     // Só as linhas de Envase/Sleeve — os reatores da Manipulação têm outro
     // ritmo (e o próprio card diz "média entre Envase 1 e Envase 2").
-    const lineIds = envaseLines.map(l => l.id);
+    const lineIds = envaseMetricLines.map(l => l.id);
 
     let sumWorkingMs = 0;
     let sumIdleMs = 0;
@@ -705,7 +718,7 @@ export function HomeDashboard({
       avgOvertimeMs: 0,
       avgChangeoverMs: 0,
     };
-  }, [envaseLines, periodProductionTime]);
+  }, [envaseMetricLines, periodProductionTime]);
 
   // Índice de Ociosidade: % das horas de turno do período perdidas em paradas (média das 3 linhas), capado em 100%
   // Base: o EXPEDIENTE real das linhas no período (inclui hora extra). Só cai
@@ -771,12 +784,29 @@ export function HomeDashboard({
   }, []);
 
   const oeeMetrics = useMemo(
-    () => calculateOEE(periodOpsAndEvents.periodOps.filter(isEnvaseLineOp), periodOpsAndEvents.periodEvents, workSessions),
-    [periodOpsAndEvents, isEnvaseLineOp, workSessions]
+    () => calculateOEE(periodOpsAndEvents.periodOps.filter(isEnvaseLineOp), periodOpsAndEvents.periodEvents, workSessions, events, { rangeStart: periodDateRange.rangeStart, rangeEnd: periodDateRange.rangeEnd }),
+    [periodOpsAndEvents, isEnvaseLineOp, workSessions, events, periodDateRange]
   );
 
-  const oeeDisponibilidadePct = oeeMetrics.disponibilidade !== null
-    ? Math.round(oeeMetrics.disponibilidade * 1000) / 10
+  // Disponibilidade = MESMA apuração dos cards das linhas (tempo trabalhado ÷
+  // (trabalhado + ocioso) do Envase 1 + Envase 2 no período, com expediente).
+  // Antes saía do calculateOEE só com as OPs "do período" — uma OP iniciada
+  // ontem e ainda em produção hoje ficava de fora, e o expediente contava sem
+  // o trabalho dela (ex.: 12,5% com as linhas em 58% e 97%).
+  const envaseDisponibilidade = useMemo(() => {
+    let w = 0;
+    let i = 0;
+    for (const l of envaseMetricLines) {
+      const m = periodProductionTime.byLine[l.id];
+      if (!m) continue;
+      w += m.workingMs || 0;
+      i += m.idleMs || 0;
+    }
+    return w + i > 0 ? w / (w + i) : null;
+  }, [envaseMetricLines, periodProductionTime]);
+  const oeeDisponibilidade = envaseDisponibilidade ?? oeeMetrics.disponibilidade;
+  const oeeDisponibilidadePct = oeeDisponibilidade !== null
+    ? Math.round(oeeDisponibilidade * 1000) / 10
     : null;
   const oeePerformancePct = oeeMetrics.performance !== null
     ? Math.round(oeeMetrics.performance * 1000) / 10
@@ -784,8 +814,11 @@ export function HomeDashboard({
   const oeeQualidadePct = oeeMetrics.qualidade !== null
     ? Math.round(oeeMetrics.qualidade * 1000) / 10
     : null;
-  const oeeOverallPct = oeeMetrics.oee !== null
-    ? Math.round(oeeMetrics.oee * 1000) / 10
+  const oeeCombined = oeeDisponibilidade !== null && oeeMetrics.performance !== null && oeeMetrics.qualidade !== null
+    ? oeeDisponibilidade * oeeMetrics.performance * oeeMetrics.qualidade
+    : null;
+  const oeeOverallPct = oeeCombined !== null
+    ? Math.round(oeeCombined * 1000) / 10
     : null;
 
   // Faixa de cor do card 6 conforme a referência clássica de OEE:
@@ -813,7 +846,8 @@ export function HomeDashboard({
         const d = new Date(ev.createdAt);
         return !isNaN(d.getTime()) && d.getFullYear() === currentYear && d.getMonth() === m;
       });
-      const metrics = calculateOEE(monthOps.filter(isEnvaseLineOp), monthEvents, workSessions);
+      const lastDay = new Date(currentYear, m + 1, 0).getDate();
+      const metrics = calculateOEE(monthOps.filter(isEnvaseLineOp), monthEvents, workSessions, events, { rangeStart: `${monthKey}-01`, rangeEnd: `${monthKey}-${String(lastDay).padStart(2, '0')}` });
       result.push({
         monthName: MONTH_LABELS_SHORT[m],
         disponibilidade: metrics.disponibilidade !== null ? Math.round(metrics.disponibilidade * 1000) / 10 : null,
@@ -854,6 +888,46 @@ export function HomeDashboard({
   // 1. KPIs de Volume por Setor — apenas UM número, restrito ao período
   // selecionado no filtro do dashboard (Dia/Mês/Ano/Geral), usando o mesmo
   // recorte já aplicado ao OEE (periodOpsAndEvents).
+  // Produção REAL do Envase por dia (Envase 1 + Envase 2, sem Sleev): cada
+  // apontamento/pausa/conclusão conta no dia em que aconteceu — uma OP que
+  // ainda está em produção já soma o que foi envasado hoje. OP sem nenhum
+  // apontamento (histórico importado) conta no dia em que foi fechada.
+  const envaseProducedByDay = useMemo(() => {
+    const envOps = ops.filter(o => o && !o.isPartialRecord && isEnvaseLineOpBase(o));
+    const envIds = new Set(envOps.map(o => String(o.id)));
+    const envEvents = events.filter(e => e.opId && envIds.has(String(e.opId)));
+    const withQty = new Set(
+      envEvents
+        .filter(e => e.type === 'QUANTITY_REPORTED' || ((e.type === 'PAUSED' || e.type === 'FINISHED') && e.quantity !== undefined && e.quantity !== null))
+        .map(e => String(e.opId))
+    );
+    const byLineDay = computeProductionByLineAndDay(envEvents, envOps);
+    const byDay = new Map<string, number>();
+    for (const [lineId, days] of Object.entries(byLineDay)) {
+      if (isSleeveLineId(lineId) || /reator|pesagem|manipula/i.test(lineId)) continue;
+      for (const [day, q] of Object.entries(days)) byDay.set(day, (byDay.get(day) || 0) + Number(q || 0));
+    }
+    for (const op of envOps) {
+      if (withQty.has(String(op.id)) || isSleeveLineId(op.lineId)) continue;
+      const qty = Number(op.producedQuantity) || 0;
+      if (qty <= 0) continue;
+      const day = getOpReferenceDateStr(op);
+      if (day) byDay.set(day, (byDay.get(day) || 0) + qty);
+    }
+    return byDay;
+  }, [ops, events]);
+  const envaseProducedInPeriod = useMemo(() => {
+    let t = 0;
+    for (const [day, q] of envaseProducedByDay.entries()) {
+      if (dashboardPeriod !== 'geral') {
+        if (periodDateRange.rangeStart && day < periodDateRange.rangeStart) continue;
+        if (periodDateRange.rangeEnd && day > periodDateRange.rangeEnd) continue;
+      }
+      t += q;
+    }
+    return t;
+  }, [envaseProducedByDay, dashboardPeriod, periodDateRange]);
+
   const sectorKpis = useMemo(() => {
     let pesagemQtd = 0;
     let manipQtd = 0;
@@ -889,9 +963,10 @@ export function HomeDashboard({
     return {
       pesagem: { valor: pesagemQtd, unidade: 'Qtd' },
       manipulacao: { valor: manipQtd, unidade: 'Kg' },
-      envase: { valor: envaseQtd, unidade: 'Un' },
+      // Envase = produção real do período (apontamentos), sem Sleev
+      envase: { valor: envaseProducedInPeriod, unidade: 'Un' },
     };
-  }, [periodOpsAndEvents, partialRecords, periodDateRange, dashboardPeriod]);
+  }, [periodOpsAndEvents, partialRecords, periodDateRange, dashboardPeriod, envaseProducedInPeriod]);
 
   // Velocímetro da meta: Dia = meta diária do Envase 1 + Envase 2; Mês = meta
   // mensal da fábrica; Ano = soma das metas de cada mês do ano.
@@ -903,9 +978,31 @@ export function HomeDashboard({
       return legacy > 0 ? legacy : null;
     };
     if (dashboardPeriod === 'dia') {
-      const envLines = envaseLines.filter(l => /envase/i.test(l.name) && !/sle+v/i.test(l.name) && !/sle+v/i.test(l.id));
-      const g = envLines.reduce((a, l) => a + (getLineDailyGoal(l.id) || 0), 0);
-      return { goal: g > 0 ? g : null, label: g > 0 ? `meta do dia (${envLines.map(l => l.name).join(' + ')})` : 'Sem meta diária cadastrada para os Envases' };
+      // Meta esperada do dia por linha de Envase: a meta diária cadastrada da
+      // linha; sem ela, o previsto das OPs da linha no dia (programadas para
+      // hoje, em produção/pausadas ou concluídas hoje) — mesma regra da tela do líder.
+      const envLines = envaseMetricLines;
+      let total = 0;
+      let usedPlanned = false;
+      for (const l of envLines) {
+        const fixed = getLineDailyGoal(l.id);
+        if (fixed && fixed > 0) { total += fixed; continue; }
+        const planned = ops
+          .filter(o => o && o.lineId === l.id && !o.isPartialRecord)
+          .filter(o =>
+            o.scheduledDate === todayDateStr ||
+            o.status === 'in_progress' || o.status === 'paused' ||
+            (o.status === 'completed' && !!o.completedAt && toLocalDateStr(o.completedAt) === todayDateStr)
+          )
+          .reduce((a, o) => a + (Number(o.plannedQuantity) || 0), 0);
+        if (planned > 0) { total += planned; usedPlanned = true; }
+      }
+      return {
+        goal: total > 0 ? total : null,
+        label: total > 0
+          ? `${usedPlanned ? 'previsto das OPs do dia' : 'meta do dia'} (${envLines.map(l => l.name).join(' + ')})`
+          : 'Sem meta diária nem OPs programadas hoje nos Envases',
+      };
     }
     if (dashboardPeriod === 'mes') {
       const g = monthGoalOf(currentYear, selectedMonth + 1);
@@ -917,7 +1014,7 @@ export function HomeDashboard({
       return { goal: total > 0 ? total : null, label: total > 0 ? `soma das metas de ${currentYear}` : 'Sem metas cadastradas no ano' };
     }
     return { goal: null, label: 'Escolha Dia, Mês ou Ano para ver a meta' };
-  }, [dashboardPeriod, envaseLines, getLineDailyGoal, factoryMonthlyGoals, goals, currentYear, selectedMonth]);
+  }, [dashboardPeriod, envaseMetricLines, getLineDailyGoal, ops, todayDateStr, factoryMonthlyGoals, goals, currentYear, selectedMonth]);
 
   // 2. Meta Diária do Mês Atual
   const daysInCurrentMonth = useMemo(() => {

@@ -77,7 +77,13 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
 export function calculateOEE(
   ops: ProductionOrder[],
   events: ProductionEvent[],
-  workSessions?: WorkSession[]
+  workSessions?: WorkSession[],
+  /** Todos os eventos (sem recorte de período) — para achar as conclusões
+   * PARCIAIS de cada OP, que podem ter acontecido em outro dia. */
+  allEventsForPartials?: ProductionEvent[],
+  /** Período ('AAAA-MM-DD') — sem ele, a Disponibilidade somava os expedientes
+   * de TODOS os dias contra o trabalho só do período (ex.: 12% em vez de 79%). */
+  dateRange?: { rangeStart?: string; rangeEnd?: string }
 ): {
   disponibilidade: number | null;
   performance: number | null;
@@ -115,7 +121,11 @@ export function calculateOEE(
         opEvents,
         ops,
         lineIdsInOps.map(id => ({ id, name: id, status: 'idle', currentOpId: null } as ProductionLine)),
-        workSessions ? { workSessions } : undefined
+        {
+          ...(workSessions ? { workSessions } : {}),
+          ...(dateRange?.rangeStart ? { rangeStart: dateRange.rangeStart } : {}),
+          ...(dateRange?.rangeEnd ? { rangeEnd: dateRange.rangeEnd } : {}),
+        }
       );
       if (timeMetrics.totalMs > 0) {
         disponibilidade = Math.max(0, Math.min(1, timeMetrics.workingMs / timeMetrics.totalMs));
@@ -151,11 +161,29 @@ export function calculateOEE(
     let performance: number | null = null;
 
     if (activeOrFinishedOps.length > 0) {
-      const totalPlanned = activeOrFinishedOps.reduce((sum, op) => sum + (op.plannedQuantity || 0), 0);
-      const totalProduced = activeOrFinishedOps.reduce((sum, op) => sum + (op.producedQuantity || 0), 0);
+      // Mesma base do Rendimento do Envase: numa OP com conclusão PARCIAL o
+      // planejado gravado vira só o saldo, mas a conclusão final traz a
+      // quantidade da OP — sem somar as parciais ao esperado, a Performance
+      // passava de 100% (ex.: 162%). Agora: esperado = saldo + parciais,
+      // produzido = final + parciais, e cada OP conta no máximo 100%.
+      const partialQtyByOp = new Map<string, number>();
+      for (const ev of allEventsForPartials || events || []) {
+        if (!ev?.opId || !isPartialFinishEvent(ev)) continue;
+        const q = Number(ev.quantity) || 0;
+        if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
+      }
+      let totalPlanned = 0;
+      let totalProduced = 0;
+      for (const op of activeOrFinishedOps) {
+        const partial = partialQtyByOp.get(String(op.id)) || 0;
+        const expected = (op.plannedQuantity || 0) + partial;
+        const produced = Math.max(0, (op.producedQuantity || 0) + partial);
+        totalPlanned += expected;
+        totalProduced += Math.min(produced, expected);
+      }
 
       if (totalPlanned > 0) {
-        performance = Math.max(0, totalProduced / totalPlanned);
+        performance = Math.max(0, Math.min(1, totalProduced / totalPlanned));
       }
     }
 
