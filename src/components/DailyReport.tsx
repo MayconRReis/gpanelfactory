@@ -11,6 +11,7 @@ import {
   LineHeadcount,
   LineChangeover,
   DailyReportManual,
+  StaffOccurrence,
 } from '../types';
 import {
   toLocalDateStr,
@@ -23,6 +24,9 @@ import {
   getHeadcountForLineDay,
   getDailyReports,
   saveDailyReport,
+  getStaffOccurrences,
+  sumStaffOccurrences,
+  STAFF_OCCURRENCE_LABELS,
 } from '../services/db';
 import { calculateProductionTime, formatMsToHoursMinutes } from '../lib/productionTime';
 
@@ -336,17 +340,71 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envaseProduction, year, month, selectedDate, factoryMonthlyGoals, goals]);
 
-  // ---------- Quadro do dia: total do mês (dias salvos até a data) ----------
+  // ---------- Ocorrências de pessoal lançadas pelos líderes (staff_occurrences) ----------
+  const [monthOccurrences, setMonthOccurrences] = useState<StaffOccurrence[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getStaffOccurrences(monthStart, selectedDate).then(res => { if (!cancelled) setMonthOccurrences(res.list); });
+    load();
+    // atualiza sozinho: a cada 1 min e quando a janela volta ao foco
+    const timer = window.setInterval(load, 60_000);
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener('focus', onFocus); };
+  }, [monthStart, selectedDate]);
+  const OCC_ORDER = ['falta', 'atestado', 'atraso', 'saida_antecipada', 'acidente', 'incidente', 'hora_extra', 'free_balde'];
+  const dayOccurrences = useMemo(() => monthOccurrences
+    .filter(o => o.date === selectedDate)
+    .sort((a, b) => OCC_ORDER.indexOf(a.type) - OCC_ORDER.indexOf(b.type) || a.lineId.localeCompare(b.lineId) || a.createdAt.localeCompare(b.createdAt)),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [monthOccurrences, selectedDate]);
+  const dayOccTotals = useMemo(() => sumStaffOccurrences(dayOccurrences), [dayOccurrences]);
+  const dayHasAppOcc = dayOccurrences.some(o => ['falta', 'atraso', 'atestado', 'saida_antecipada'].includes(o.type));
+
+  // Quadro do dia: nos dias com lançamentos dos líderes vale o app; nos dias
+  // sem lançamento, vale o número digitado aqui (relatórios antigos).
+  const dayQuadro = useMemo(() => ({
+    atestados: dayHasAppOcc ? dayOccTotals.atestado : manual.atestados,
+    faltas: dayHasAppOcc ? dayOccTotals.falta : manual.faltas,
+    atrasos: dayHasAppOcc ? dayOccTotals.atraso : manual.atrasos,
+    saidas: dayHasAppOcc ? dayOccTotals.saida_antecipada : manual.saidasAntecipadas,
+    horaExtra: dayOccTotals.hora_extra,
+    freeBalde: dayOccTotals.free_balde,
+    acidentes: dayOccTotals.acidente,
+    incidentes: dayOccTotals.incidente,
+  }), [dayHasAppOcc, dayOccTotals, manual]);
+
+  // ---------- Quadro do dia: total do mês (até a data) ----------
   const monthTotals = useMemo(() => {
-    const list = monthReports.filter(r => r.date >= monthStart && r.date <= selectedDate && r.date !== selectedDate);
-    const all = [...list, manual];
-    return all.reduce((acc, r) => ({
-      atestados: acc.atestados + (Number(r.atestados) || 0),
-      faltas: acc.faltas + (Number(r.faltas) || 0),
-      atrasos: acc.atrasos + (Number(r.atrasos) || 0),
-      saidas: acc.saidas + (Number(r.saidasAntecipadas) || 0),
-    }), { atestados: 0, faltas: 0, atrasos: 0, saidas: 0 });
-  }, [monthReports, manual, monthStart, selectedDate]);
+    const t = { atestados: 0, faltas: 0, atrasos: 0, saidas: 0, horaExtra: 0, freeBalde: 0, acidentes: 0, incidentes: 0 };
+    const byDay = new Map<string, StaffOccurrence[]>();
+    for (const o of monthOccurrences) {
+      if (o.date < monthStart || o.date > selectedDate) continue;
+      const l = byDay.get(o.date) || [];
+      l.push(o);
+      byDay.set(o.date, l);
+    }
+    const days = new Set<string>([...Array.from(byDay.keys()), ...monthReports.map(r => r.date).filter(d => d >= monthStart && d <= selectedDate), selectedDate]);
+    for (const d of days) {
+      const occ = byDay.get(d) || [];
+      const sum = sumStaffOccurrences(occ);
+      const hasApp = occ.some(o => ['falta', 'atraso', 'atestado', 'saida_antecipada'].includes(o.type));
+      const rep = d === selectedDate ? manual : monthReports.find(r => r.date === d);
+      t.atestados += hasApp ? sum.atestado : Number(rep?.atestados) || 0;
+      t.faltas += hasApp ? sum.falta : Number(rep?.faltas) || 0;
+      t.atrasos += hasApp ? sum.atraso : Number(rep?.atrasos) || 0;
+      t.saidas += hasApp ? sum.saida_antecipada : Number(rep?.saidasAntecipadas) || 0;
+      t.horaExtra += sum.hora_extra;
+      t.freeBalde += sum.free_balde;
+      t.acidentes += sum.acidente;
+      t.incidentes += sum.incidente;
+    }
+    return t;
+  }, [monthOccurrences, monthReports, manual, monthStart, selectedDate]);
+
+  const occLineName = (id: string) =>
+    id === 'setor-manipulacao' ? 'Manipulação' : id === 'setor-pesagem' ? 'Pesagem' : lines.find(l => l.id === id)?.name || id;
+  const safetyOcc = dayOccurrences.filter(o => o.type === 'acidente' || o.type === 'incidente');
 
   const filledPontos = manual.pontos.filter(p => p.texto.trim());
 
@@ -466,7 +524,15 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                 </label>
               ))}
             </div>
-            <p className="text-[11px] text-[#71717a] mt-2 flex items-start gap-1.5">
+            <p className={`text-[11px] mt-2 flex items-start gap-1.5 ${dayHasAppOcc ? 'text-emerald-300' : 'text-[#71717a]'}`}>
+              <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+              <span>
+                {dayHasAppOcc
+                  ? `Os líderes lançaram ${dayOccurrences.length} ocorrência(s) hoje — o quadro usa os lançamentos do app; os campos acima valem só para dias sem lançamento.`
+                  : 'Sem lançamentos dos líderes neste dia — o quadro usa os números digitados acima.'}
+              </span>
+            </p>
+            <p className="text-[11px] text-[#71717a] mt-1 flex items-start gap-1.5">
               <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
               <span>
                 Faltas lançadas pelos líderes nas linhas de envase neste dia: <strong className="text-[#d4d4d8]">{appAbsences}</strong>
@@ -558,15 +624,21 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
             <div className={h2}>2. Quadro do dia</div>
             <table className="w-full border-collapse">
               <thead>
-                <tr><th className={thc}>Período</th><th className={thc}>Atestados</th><th className={thc}>Faltas</th><th className={thc}>Atrasos</th><th className={thc}>Saídas antecipadas</th></tr>
+                <tr>
+                  <th className={thc}>Período</th><th className={thc}>Atestados</th><th className={thc}>Faltas</th><th className={thc}>Atrasos</th>
+                  <th className={thc}>Saídas antecipadas</th><th className={thc}>Hora extra</th><th className={thc}>Free do balde</th><th className={thc}>Acidentes / Incidentes</th>
+                </tr>
               </thead>
               <tbody>
                 <tr>
                   <td className={tdc + ' font-bold'}>Hoje</td>
-                  <td className={tdc}>{nf(manual.atestados)}</td>
-                  <td className={tdc}>{nf(manual.faltas)}</td>
-                  <td className={tdc}>{nf(manual.atrasos)}</td>
-                  <td className={tdc}>{nf(manual.saidasAntecipadas)}</td>
+                  <td className={tdc}>{nf(dayQuadro.atestados)}</td>
+                  <td className={tdc}>{nf(dayQuadro.faltas)}</td>
+                  <td className={tdc}>{nf(dayQuadro.atrasos)}</td>
+                  <td className={tdc}>{nf(dayQuadro.saidas)}</td>
+                  <td className={tdc}>{nf(dayQuadro.horaExtra)}</td>
+                  <td className={tdc}>{nf(dayQuadro.freeBalde)}</td>
+                  <td className={tdc}>{nf(dayQuadro.acidentes)} / {nf(dayQuadro.incidentes)}</td>
                 </tr>
                 <tr>
                   <td className={tdTotal}>Total do mês</td>
@@ -574,9 +646,33 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                   <td className={tdTotal}>{nf(monthTotals.faltas)}</td>
                   <td className={tdTotal}>{nf(monthTotals.atrasos)}</td>
                   <td className={tdTotal}>{nf(monthTotals.saidas)}</td>
+                  <td className={tdTotal}>{nf(monthTotals.horaExtra)}</td>
+                  <td className={tdTotal}>{nf(monthTotals.freeBalde)}</td>
+                  <td className={tdTotal}>{nf(monthTotals.acidentes)} / {nf(monthTotals.incidentes)}</td>
                 </tr>
               </tbody>
             </table>
+
+            <div className="text-[12.5px] font-bold text-[#111827] mt-3 mb-1">Ocorrências de pessoal do dia</div>
+            {dayOccurrences.length === 0 ? (
+              <p className="text-[#9ca3af] italic">Nenhuma ocorrência de pessoal lançada no dia.</p>
+            ) : (
+              <>
+                <table className="w-full border-collapse">
+                  <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
+                  <tbody>
+                    {dayOccurrences.map(o => (
+                      <tr key={o.id}>
+                        <td className={td}>{occLineName(o.lineId)}</td>
+                        <td className={td}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
+                        <td className={td}>{o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}</td>
+                        <td className={td}>{o.reason || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
 
             {/* 3. Principais pontos */}
             <div className={h2}>3. Principais pontos do dia</div>
@@ -591,7 +687,16 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
             )}
 
             <div className="text-[12.5px] font-bold text-[#111827] mt-3 mb-1">Segurança</div>
-            <p>{manual.seguranca.trim() || DEFAULT_SAFETY}</p>
+            {safetyOcc.length > 0 ? (
+              <div className="space-y-0.5">
+                {safetyOcc.map(o => (
+                  <p key={o.id}><strong>{STAFF_OCCURRENCE_LABELS[o.type]}</strong> — {occLineName(o.lineId)}{o.employeeName ? ` · ${o.employeeName}` : ''}{o.reason ? `: ${o.reason}` : ''}</p>
+                ))}
+                {manual.seguranca.trim() && manual.seguranca.trim() !== DEFAULT_SAFETY && <p>{manual.seguranca.trim()}</p>}
+              </div>
+            ) : (
+              <p>{manual.seguranca.trim() || DEFAULT_SAFETY}</p>
+            )}
 
             {/* 4. Linhas de envase (dados do app) */}
             <div className={h2}>4. Linhas de envase no dia</div>

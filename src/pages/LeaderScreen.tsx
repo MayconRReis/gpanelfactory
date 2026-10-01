@@ -1182,12 +1182,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       desde {new Date(todayTeam.recordedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
-                  <button
-                    onClick={openTeamEditor}
-                    className="px-3 py-1.5 rounded-lg bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-[11px] font-bold text-[#f4f4f5]"
-                  >
-                    Alterar equipe
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={openTeamEditor}
+                      className="px-3 py-1.5 rounded-lg bg-[#171720] hover:bg-[#20202c] border border-[#2b2b38] text-[11px] font-bold text-[#f4f4f5]"
+                    >
+                      Alterar equipe
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-950/40 border border-amber-800/50 rounded-2xl px-4 py-3">
@@ -1195,12 +1197,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     <Users className="w-4 h-4 text-amber-400 shrink-0" />
                     Informe quantos colaboradores estão na linha hoje e quantos faltaram.
                   </p>
-                  <button
-                    onClick={openTeamEditor}
-                    className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[11px] font-black"
-                  >
-                    Informar equipe
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={openTeamEditor}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-amber-950 text-[11px] font-black"
+                    >
+                      Informar equipe
+                    </button>
+                  </div>
                 </div>
               )
             )}

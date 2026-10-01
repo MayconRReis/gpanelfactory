@@ -98,8 +98,9 @@ import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } from '../components/CronogramaBoard';
-import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, Eye, FileText } from 'lucide-react';
+import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, Eye, FileText, ClipboardList } from 'lucide-react';
 import { DailyReport } from '../components/DailyReport';
+import { StaffOccurrencesPage } from '../components/StaffOccurrences';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -1368,6 +1369,11 @@ WHERE email IN (
       subtitle: 'Relatório diário de produção para envio',
       icon: FileText,
     },
+    ocorrencias: {
+      title: 'Ocorrências de Pessoal',
+      subtitle: 'Faltas, atrasos, atestados, saídas, acidentes/incidentes, hora extra e free do balde',
+      icon: ClipboardList,
+    },
     daily_production: {
       title: 'Histórico & Gráficos',
       subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
@@ -1537,6 +1543,11 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 userId={profile?.uid || null}
               />
+            )}
+
+            {/* ---------------- TELA: OCORRÊNCIAS DE PESSOAL (todos têm acesso) ---------------- */}
+            {activeTab === 'ocorrencias' && (
+              <StaffOccurrencesPage lines={lines} profile={profile || null} />
             )}
 
             {/* ---------------- TELA: CRONOGRAMA (KANBAN) — ENVASE OU MANIPULAÇÃO ---------------- */}

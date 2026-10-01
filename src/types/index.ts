@@ -18,7 +18,8 @@ export type DashboardTab =
   | 'ops'
   | 'users'
   | 'events'
-  | 'relatorio';
+  | 'relatorio'
+  | 'ocorrencias';
 
 export interface UserProfile {
   uid: string;
@@ -226,4 +227,27 @@ export interface DailyReportManual {
   seguranca: string;
   updatedAt?: string | null;
   updatedBy?: string | null;
+}
+
+/** Ocorrências de pessoal lançadas pelo líder (tabela staff_occurrences). */
+export type StaffOccurrenceType =
+  | 'falta'
+  | 'atraso'
+  | 'atestado'
+  | 'saida_antecipada'
+  | 'acidente'
+  | 'incidente'
+  | 'hora_extra'
+  | 'free_balde';
+
+export interface StaffOccurrence {
+  id: string;
+  date: string; // 'AAAA-MM-DD'
+  lineId: string; // linha ou setor (ex.: line-1, setor-manipulacao, setor-pesagem)
+  type: StaffOccurrenceType;
+  employeeName: string;
+  quantity: number; // normalmente 1; "free do balde" pode lançar vários de uma vez
+  reason: string;
+  createdBy?: string | null;
+  createdAt: string;
 }

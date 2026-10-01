@@ -504,10 +504,16 @@ export function CsvImportModal({ isOpen, onClose, onSuccess }: CsvImportModalPro
       }));
 
       const res = await importOPsBatch(itemsToImport);
+      const skippedMsg = res.skipped && res.skipped.length > 0
+        ? `${res.skipped.length} OP(s) já existiam no estoque e foram ignoradas: ${res.skipped.slice(0, 15).join(', ')}${res.skipped.length > 15 ? '…' : ''}`
+        : '';
       if (res.imported && res.imported.length > 0) {
+        if (skippedMsg) window.alert(`${res.imported.length} OP(s) importada(s).\n${skippedMsg}`);
         onSuccess(res.imported);
         handleReset();
         onClose();
+      } else if (skippedMsg) {
+        setErrorMessage(`Nada foi importado — ${skippedMsg}.`);
       } else {
         setErrorMessage('Não foi possível gravar as OPs no banco. Tente novamente.');
       }

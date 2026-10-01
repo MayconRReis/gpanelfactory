@@ -7,7 +7,7 @@ import {
   isFetchOrNetworkError,
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction, DailyReportManual } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction, DailyReportManual, StaffOccurrence, StaffOccurrenceType } from '../types';
 import { calculateProductionTime } from '../lib/productionTime';
 
 /**
@@ -2094,7 +2094,18 @@ export const createOP = async (newOpData: {
   const existingLocal = inMemoryOps.find(isSameKey);
   if (existingLocal) {
     if (options.reuseExisting) return adoptExistingOp(existingLocal.id, newOpData);
-    throw new DuplicateOpError(trimmedNumber, targetSetor);
+    throw new DuplicateOpError(trimmedNumber, targetSetor, fmtCreated(existingLocal.createdAt));
+  }
+
+  // TRAVA contra cadastro em dobro por duas pessoas ao mesmo tempo: a tela de
+  // cada um pode estar desatualizada, então confere NO BANCO antes de gravar
+  // (número sem espaços/maiúsculas e Envase = Geral = sem setor).
+  if (!options.reuseExisting) {
+    const family = setorFamily(targetSetor);
+    const inDb = (await findOpsByNumber(trimmedNumber)).filter(o => setorFamily(o.setor) === family);
+    if (inDb.length > 0) {
+      throw new DuplicateOpError(trimmedNumber, inDb[0].setor || targetSetor, fmtCreated(inDb[0].createdAt) || 'acabou de ser cadastrada por outra pessoa');
+    }
   }
 
   const newOp: ProductionOrder = {
@@ -2278,11 +2289,26 @@ export const findOpsByLote = async (
 /** Já existe uma OP com esse número nesse setor (regra UNIQUE(number, setor)). */
 export class DuplicateOpError extends Error {
   readonly isDuplicateOp = true;
-  constructor(number: string, setor: string | null) {
-    super(`Já existe uma OP ${number}${setor ? ` no setor ${setor}` : ''}. Nada foi alterado.`);
+  constructor(number: string, setor: string | null, detail?: string) {
+    super(`Já existe uma OP ${number}${setor ? ` no setor ${setor}` : ''}${detail ? ` (${detail})` : ''}. Nada foi alterado.`);
     this.name = 'DuplicateOpError';
   }
 }
+
+/** Número da OP normalizado para comparação: sem espaços extras, maiúsculo. */
+export function normalizeOpNumber(n?: string | null): string {
+  return String(n || '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+/** Envase, Geral e sem setor contam como o MESMO estoque de OPs de envase. */
+function setorFamily(setor?: string | null): string {
+  const s = String(setor || '').trim();
+  return !s || s === 'Envase' || s === 'Geral' ? 'ENVASE' : s.toUpperCase();
+}
+const fmtCreated = (iso?: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : `cadastrada em ${d.toLocaleDateString('pt-BR')} às ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+};
 
 function isDuplicateKeyError(error: any): boolean {
   return error?.code === '23505' || /duplicate key/i.test(String(error?.message || ''));
@@ -2343,9 +2369,36 @@ export const importOPsBatch = async (
     tipoDocumento?: 'OP' | 'OSM';
     finishedShift?: 'Manhã' | 'Tarde';
   }>
-): Promise<{ successCount: number; imported: ProductionOrder[] }> => {
+): Promise<{ successCount: number; imported: ProductionOrder[]; skipped: string[] }> => {
   const newCreated: ProductionOrder[] = [];
   const startSeq = inMemoryOps.length + 1;
+
+  // TRAVA de duplicidade na importação: ignora as OPs que já existem NO BANCO
+  // (mesmo número no mesmo setor — Envase/Geral/sem setor contam juntos) ou
+  // que aparecem repetidas na própria planilha.
+  const skipped: string[] = [];
+  const existingKeys = new Set<string>();
+  for (const o of inMemoryOps) existingKeys.add(`${normalizeOpNumber(o.number)}|${setorFamily(o.setor)}`);
+  if (!trainingModeActive) {
+    try {
+      const nums = Array.from(new Set(items.map(it => String(it.number || '').trim()).filter(Boolean)));
+      for (let k = 0; k < nums.length; k += 200) {
+        const { data } = await supabase.from('production_orders').select('number, setor').in('number', nums.slice(k, k + 200));
+        for (const r of data || []) existingKeys.add(`${normalizeOpNumber((r as any).number)}|${setorFamily((r as any).setor)}`);
+      }
+    } catch { /* sem conexão: fica só a checagem local e a regra do banco */ }
+  }
+  const batchKeys = new Set<string>();
+  const filteredItems = items.filter(it => {
+    const key = `${normalizeOpNumber(it.number)}|${setorFamily(it.setor)}`;
+    if (existingKeys.has(key) || batchKeys.has(key)) {
+      skipped.push(String(it.number || '').trim());
+      return false;
+    }
+    batchKeys.add(key);
+    return true;
+  });
+  items = filteredItems;
 
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
@@ -2428,6 +2481,7 @@ export const importOPsBatch = async (
   return {
     successCount: newCreated.length,
     imported: newCreated,
+    skipped,
   };
 };
 
@@ -5110,3 +5164,127 @@ export const saveDailyReport = async (report: DailyReportManual, userId?: string
     return { error: String(err?.message || err) };
   }
 };
+
+
+// ---------------- OCORRÊNCIAS DE PESSOAL (staff_occurrences) ----------------
+// Faltas, atrasos, atestados, saídas antecipadas, acidentes/incidentes, hora
+// extra e free do balde — lançados pelo líder da linha/setor, com o nome do
+// colaborador e o motivo. Tabela criada por sql/add_staff_occurrences.sql.
+
+export const STAFF_OCCURRENCE_LABELS: Record<StaffOccurrenceType, string> = {
+  falta: 'Falta',
+  atraso: 'Atraso',
+  atestado: 'Atestado',
+  saida_antecipada: 'Saída antecipada',
+  acidente: 'Acidente',
+  incidente: 'Incidente',
+  hora_extra: 'Hora extra',
+  free_balde: 'Free do balde',
+};
+
+const mapStaffOccurrenceRow = (r: any): StaffOccurrence => ({
+  id: String(r.id),
+  date: String(r.occurred_on).slice(0, 10),
+  lineId: String(r.line_id || ''),
+  type: r.type as StaffOccurrenceType,
+  employeeName: String(r.employee_name || ''),
+  quantity: Math.max(1, Number(r.quantity) || 1),
+  reason: String(r.reason || ''),
+  createdBy: r.created_by || null,
+  createdAt: r.created_at,
+});
+
+let trainingStaffOccurrences: StaffOccurrence[] = [];
+
+/** Ocorrências entre duas datas ('AAAA-MM-DD', inclusivo). */
+export const getStaffOccurrences = async (fromDate: string, toDate: string): Promise<{ list: StaffOccurrence[]; error: string | null }> => {
+  if (trainingModeActive) {
+    return { list: trainingStaffOccurrences.filter(o => o.date >= fromDate && o.date <= toDate), error: null };
+  }
+  try {
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('staff_occurrences')
+        .select('*')
+        .gte('occurred_on', fromDate)
+        .lte('occurred_on', toDate)
+        .order('occurred_on', { ascending: true })
+        .order('created_at', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getStaffOccurrences] Não foi possível ler staff_occurrences (rodou sql/add_staff_occurrences.sql?):', error.message);
+        return { list: [], error: error.message };
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return { list: rows.map(mapStaffOccurrenceRow), error: null };
+  } catch (err: any) {
+    return { list: [], error: String(err?.message || err) };
+  }
+};
+
+/** Registra uma ocorrência e confere se o banco gravou. */
+export const addStaffOccurrence = async (
+  occ: Omit<StaffOccurrence, 'id' | 'createdAt' | 'createdBy'>,
+  userId?: string | null
+): Promise<{ ok: boolean; error?: string }> => {
+  const name = String(occ.employeeName || '').trim();
+  const reason = String(occ.reason || '').trim();
+  const quantity = Math.max(1, Math.floor(Number(occ.quantity) || 1));
+  if (!name && occ.type !== 'free_balde') return { ok: false, error: 'Informe o nome do colaborador.' };
+  if (trainingModeActive) {
+    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('staff_occurrences')
+      .insert({
+        occurred_on: occ.date,
+        line_id: occ.lineId,
+        type: occ.type,
+        employee_name: name,
+        quantity,
+        reason,
+        created_by: userId && isUUID(userId) ? userId : null,
+      })
+      .select('id');
+    if (error) {
+      notifyDbWriteFailure('Registrar ocorrência de pessoal', error.message);
+      return { ok: false, error: /staff_occurrences|does not exist|relation/i.test(error.message) ? 'A tabela de ocorrências ainda não existe — rode sql/add_staff_occurrences.sql no Supabase.' : error.message };
+    }
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+/** Remove uma ocorrência lançada por engano. */
+export const deleteStaffOccurrence = async (id: string): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) {
+    trainingStaffOccurrences = trainingStaffOccurrences.filter(o => o.id !== id);
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase.from('staff_occurrences').delete().eq('id', id).select('id');
+    if (error) return { ok: false, error: error.message };
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não excluiu (só quem lançou ou a coordenação pode excluir)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+/** Soma das quantidades por tipo. */
+export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurrenceType, number> {
+  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
+  for (const o of list) if (o.type in out) out[o.type] += o.quantity || 1;
+  return out;
+}

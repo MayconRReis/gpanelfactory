@@ -17,6 +17,7 @@ import {
   Boxes,
   Kanban,
   FileText,
+  ClipboardList,
 } from 'lucide-react';
 import { UserProfile, DashboardTab } from '../types';
 import { getUserAllowedTabs, getUserRule, ACCESS_RULES, isAdminRule } from '../lib/permissions';
@@ -117,6 +118,14 @@ export function Sidebar({
       icon: FileText,
       badge: null,
       description: 'Relatório diário de produção',
+      section: 'GESTÃO & PCP',
+    },
+    {
+      id: 'ocorrencias' as DashboardTab,
+      label: 'Ocorrências',
+      icon: ClipboardList,
+      badge: null,
+      description: 'Faltas, atrasos, atestados…',
       section: 'GESTÃO & PCP',
     },
     {

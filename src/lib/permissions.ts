@@ -23,6 +23,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
       'envase',
       'cronograma',
       'relatorio',
+      'ocorrencias',
       'daily_production',
       'ops',
       'users',
@@ -102,6 +103,11 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     group: 'Gestão & PCP',
     description: 'Relatório diário de produção (indicadores, quadro do dia, pontos do dia e evolução do mês)',
   },
+  ocorrencias: {
+    label: 'Ocorrências de Pessoal',
+    group: 'Gestão & PCP',
+    description: 'Faltas, atrasos, atestados, saídas, acidentes/incidentes, hora extra e free do balde (todos têm acesso)',
+  },
   daily_production: {
     label: 'Histórico & Gráficos',
     group: 'Gestão & PCP',
@@ -175,17 +181,17 @@ export function getUserRule(profile: UserProfile | null): AccessRule {
  */
 export function getUserAllowedTabs(profile: UserProfile | null): DashboardTab[] {
   // Tela home é a home de todos
-  if (!profile) return ['home'];
+  if (!profile) return ['home', 'ocorrencias'];
 
   // Se houver lista de telas personalizada (custom rule)
   if (profile.allowedScreens && Array.isArray(profile.allowedScreens) && profile.allowedScreens.length > 0) {
-    const screens = new Set<DashboardTab>(['home', ...profile.allowedScreens.filter((s: any) => s !== 'rotations')]);
+    const screens = new Set<DashboardTab>(['home', 'ocorrencias', ...profile.allowedScreens.filter((s: any) => s !== 'rotations')]);
     return Array.from(screens);
   }
 
   const rule = getUserRule(profile);
   const ruleConfig = ACCESS_RULES[rule] || ACCESS_RULES.envase;
-  const screens = new Set<DashboardTab>(['home', ...ruleConfig.tabs]);
+  const screens = new Set<DashboardTab>(['home', 'ocorrencias', ...ruleConfig.tabs]);
   return Array.from(screens);
 }
 
@@ -193,7 +199,7 @@ export function getUserAllowedTabs(profile: UserProfile | null): DashboardTab[] 
  * Verifica se o usuário tem permissão para acessar uma tela específica.
  */
 export function canUserAccessTab(profile: UserProfile | null, tab: DashboardTab): boolean {
-  if (tab === 'home') return true; // Todos têm acesso irrestrito ao Dashboard Geral
+  if (tab === 'home' || tab === 'ocorrencias') return true; // Todos têm acesso irrestrito ao Dashboard Geral
   const allowed = getUserAllowedTabs(profile);
   return allowed.includes(tab);
 }
@@ -222,3 +228,28 @@ export function isAdminRule(rule: AccessRule | string | null | undefined): boole
 
 // O Diretor Industrial enxerga exatamente as mesmas telas do Coordenador.
 ACCESS_RULES.diretor.tabs = [...ACCESS_RULES.admin.tabs];
+
+/**
+ * Ocorrências de pessoal: TODOS veem tudo, mas cada um só LANÇA na sua área.
+ * - ADM / Diretor: qualquer linha ou setor.
+ * - Envase: as linhas de envase (inclui Sleev).
+ * - Pesagem: setor de Pesagem. Manipulação: setor de Manipulação.
+ * Perfis personalizados seguem as telas liberadas para eles.
+ */
+export function getStaffOccurrenceAreas(profile: UserProfile | null): {
+  all: boolean;
+  envase: boolean;
+  pesagem: boolean;
+  manipulacao: boolean;
+} {
+  if (!profile) return { all: false, envase: false, pesagem: false, manipulacao: false };
+  const rule = getUserRule(profile);
+  if (isAdminRule(rule)) return { all: true, envase: true, pesagem: true, manipulacao: true };
+  const tabs = getUserAllowedTabs(profile);
+  return {
+    all: false,
+    envase: tabs.includes('envase'),
+    pesagem: tabs.includes('pesagem'),
+    manipulacao: tabs.includes('manipulacao'),
+  };
+}

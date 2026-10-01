@@ -24,6 +24,7 @@ import {
   UserCheck,
   Tag,
   RefreshCcw,
+  ClipboardList,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -40,6 +41,7 @@ import {
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, LineChangeover } from '../types';
 import { buildPartialProductionRecords, getChangeovers } from '../services/db';
 import { SetupHistory } from './SetupHistory';
+import { StaffOccurrencesSummary } from './StaffOccurrences';
 
 interface DailyProductionHistoryProps {
   ops: ProductionOrder[];
@@ -142,7 +144,9 @@ export function DailyProductionHistory({
   );
 
   // Sub-abas do módulo: 'integrated' (Visão completa) | 'table' (Só Histórico) | 'daily_chart' | 'monthly_chart' | 'setups' (Setups de Envase)
-  const [activeView, setActiveView] = useState<'integrated' | 'table' | 'daily_chart' | 'monthly_chart' | 'setups'>('integrated');
+  const [activeView, setActiveView] = useState<'integrated' | 'table' | 'daily_chart' | 'monthly_chart' | 'setups' | 'equipe'>('integrated');
+  // Escopo das ocorrências de pessoal: Dia vs Mês
+  const [staffScope, setStaffScope] = useState<'dia' | 'mes'>('mes');
 
   // Setups de Envase (troca de produto)
   const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
@@ -897,6 +901,17 @@ export function DailyProductionHistory({
                 Setups de Envase
               </button>
             )}
+            <button
+              onClick={() => setActiveView('equipe')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                activeView === 'equipe'
+                  ? 'bg-blue-600 text-white shadow'
+                  : 'text-[#a1a1aa] hover:text-white'
+              }`}
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-blue-400" />
+              Ocorrências de Pessoal
+            </button>
           </div>
 
           <div className="text-[11px] text-[#71717a] font-mono flex items-center gap-2">
@@ -909,7 +924,7 @@ export function DailyProductionHistory({
       </div>
 
       {/* ── CARDS DE RESUMO DO DIA SELECIONADO ── */}
-      {activeView !== 'setups' && (
+      {activeView !== 'setups' && activeView !== 'equipe' && (
         isPesagemMode ? (
         /* CARDS EXCLUSIVOS DO SETOR DE PESAGEM */
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -1189,7 +1204,7 @@ export function DailyProductionHistory({
       ))}
 
       {/* ── SEÇÃO DOS GRÁFICOS (DIÁRIO E MENSAL) ── */}
-      {activeView !== 'setups' && (activeView === 'integrated' || activeView === 'daily_chart' || activeView === 'monthly_chart') && (
+      {activeView !== 'setups' && activeView !== 'equipe' && (activeView === 'integrated' || activeView === 'daily_chart' || activeView === 'monthly_chart') && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           
           {/* GRÁFICO DIÁRIO */}
@@ -1590,7 +1605,7 @@ export function DailyProductionHistory({
       )}
 
       {/* ── SEÇÃO PRINCIPAL: HISTÓRICO PRODUTIVO DIÁRIO (O QUE FOI PRODUZIDO E A QUANTIDADE) ── */}
-      {activeView !== 'setups' && (
+      {activeView !== 'setups' && activeView !== 'equipe' && (
         <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-5 shadow-lg space-y-4">
         
         {/* Cabeçalho da Tabela com Filtros */}
@@ -1913,6 +1928,38 @@ export function DailyProductionHistory({
                 onClick={() => setSetupScope('mes')}
                 className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
                   setupScope === 'mes' ? 'bg-orange-600 text-white shadow-sm' : 'text-[#a1a1aa] hover:text-white'
+                }`}
+              >
+                Do Mês
+              </button>
+            </div>
+          }
+        />
+      )}
+
+      {/* ── OCORRÊNCIAS DE PESSOAL (faltas, atrasos, atestados, hora extra...) ── */}
+      {(activeView === 'integrated' || activeView === 'equipe') && (
+        <StaffOccurrencesSummary
+          lines={lines}
+          rangeStart={staffScope === 'dia' ? selectedDate : monthStartStr}
+          rangeEnd={staffScope === 'dia' ? selectedDate : monthEndStr}
+          periodLabel={staffScope === 'dia' ? `Dia: ${selectedDate.split('-').reverse().join('/')}` : `Mês: ${monthLabel}`}
+          scopeToggle={
+            <div className="flex items-center gap-1 bg-[#181822] p-0.5 rounded-lg border border-[#2c2c3c]">
+              <button
+                type="button"
+                onClick={() => setStaffScope('dia')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  staffScope === 'dia' ? 'bg-blue-600 text-white shadow-sm' : 'text-[#a1a1aa] hover:text-white'
+                }`}
+              >
+                Do Dia ({formattedDayShort})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStaffScope('mes')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                  staffScope === 'mes' ? 'bg-blue-600 text-white shadow-sm' : 'text-[#a1a1aa] hover:text-white'
                 }`}
               >
                 Do Mês
