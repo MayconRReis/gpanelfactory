@@ -214,7 +214,7 @@ export function Login() {
           <div className="flex items-center justify-between gap-3 mb-4">
             <div className="inline-flex items-center gap-2 bg-blue-600/90 text-white font-black text-xs px-3 py-1.5 rounded-lg tracking-wider shadow-[0_0_15px_rgba(37,99,235,0.4)]">
               <Factory className="w-3.5 h-3.5" />
-              <span>Gpanel Factory</span>
+              <span>Painel Industrial</span>
             </div>
             
             <span className="text-[11px] font-bold tracking-widest text-[#71717a] uppercase bg-[#181820] border border-[#282832] px-2.5 py-1 rounded-md">

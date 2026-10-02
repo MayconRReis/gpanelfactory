@@ -69,7 +69,7 @@ export function Sidebar({
   // Coordenador Geral — só ele tem permissão de escrita nessas tabelas via RLS.
   const canManageGoals = isAdminRule(userRule);
 
-  // Todos os itens do menu unificado do GPanel Factory
+  // Todos os itens do menu unificado do Painel Industrial
   const allMenuItems = [
     {
       id: 'home' as DashboardTab,
@@ -185,7 +185,7 @@ export function Sidebar({
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-black tracking-wider text-[#f4f4f5] uppercase truncate">GPANEL</span>
+                <span className="text-xs font-black tracking-wider text-[#f4f4f5] uppercase truncate">PAINEL INDUSTRIAL</span>
               </div>
               <p className="text-[10px] text-[#71717a] truncate font-medium">Fábrica Guarapari • Ybera</p>
             </div>

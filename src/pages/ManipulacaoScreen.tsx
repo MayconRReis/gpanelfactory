@@ -790,7 +790,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="font-black text-lg tracking-tight text-white truncate">GPanel Factory</span>
+                <span className="font-black text-lg tracking-tight text-white truncate">Painel Industrial</span>
                 <span className="hidden sm:flex text-[11px] font-black uppercase px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 shadow-sm items-center gap-1 shrink-0">
                   <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
                   Área de Manipulação
