@@ -191,7 +191,7 @@ export function splitWorkingAcrossDays(
   sessions: WorkSession[]
 ): Array<[number, number]> {
   if (!(endMs > startMs)) return [];
-  if (localDayStr(startMs) === localDayStr(endMs)) return [[startMs, endMs]];
+  if (localDayStr(startMs) === localDayStr(endMs - 1)) return [[startMs, endMs]];
   const lineSessions = lineId ? sessions.filter(ss => ss.lineId === lineId) : [];
   const dayWindow = (dayMs: number): [number, number] | null => {
     const dayStr = localDayStr(dayMs);
@@ -424,15 +424,20 @@ export function calculateProductionTime(
     lineId?: string,
     reason?: string,
     observation?: string,
-    resourceKey?: string
+    resourceKey?: string,
+    noSplit = false
   ) => {
     // Trabalho que atravessou a noite (OP esquecida "em produção"): só conta
     // dentro do expediente de cada dia — ver splitWorkingAcrossDays.
-    if (type === 'WORKING') {
+    // `noSplit` = trecho que já veio do split: não divide de novo. Antes, um
+    // trecho que terminava exatamente à meia-noite (expediente encerrado
+    // depois da meia-noite) "atravessava" o dia de novo e o split se chamava
+    // sem parar (RangeError: Maximum call stack size exceeded).
+    if (type === 'WORKING' && !noSplit) {
       const cappedEnd = Math.min(endMs, refTime);
-      if (localDayStr(startMs) !== localDayStr(cappedEnd) && cappedEnd > startMs) {
+      if (cappedEnd > startMs && localDayStr(startMs) !== localDayStr(cappedEnd - 1)) {
         for (const [a, b] of splitWorkingAcrossDays(startMs, cappedEnd, lineId, options?.workSessions || [])) {
-          pushInterval(type, a, b, opId, lineId, reason, observation, resourceKey);
+          pushInterval(type, a, b, opId, lineId, reason, observation, resourceKey, true);
         }
         return;
       }

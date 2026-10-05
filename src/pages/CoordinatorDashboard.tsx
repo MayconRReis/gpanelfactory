@@ -93,7 +93,7 @@ import { DailyProductionHistory } from '../components/DailyProductionHistory';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
 import { LeaderScreen } from './LeaderScreen';
-import { canUserAccessTab, getUserAllowedTabs, getUserRule, getCronogramaAccess, ACCESS_RULES, TAB_METADATA } from '../lib/permissions';
+import { canUserAccessTab, getUserAllowedTabs, getUserRule, getCronogramaAccess, ACCESS_RULES, TAB_METADATA, isAdminRule } from '../lib/permissions';
 import { CsvImportModal } from '../components/CsvImportModal';
 import { AssignLineModal, getWeekRange } from '../components/AssignLineModal';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
@@ -1502,6 +1502,7 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
+                showSectorOee={isAdminRule(getUserRule(profile))}
               />
             )}
 
@@ -2629,16 +2630,35 @@ WHERE email IN (
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
-                <Input
-                  type="number"
-                  placeholder="Ex: 2500"
-                  value={newOpPlanned}
-                  onChange={(e) => setNewOpPlanned(e.target.value)}
-                  className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
-                  required
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Qtd Planejada ({newOpUnidade}) *</Label>
+                  <Input
+                    type="number"
+                    placeholder="Ex: 2500"
+                    value={newOpPlanned}
+                    onChange={(e) => setNewOpPlanned(e.target.value)}
+                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-[#f4f4f5]"
+                    required
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Tempo esperado (horas)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.25"
+                    placeholder="Ex: 6.5"
+                    value={newOpPlannedHours}
+                    onChange={(e) => setNewOpPlannedHours(e.target.value)}
+                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-orange-300"
+                  />
+                  <p className="text-[9px] text-[#71717a] leading-tight">
+                    {Number(newOpPlannedHours) > 0
+                      ? `= ${Math.floor(Number(newOpPlannedHours))}h ${String(Math.round((Number(newOpPlannedHours) % 1) * 60)).padStart(2, '0')}m · base da Performance do OEE`
+                      : 'Tempo para produzir a quantidade planejada (Performance do OEE)'}
+                  </p>
+                </div>
               </div>
 
               {/* Setor, unidade, indústria, linha, horas de turno, embalagens e cronograma

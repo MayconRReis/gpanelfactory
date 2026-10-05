@@ -65,7 +65,7 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
  *   tempo_real_produzindo  = planned_hours - horas de pausa reais (calculateTotalPauseHours)
  *   tempo_planejado_total  = soma de planned_hours de todas as OPs do período
  *
- * Performance = producedQuantity / plannedQuantity  (para OPs concluídas ou em progresso)
+ * Performance = tempo esperado ÷ tempo produzido (horas planejadas da OP, proporcionais ao produzido, ÷ horas trabalhadas)
  *
  * Qualidade = (producedQuantity - rejectedQuantity) / producedQuantity
  *
@@ -74,6 +74,27 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
  * Retorna valores entre 0 e 1 (multiplique por 100 para exibir como %).
  * Retorna null para cada componente quando não há dados suficientes.
  */
+/** Detalhe da Performance por TEMPO (horas esperadas × horas produzidas). */
+export interface OEEPerformanceTime {
+  /** 'tempo' = horas planejadas das OPs; 'quantidade' = nenhuma OP do período tem horas planejadas (cálculo antigo). */
+  performanceBasis: 'tempo' | 'quantidade' | null;
+  /** Horas esperadas para o que foi produzido (horas planejadas proporcionais à quantidade feita). */
+  expectedHours: number;
+  /** Horas realmente trabalhadas nessas OPs (sem pausas, noites e intervalos). */
+  workedHours: number;
+  /** OPs que entraram no cálculo por tempo */
+  opsWithTime: number;
+  /** OPs do período sem "Horas planejadas" (ficam fora da Performance) */
+  opsWithoutTime: number;
+}
+export interface OEEResult extends OEEPerformanceTime {
+  disponibilidade: number | null;
+  performance: number | null;
+  qualidade: number | null;
+  oee: number | null;
+}
+const EMPTY_PERF_TIME: OEEPerformanceTime = { performanceBasis: null, expectedHours: 0, workedHours: 0, opsWithTime: 0, opsWithoutTime: 0 };
+
 export function calculateOEE(
   ops: ProductionOrder[],
   events: ProductionEvent[],
@@ -84,15 +105,10 @@ export function calculateOEE(
   /** Período ('AAAA-MM-DD') — sem ele, a Disponibilidade somava os expedientes
    * de TODOS os dias contra o trabalho só do período (ex.: 12% em vez de 79%). */
   dateRange?: { rangeStart?: string; rangeEnd?: string }
-): {
-  disponibilidade: number | null;
-  performance: number | null;
-  qualidade: number | null;
-  oee: number | null;
-} {
+): OEEResult {
   try {
     if (!ops || ops.length === 0) {
-      return { disponibilidade: null, performance: null, qualidade: null, oee: null };
+      return { disponibilidade: null, performance: null, qualidade: null, oee: null, ...EMPTY_PERF_TIME };
     }
 
     // 1. Disponibilidade — SEMPRE prioriza o histórico real de eventos
@@ -151,39 +167,84 @@ export function calculateOEE(
       }
     }
 
-    // 2. Performance = producedQuantity / plannedQuantity — só das OPs já
-    // CONCLUÍDAS. Antes entravam também as em andamento/pausadas: uma OP no
-    // meio do envase somava o planejado inteiro com só parte produzida, e a
-    // Performance do dia começava lá embaixo e só subia no fim do turno.
-    const activeOrFinishedOps = ops.filter(
-      op => op.status === 'completed' && !op.isPartialRecord && op.plannedQuantity > 0
+    // 2. Performance por TEMPO = tempo esperado ÷ tempo produzido.
+    // Cada OP tem as "Horas planejadas" (tempo esperado para a quantidade
+    // planejada). O esperado é proporcional ao que já foi feito
+    // (horas planejadas × produzido ÷ quantidade da OP) e o produzido é o
+    // tempo realmente trabalhado na OP (sem pausas, noites e intervalos).
+    // Entram as OPs concluídas e as em produção/pausadas que já produziram.
+    // Máximo de 100%. OP sem "Horas planejadas" fica de fora; se nenhuma OP
+    // do período tiver, cai no cálculo antigo por quantidade.
+    const partialQtyByOp = new Map<string, number>();
+    for (const ev of allEventsForPartials || events || []) {
+      if (!ev?.opId || !isPartialFinishEvent(ev)) continue;
+      const q = Number(ev.quantity) || 0;
+      if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
+    }
+    const perfCandidates = ops.filter(op =>
+      !op.isPartialRecord && (op.plannedQuantity || 0) > 0 &&
+      (op.status === 'completed' || ((op.status === 'in_progress' || op.status === 'paused') && (op.producedQuantity || 0) > 0))
     );
+    const timedOps = perfCandidates.filter(op => (Number(op.plannedHours) || 0) > 0);
     let performance: number | null = null;
+    let perfTime: OEEPerformanceTime = { ...EMPTY_PERF_TIME, opsWithoutTime: perfCandidates.length - timedOps.length };
 
-    if (activeOrFinishedOps.length > 0) {
-      // Mesma base do Rendimento do Envase: numa OP com conclusão PARCIAL o
-      // planejado gravado vira só o saldo, mas a conclusão final traz a
-      // quantidade da OP — sem somar as parciais ao esperado, a Performance
-      // passava de 100% (ex.: 162%). Agora: esperado = saldo + parciais,
-      // produzido = final + parciais, e cada OP conta no máximo 100%.
-      const partialQtyByOp = new Map<string, number>();
-      for (const ev of allEventsForPartials || events || []) {
-        if (!ev?.opId || !isPartialFinishEvent(ev)) continue;
-        const q = Number(ev.quantity) || 0;
-        if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
+    if (timedOps.length > 0) {
+      const timedIds = new Set(timedOps.map(o => String(o.id)));
+      const timedEvents = (allEventsForPartials || events || []).filter(e => e?.opId && timedIds.has(String(e.opId)));
+      const timedLineIds = Array.from(new Set(timedOps.map(o => o.lineId).filter(Boolean))) as string[];
+      const workedByOp = new Map<string, number>();
+      if (timedEvents.length > 0) {
+        const res = calculateProductionTime(
+          timedEvents,
+          timedOps,
+          timedLineIds.map(id => ({ id, name: id, status: 'idle', currentOpId: null } as ProductionLine)),
+          workSessions ? { workSessions } : {}
+        );
+        for (const it of res.intervals) {
+          if (it.type !== 'WORKING' || !it.opId) continue;
+          workedByOp.set(String(it.opId), (workedByOp.get(String(it.opId)) || 0) + it.durationMs);
+        }
       }
+      let expectedMs = 0;
+      let workedMs = 0;
+      let counted = 0;
+      for (const op of timedOps) {
+        const worked = workedByOp.get(String(op.id)) || 0;
+        if (worked <= 0) continue; // sem apontamentos de tempo (ex.: histórico importado)
+        const partial = partialQtyByOp.get(String(op.id)) || 0;
+        const opQty = (op.plannedQuantity || 0) + partial;
+        const produced = Math.max(0, (op.producedQuantity || 0) + partial);
+        if (opQty <= 0 || produced <= 0) continue;
+        expectedMs += (Number(op.plannedHours) || 0) * 3_600_000 * (produced / opQty);
+        workedMs += worked;
+        counted += 1;
+      }
+      perfTime = {
+        performanceBasis: counted > 0 ? 'tempo' : null,
+        expectedHours: expectedMs / 3_600_000,
+        workedHours: workedMs / 3_600_000,
+        opsWithTime: counted,
+        opsWithoutTime: perfCandidates.length - counted,
+      };
+      if (workedMs > 0) performance = Math.max(0, Math.min(1, expectedMs / workedMs));
+    }
+
+    if (performance === null && timedOps.length === 0) {
+      // Nenhuma OP com "Horas planejadas": cálculo antigo (produzido ÷ planejado das concluídas)
+      const doneOps = ops.filter(op => op.status === 'completed' && !op.isPartialRecord && op.plannedQuantity > 0);
       let totalPlanned = 0;
       let totalProduced = 0;
-      for (const op of activeOrFinishedOps) {
+      for (const op of doneOps) {
         const partial = partialQtyByOp.get(String(op.id)) || 0;
         const expected = (op.plannedQuantity || 0) + partial;
         const produced = Math.max(0, (op.producedQuantity || 0) + partial);
         totalPlanned += expected;
         totalProduced += Math.min(produced, expected);
       }
-
       if (totalPlanned > 0) {
         performance = Math.max(0, Math.min(1, totalProduced / totalPlanned));
+        perfTime = { ...perfTime, performanceBasis: 'quantidade' };
       }
     }
 
@@ -207,10 +268,10 @@ export function calculateOEE(
       oee = disponibilidade * performance * qualidade;
     }
 
-    return { disponibilidade, performance, qualidade, oee };
+    return { disponibilidade, performance, qualidade, oee, ...perfTime };
   } catch (err) {
     console.warn('Erro ao calcular OEE:', err);
-    return { disponibilidade: null, performance: null, qualidade: null, oee: null };
+    return { disponibilidade: null, performance: null, qualidade: null, oee: null, ...EMPTY_PERF_TIME };
   }
 }
 

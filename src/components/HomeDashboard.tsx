@@ -49,6 +49,8 @@ interface HomeDashboardProps {
   isReadOnly?: boolean;
   /** Lista de Setups do Envase — só no dashboard do coordenador. */
   showSetupHistory?: boolean;
+  /** Seletor de OEE por setor (Geral, Envase, Manipulação, Pesagem, Separação, Datação) — só Coordenação/ADM. */
+  showSectorOee?: boolean;
 }
 
 /**
@@ -129,6 +131,16 @@ export function formatElapsedTimer(ms: number): string {
 }
 
 /** Rosca (donut) de um componente do OEE — valor em % no centro. */
+type OeeSectorKey = 'geral' | 'envase' | 'manipulacao' | 'pesagem' | 'separacao' | 'datacao';
+const OEE_SECTORS: { key: OeeSectorKey; label: string; ready: boolean }[] = [
+  { key: 'geral', label: 'OEE Geral', ready: false },
+  { key: 'envase', label: 'Envase', ready: true },
+  { key: 'manipulacao', label: 'Manipulação', ready: false },
+  { key: 'pesagem', label: 'Pesagem', ready: false },
+  { key: 'separacao', label: 'Separação', ready: false },
+  { key: 'datacao', label: 'Datação', ready: false },
+];
+
 function OeeDonut({ label, pct, color, glow, border, desc }: { label: string; pct: number | null; color: string; glow: string; border: string; desc: string }) {
   const r = 42;
   const c = 2 * Math.PI * r;
@@ -230,7 +242,12 @@ export function HomeDashboard({
   onOpenShareModal,
   isReadOnly = false,
   showSetupHistory = false,
+  showSectorOee = false,
 }: HomeDashboardProps) {
+  // OEE por setor (só Coordenação). Por enquanto só o Envase tem cálculo;
+  // os demais aparecem com os 3 componentes zerados até a regra de cada setor ser definida.
+  const [oeeSector, setOeeSector] = useState<OeeSectorKey>('envase');
+  const activeOeeSector = showSectorOee ? oeeSector : 'envase';
 
   const currentCalendarYear = new Date().getFullYear();
   const currentCalendarMonth = new Date().getMonth() + 1;
@@ -814,6 +831,16 @@ export function HomeDashboard({
   const oeeQualidadePct = oeeMetrics.qualidade !== null
     ? Math.round(oeeMetrics.qualidade * 1000) / 10
     : null;
+  const fmtH = (h: number) => {
+    const m = Math.round(h * 60);
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+  };
+  const performanceDesc = oeeMetrics.performanceBasis === 'tempo'
+    ? `Tempo esperado ${fmtH(oeeMetrics.expectedHours)} ÷ tempo produzido ${fmtH(oeeMetrics.workedHours)}`
+      + (oeeMetrics.opsWithoutTime > 0 ? ` · ${oeeMetrics.opsWithoutTime} OP(s) sem horas planejadas fora do cálculo` : '')
+    : oeeMetrics.performanceBasis === 'quantidade'
+      ? 'Sem horas planejadas nas OPs do período — usando quantidade produzida ÷ planejada'
+      : 'Tempo esperado (horas planejadas da OP) ÷ tempo produzido';
   const oeeCombined = oeeDisponibilidade !== null && oeeMetrics.performance !== null && oeeMetrics.qualidade !== null
     ? oeeDisponibilidade * oeeMetrics.performance * oeeMetrics.qualidade
     : null;
@@ -1693,18 +1720,59 @@ export function HomeDashboard({
         <div className="space-y-2">
           <div>
             <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
-              Componentes do OEE
+              Componentes do OEE{showSectorOee ? ` · ${OEE_SECTORS.find(x => x.key === activeOeeSector)?.label}` : ''}
             </h3>
             <p className="text-[11px] text-[#71717a]">
               Overall Equipment Effectiveness = Disponibilidade × Performance × Qualidade • Período: <span className="text-[#a1a1aa] font-semibold">{PERIOD_LABELS[dashboardPeriod]}</span>
             </p>
           </div>
 
+          {showSectorOee && (
+            <div className="flex flex-wrap gap-1.5">
+              {OEE_SECTORS.map(sec => (
+                <button
+                  key={sec.key}
+                  type="button"
+                  onClick={() => setOeeSector(sec.key)}
+                  className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1.5 ${
+                    activeOeeSector === sec.key
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'
+                  }`}
+                >
+                  {sec.label}
+                  {!sec.ready && <span className="text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded bg-[#27272a] text-[#71717a]">em breve</span>}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {activeOeeSector !== 'envase' ? (
+            <div className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <OeeDonut label="Disponibilidade" pct={null} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <OeeDonut label="Performance" pct={null} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <OeeDonut label="Qualidade" pct={null} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <div className="bg-[#18181b] border border-[#2c2c3c] rounded-2xl p-4 flex flex-col items-center justify-center text-center">
+                  <span className="text-[11px] font-black uppercase tracking-wider text-white">OEE {OEE_SECTORS.find(x => x.key === activeOeeSector)?.label.replace('OEE ', '')}</span>
+                  <span className="text-4xl font-black font-mono text-[#52525b] my-3">—</span>
+                  <p className="text-[10px] text-[#71717a] leading-snug">
+                    {activeOeeSector === 'geral'
+                      ? 'Vai juntar o OEE de todos os setores quando cada um estiver configurado.'
+                      : 'Indicador em configuração — os dados deste setor ainda não estão conectados.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
               desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
             <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
-              desc="Quantidade produzida ÷ quantidade planejada das OPs" />
+              desc={performanceDesc} />
             <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
               desc="(Produzido − rejeitado) ÷ produzido" />
             <GoalGauge
@@ -1714,10 +1782,11 @@ export function HomeDashboard({
               periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
             />
           </div>
+          )}
 
           {/* No modo "Geral", mostra a evolução mensal dos 3 componentes juntos —
               responde "como foi durante o mês/ano" além do instantâneo de hoje. */}
-          {dashboardPeriod === 'geral' && (
+          {dashboardPeriod === 'geral' && activeOeeSector === 'envase' && (
             <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-[11px] font-black uppercase tracking-wider text-[#a1a1aa]">
