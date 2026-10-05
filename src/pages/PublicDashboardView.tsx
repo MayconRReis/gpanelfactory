@@ -217,7 +217,7 @@ export function PublicDashboardView() {
             <div className="min-h-[500px] flex flex-col items-center justify-center gap-3">
               <RefreshCw className="w-8 h-8 text-blue-500 animate-spin" />
               <p className="text-xs font-bold uppercase tracking-widest text-[#a1a1aa]">
-                Carregando Dashboard Geral...
+                Carregando Dashboard...
               </p>
             </div>
           ) : (

@@ -1338,7 +1338,7 @@ WHERE email IN (
     { title: string; subtitle: string; icon: React.ComponentType<{ className?: string }> }
   > = {
     home: {
-      title: 'Dashboard Geral',
+      title: 'Dashboard',
       subtitle: 'Painel de Indicadores de Produção',
       icon: LayoutDashboard,
     },
@@ -1375,7 +1375,7 @@ WHERE email IN (
       icon: ClipboardList,
     },
     daily_production: {
-      title: 'Histórico & Gráficos',
+      title: 'Dashboard Detalhado',
       subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
       icon: BarChart3,
     },
@@ -1474,7 +1474,7 @@ WHERE email IN (
               <button
                 onClick={() => setActiveTab('home')}
                 className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-blue-950/60 hover:bg-blue-900/60 border border-blue-800/50 text-xs font-semibold text-blue-300 hover:text-white flex items-center gap-1.5 transition-all shrink-0"
-                title="Ir para o Dashboard Geral"
+                title="Ir para o Dashboard"
               >
                 <LayoutDashboard className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Dashboard</span>
@@ -1502,7 +1502,6 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
-                showSectorOee={isAdminRule(getUserRule(profile))}
               />
             )}
 
@@ -1523,6 +1522,22 @@ WHERE email IN (
 
             {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
             {activeTab === 'daily_production' && (
+              <div className="space-y-6">
+              <HomeDashboard
+                lines={lines}
+                ops={ops}
+                leaders={leaders}
+                allUsers={allUsers}
+                events={events}
+                rotations={rotations}
+                goals={goals}
+                factoryMonthlyGoal={factoryMonthlyGoal}
+                factoryMonthlyGoals={factoryMonthlyGoals}
+                lineDailyGoals={lineDailyGoals}
+                isReadOnly
+                oeeOnly
+                showSectorOee={isAdminRule(getUserRule(profile))}
+              />
               <DailyProductionHistory
                 ops={ops}
                 lines={lines}
@@ -1531,6 +1546,7 @@ WHERE email IN (
                 goals={goals}
                 events={events}
               />
+              </div>
             )}
 
             {/* ---------------- TELA: RELATÓRIO DO DIA (Coordenação) ---------------- */}

@@ -74,7 +74,7 @@ export function ShareDashboardModal({ isOpen, onClose }: ShareDashboardModalProp
                 </span>
               </h3>
               <p className="text-xs text-[#71717a] mt-0.5">
-                Compartilhe o Dashboard Geral com diretores e equipes sem exigir login
+                Compartilhe o Dashboard com diretores e equipes sem exigir login
               </p>
             </div>
           </div>
@@ -170,7 +170,7 @@ export function ShareDashboardModal({ isOpen, onClose }: ShareDashboardModalProp
                 <Eye className="w-4 h-4" />
               </div>
               <div className="text-left">
-                <h4 className="text-xs font-bold text-[#f4f4f5]">Dashboard Geral</h4>
+                <h4 className="text-xs font-bold text-[#f4f4f5]">Dashboard</h4>
                 <p className="text-[11px] text-[#71717a] mt-0.5">
                   Exibe KPIs dos setores (Pesagem, Manipulação, Envase), os 5 cards operacionais e metas mensais.
                 </p>

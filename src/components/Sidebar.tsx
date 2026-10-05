@@ -73,7 +73,7 @@ export function Sidebar({
   const allMenuItems = [
     {
       id: 'home' as DashboardTab,
-      label: 'Dashboard Geral',
+      label: 'Dashboard',
       icon: LayoutDashboard,
       badge: null,
       description: 'Visão Executiva, Farol & OEE',
@@ -130,10 +130,10 @@ export function Sidebar({
     },
     {
       id: 'daily_production' as DashboardTab,
-      label: 'Histórico & Gráficos',
+      label: 'Dashboard Detalhado',
       icon: BarChart3,
       badge: null,
-      description: 'Produção Diária & Mensal',
+      description: 'OEE por setor, produção diária & mensal',
       section: 'GESTÃO & PCP',
     },
     {

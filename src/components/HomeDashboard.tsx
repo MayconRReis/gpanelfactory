@@ -51,6 +51,8 @@ interface HomeDashboardProps {
   showSetupHistory?: boolean;
   /** Seletor de OEE por setor (Geral, Envase, Manipulação, Pesagem, Separação, Datação) — só Coordenação/ADM. */
   showSectorOee?: boolean;
+  /** Mostra só o bloco de OEE (com filtro de período) — usado no Dashboard Detalhado. */
+  oeeOnly?: boolean;
 }
 
 /**
@@ -243,6 +245,7 @@ export function HomeDashboard({
   isReadOnly = false,
   showSetupHistory = false,
   showSectorOee = false,
+  oeeOnly = false,
 }: HomeDashboardProps) {
   // OEE por setor (só Coordenação). Por enquanto só o Envase tem cálculo;
   // os demais aparecem com os 3 componentes zerados até a regra de cada setor ser definida.
@@ -1363,28 +1366,8 @@ export function HomeDashboard({
     );
   };
 
-  return (
-    <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
-      
-      {/* ========================================================================= */}
-      {/* NOVO PAINEL DE CONTROLE DE PRODUÇÃO (REFERÊNCIA PCP / OEE) */}
-      {/* ========================================================================= */}
-      <div className="space-y-4">
-        
-        {/* ── BARRA DE TOPO DO DASHBOARD: STATUS & BOTÃO DE COMPARTILHAMENTO ── */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-3.5 sm:p-4 rounded-2xl shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-blue-950/70 border border-blue-800/50 flex items-center justify-center text-blue-400 shrink-0">
-              <LayoutDashboard className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
-                Indicadores Globais de Fábrica
-              </h2>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
+  const periodFilterJsx = (
+          <>
             {/* Filtro de Período: controla Índice de Ociosidade, Tempo Trabalhado e OEE abaixo */}
             <div className="flex items-center gap-1 bg-[#0e0e12] border border-[#202028] rounded-xl p-1" title="Período usado no Índice de Ociosidade, Tempo Trabalhado e OEE">
               <Filter className="w-3 h-3 text-[#52525b] ml-1 mr-0.5 shrink-0" />
@@ -1418,6 +1401,166 @@ export function HomeDashboard({
                 ))}
               </select>
             )}
+
+          </>
+  );
+
+  const oeeSectionJsx = (
+      <>
+        {/* ── 2.1 COMPONENTES DO OEE: DISPONIBILIDADE / PERFORMANCE / QUALIDADE ── */}
+        <div className="space-y-2">
+          <div>
+            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
+              {showSectorOee ? `Componentes do OEE · ${OEE_SECTORS.find(x => x.key === activeOeeSector)?.label}` : 'OEE'}
+            </h3>
+            <p className="text-[11px] text-[#71717a]">
+              Overall Equipment Effectiveness = Disponibilidade × Performance × Qualidade • Período: <span className="text-[#a1a1aa] font-semibold">{PERIOD_LABELS[dashboardPeriod]}</span>
+            </p>
+          </div>
+
+          {showSectorOee && (
+            <div className="flex flex-wrap gap-1.5">
+              {OEE_SECTORS.map(sec => (
+                <button
+                  key={sec.key}
+                  type="button"
+                  onClick={() => setOeeSector(sec.key)}
+                  className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1.5 ${
+                    activeOeeSector === sec.key
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'
+                  }`}
+                >
+                  {sec.label}
+                  {!sec.ready && <span className="text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded bg-[#27272a] text-[#71717a]">em breve</span>}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {activeOeeSector !== 'envase' ? (
+            <div className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <OeeDonut label="Disponibilidade" pct={null} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <OeeDonut label="Performance" pct={null} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <OeeDonut label="Qualidade" pct={null} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
+                  desc="Regra de cálculo ainda não definida para este setor" />
+                <div className="bg-[#18181b] border border-[#2c2c3c] rounded-2xl p-4 flex flex-col items-center justify-center text-center">
+                  <span className="text-[11px] font-black uppercase tracking-wider text-white">OEE {OEE_SECTORS.find(x => x.key === activeOeeSector)?.label.replace('OEE ', '')}</span>
+                  <span className="text-4xl font-black font-mono text-[#52525b] my-3">—</span>
+                  <p className="text-[10px] text-[#71717a] leading-snug">
+                    {activeOeeSector === 'geral'
+                      ? 'Vai juntar o OEE de todos os setores quando cada um estiver configurado.'
+                      : 'Indicador em configuração — os dados deste setor ainda não estão conectados.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
+              desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
+            <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
+              desc={performanceDesc} />
+            <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
+              desc="(Produzido − rejeitado) ÷ produzido" />
+            <GoalGauge
+              produced={sectorKpis.envase.valor}
+              goal={goalGauge.goal}
+              goalLabel={goalGauge.label}
+              periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
+            />
+          </div>
+          )}
+
+          {/* No modo "Geral", mostra a evolução mensal dos 3 componentes juntos —
+              responde "como foi durante o mês/ano" além do instantâneo de hoje. */}
+          {dashboardPeriod === 'geral' && activeOeeSector === 'envase' && (
+            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="text-[11px] font-black uppercase tracking-wider text-[#a1a1aa]">
+                  Evolução Mensal — Disponibilidade × Performance × Qualidade ({currentYear})
+                </h4>
+              </div>
+              {oeeTrendData.length === 0 ? (
+                <p className="text-[11px] text-[#52525b] text-center py-8">Sem dados suficientes ainda neste ano.</p>
+              ) : (
+                <div className="h-[220px] w-full overflow-x-auto">
+                  <div className="h-full min-w-[500px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={oeeTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                        <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
+                        <YAxis stroke="#71717a" fontSize={10} tickLine={false} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
+                          formatter={(value: any, name: any) => [
+                            value === null ? 'Sem dados' : `${value}%`,
+                            name === 'disponibilidade' ? 'Disponibilidade' : name === 'performance' ? 'Performance' : 'Qualidade',
+                          ]}
+                        />
+                        <Legend
+                          wrapperStyle={{ fontSize: '10px' }}
+                          formatter={(value) => (value === 'disponibilidade' ? 'Disponibilidade' : value === 'performance' ? 'Performance' : 'Qualidade')}
+                        />
+                        <Line type="monotone" dataKey="disponibilidade" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                        <Line type="monotone" dataKey="performance" stroke="#f97316" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                        <Line type="monotone" dataKey="qualidade" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </>
+  );
+
+  if (oeeOnly) {
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-3.5 sm:p-4 rounded-2xl shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-blue-950/70 border border-blue-800/50 flex items-center justify-center text-blue-400 shrink-0">
+              <LayoutDashboard className="w-4 h-4" />
+            </div>
+            <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">OEE por setor</h2>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {periodFilterJsx}
+          </div>
+        </div>
+        {oeeSectionJsx}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
+      
+      {/* ========================================================================= */}
+      {/* NOVO PAINEL DE CONTROLE DE PRODUÇÃO (REFERÊNCIA PCP / OEE) */}
+      {/* ========================================================================= */}
+      <div className="space-y-4">
+        
+        {/* ── BARRA DE TOPO DO DASHBOARD: STATUS & BOTÃO DE COMPARTILHAMENTO ── */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#111116] border border-[#202028] p-3.5 sm:p-4 rounded-2xl shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-blue-950/70 border border-blue-800/50 flex items-center justify-center text-blue-400 shrink-0">
+              <LayoutDashboard className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-[#f4f4f5]">
+                Indicadores Globais de Fábrica
+              </h2>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {periodFilterJsx}
 
             {!isReadOnly && onOpenShareModal && (
               <button
@@ -1716,115 +1859,7 @@ export function HomeDashboard({
 
         </div>
 
-        {/* ── 2.1 COMPONENTES DO OEE: DISPONIBILIDADE / PERFORMANCE / QUALIDADE ── */}
-        <div className="space-y-2">
-          <div>
-            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">
-              Componentes do OEE{showSectorOee ? ` · ${OEE_SECTORS.find(x => x.key === activeOeeSector)?.label}` : ''}
-            </h3>
-            <p className="text-[11px] text-[#71717a]">
-              Overall Equipment Effectiveness = Disponibilidade × Performance × Qualidade • Período: <span className="text-[#a1a1aa] font-semibold">{PERIOD_LABELS[dashboardPeriod]}</span>
-            </p>
-          </div>
-
-          {showSectorOee && (
-            <div className="flex flex-wrap gap-1.5">
-              {OEE_SECTORS.map(sec => (
-                <button
-                  key={sec.key}
-                  type="button"
-                  onClick={() => setOeeSector(sec.key)}
-                  className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all flex items-center gap-1.5 ${
-                    activeOeeSector === sec.key
-                      ? 'bg-blue-600 border-blue-500 text-white'
-                      : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'
-                  }`}
-                >
-                  {sec.label}
-                  {!sec.ready && <span className="text-[8px] font-black uppercase tracking-wider px-1 py-0.5 rounded bg-[#27272a] text-[#71717a]">em breve</span>}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {activeOeeSector !== 'envase' ? (
-            <div className="space-y-2">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                <OeeDonut label="Disponibilidade" pct={null} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
-                  desc="Regra de cálculo ainda não definida para este setor" />
-                <OeeDonut label="Performance" pct={null} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
-                  desc="Regra de cálculo ainda não definida para este setor" />
-                <OeeDonut label="Qualidade" pct={null} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
-                  desc="Regra de cálculo ainda não definida para este setor" />
-                <div className="bg-[#18181b] border border-[#2c2c3c] rounded-2xl p-4 flex flex-col items-center justify-center text-center">
-                  <span className="text-[11px] font-black uppercase tracking-wider text-white">OEE {OEE_SECTORS.find(x => x.key === activeOeeSector)?.label.replace('OEE ', '')}</span>
-                  <span className="text-4xl font-black font-mono text-[#52525b] my-3">—</span>
-                  <p className="text-[10px] text-[#71717a] leading-snug">
-                    {activeOeeSector === 'geral'
-                      ? 'Vai juntar o OEE de todos os setores quando cada um estiver configurado.'
-                      : 'Indicador em configuração — os dados deste setor ainda não estão conectados.'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
-              desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
-            <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
-              desc={performanceDesc} />
-            <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
-              desc="(Produzido − rejeitado) ÷ produzido" />
-            <GoalGauge
-              produced={sectorKpis.envase.valor}
-              goal={goalGauge.goal}
-              goalLabel={goalGauge.label}
-              periodLabel={`${PERIOD_LABELS[dashboardPeriod]}${dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}`}
-            />
-          </div>
-          )}
-
-          {/* No modo "Geral", mostra a evolução mensal dos 3 componentes juntos —
-              responde "como foi durante o mês/ano" além do instantâneo de hoje. */}
-          {dashboardPeriod === 'geral' && activeOeeSector === 'envase' && (
-            <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="text-[11px] font-black uppercase tracking-wider text-[#a1a1aa]">
-                  Evolução Mensal — Disponibilidade × Performance × Qualidade ({currentYear})
-                </h4>
-              </div>
-              {oeeTrendData.length === 0 ? (
-                <p className="text-[11px] text-[#52525b] text-center py-8">Sem dados suficientes ainda neste ano.</p>
-              ) : (
-                <div className="h-[220px] w-full overflow-x-auto">
-                  <div className="h-full min-w-[500px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={oeeTrendData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                        <XAxis dataKey="monthName" stroke="#71717a" fontSize={10} tickLine={false} />
-                        <YAxis stroke="#71717a" fontSize={10} tickLine={false} domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
-                        <Tooltip
-                          contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '12px', fontSize: '11px', color: '#f4f4f5' }}
-                          formatter={(value: any, name: any) => [
-                            value === null ? 'Sem dados' : `${value}%`,
-                            name === 'disponibilidade' ? 'Disponibilidade' : name === 'performance' ? 'Performance' : 'Qualidade',
-                          ]}
-                        />
-                        <Legend
-                          wrapperStyle={{ fontSize: '10px' }}
-                          formatter={(value) => (value === 'disponibilidade' ? 'Disponibilidade' : value === 'performance' ? 'Performance' : 'Qualidade')}
-                        />
-                        <Line type="monotone" dataKey="disponibilidade" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} connectNulls />
-                        <Line type="monotone" dataKey="performance" stroke="#f97316" strokeWidth={2} dot={{ r: 3 }} connectNulls />
-                        <Line type="monotone" dataKey="qualidade" stroke="#10b981" strokeWidth={2} dot={{ r: 3 }} connectNulls />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        {oeeSectionJsx}
 
         {/* ── 3. Gráfico de produção — muda de acordo com o filtro de período
               (Dia/Mês/Ano/Geral) escolhido lá em cima: em "Dia" mostra a

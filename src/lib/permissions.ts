@@ -42,7 +42,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     id: 'pesagem',
     name: 'Líder de Pesagem',
     shortName: 'Pesagem',
-    description: 'Acesso ao Dashboard Geral e módulo de Balança & Fracionamento (OP)',
+    description: 'Acesso ao Dashboard e módulo de Balança & Fracionamento (OP)',
     badgeClass: 'bg-purple-950/90 text-purple-300 border border-purple-800/50',
     tabs: ['home', 'pesagem', 'cronograma'],
   },
@@ -50,7 +50,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     id: 'manipulacao',
     name: 'Líder de Manipulação',
     shortName: 'Manipulação',
-    description: 'Acesso ao Dashboard Geral e módulo de Fabricação de Granéis & Reatores',
+    description: 'Acesso ao Dashboard e módulo de Fabricação de Granéis & Reatores',
     badgeClass: 'bg-cyan-950/90 text-cyan-300 border border-cyan-800/50',
     tabs: ['home', 'manipulacao', 'cronograma'],
   },
@@ -58,7 +58,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
     id: 'envase',
     name: 'Líder de Envase',
     shortName: 'Envase',
-    description: 'Acesso ao Dashboard Geral e Chão de Fábrica das Linhas de Envase',
+    description: 'Acesso ao Dashboard e Chão de Fábrica das Linhas de Envase',
     badgeClass: 'bg-emerald-950/90 text-emerald-300 border border-emerald-800/50',
     tabs: ['home', 'envase', 'cronograma'],
   },
@@ -74,7 +74,7 @@ export const ACCESS_RULES: Record<AccessRule, AccessRuleConfig> = {
 
 export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; description: string }> = {
   home: {
-    label: 'Dashboard Geral',
+    label: 'Dashboard',
     group: 'Visão Geral',
     description: 'Métricas executivas, Farol de Produção e OEE (Padrão para todos)',
   },
@@ -109,7 +109,7 @@ export const TAB_METADATA: Record<DashboardTab, { label: string; group: string; 
     description: 'Faltas, atrasos, atestados, saídas, acidentes/incidentes, hora extra e free do balde (todos têm acesso)',
   },
   daily_production: {
-    label: 'Histórico & Gráficos',
+    label: 'Dashboard Detalhado',
     group: 'Gestão & PCP',
     description: 'Acompanhamento de metas diárias e mensais',
   },
