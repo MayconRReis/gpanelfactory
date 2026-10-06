@@ -25,6 +25,16 @@ import {
   XCircle,
   Sunrise,
   Sunset,
+  ClipboardCheck,
+  Droplets,
+  TestTube,
+  ThumbsUp,
+  ThumbsDown,
+  Wrench,
+  ShieldCheck,
+  Timer,
+  ListChecks,
+  Undo2,
 } from 'lucide-react';
 import {
   getAllOPs,
@@ -41,6 +51,17 @@ import {
   getRecentEvents,
   cancelOP,
   logPesagemHistory,
+  getManipPhase,
+  getManipOpEvents,
+  recordManipulacaoPhase,
+  MANIP_PHASE_REASONS,
+  MANIP_PHASE_LABELS,
+  isManipPhaseReason,
+  ManipPhase,
+  ManipConferencia,
+  getManipConferencias,
+  addManipConferencia,
+  deleteManipConferencia,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
@@ -118,6 +139,18 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   const [isEndShiftOpen, setIsEndShiftOpen] = useState(false);
   const [isShiftBusy, setIsShiftBusy] = useState(false);
 
+  // Linha de Conferência: pesagens conferidas (só OSM conferida pode iniciar)
+  const [conferencias, setConferencias] = useState<ManipConferencia[]>([]);
+  const [conferenciasError, setConferenciasError] = useState<string | null>(null);
+  const [showConferidas, setShowConferidas] = useState(false);
+
+  // Finalizar: 'manip' = fim da manipulação (Kg, vai pra amostragem);
+  // 'drenagem' = fim da drenagem (encerra a OP e o reator entra em Setup)
+  const [finishMode, setFinishMode] = useState<'manip' | 'drenagem'>('drenagem');
+
+  // Histórico da OP (linha do tempo)
+  const [historyOp, setHistoryOp] = useState<ProductionOrder | null>(null);
+
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 3500);
@@ -153,7 +186,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         setLoading(true);
       }
 
-      const [allOps, allLines, allSessions, allEvents] = await Promise.all([getAllOPs(), getLines(), getWorkSessions(3), getRecentEvents()]);
+      const [allOps, allLines, allSessions, allEvents, confRes] = await Promise.all([getAllOPs(), getLines(), getWorkSessions(3), getRecentEvents(), getManipConferencias()]);
 
       // Uma chamada mais nova já assumiu — descarta esta resposta desatualizada.
       if (requestId !== fetchRequestIdRef.current) return;
@@ -161,6 +194,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       setOps(allOps);
       setWorkSessions(allSessions);
       setEvents(allEvents);
+      setConferencias(confRes.list);
+      setConferenciasError(confRes.error);
       const reactorLinesFromDb = allLines.filter(l => l.id.startsWith('reator-'));
       if (reactorLinesFromDb.length > 0) setLines(reactorLinesFromDb);
     } catch (err) {
@@ -329,6 +364,23 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // OP ativa = em andamento, senão pausada, senão a próxima pendente por
   // sequence; fila = as demais pendentes.
   // --------------------------------------------------------------------
+  const todayStrForQueue = currentTime.toDateString();
+  // Ordem da fila por data (mesma regra do Envase): atrasadas → hoje →
+  // sem data → futuras; empate pela sequência do Cronograma.
+  const queueRank = (o: ProductionOrder) => {
+    const today = todayLocalStr();
+    const start = o.scheduledDate || '';
+    if (!start) return 2;
+    const end = (o.scheduledEndDate && o.scheduledEndDate >= start ? o.scheduledEndDate : start);
+    if (end < today) return 0;
+    if (start <= today) return 1;
+    return 3;
+  };
+  const compareQueue = (a: ProductionOrder, b: ProductionOrder) =>
+    queueRank(a) - queueRank(b) ||
+    (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
+    (a.sequence || 0) - (b.sequence || 0);
+
   const reactorState = useMemo(() => {
     const map: Record<string, { activeOp: ProductionOrder | null; queuedOps: ProductionOrder[] }> = {};
     reactorLines.forEach(reactor => {
@@ -337,13 +389,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       const paused = !inProgress ? reactorOps.find(o => o.status === 'paused') : undefined;
       const pendingSorted = reactorOps
         .filter(o => o.status === 'pending')
-        .sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+        .sort(compareQueue);
       const activeOp = inProgress || paused || pendingSorted[0] || null;
       const queuedOps = pendingSorted.filter(o => o.id !== activeOp?.id);
       map[reactor.id] = { activeOp, queuedOps };
     });
     return map;
-  }, [reactorLines, manipulacaoOps]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reactorLines, manipulacaoOps, todayStrForQueue]);
 
   // OPs de Manipulação em andamento/pausadas em reatores que não existem
   // mais na lista atual de `lines` (ex.: linha renomeada/removida) — só pra
@@ -352,6 +405,64 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     () => manipulacaoOps.filter(op => op.status !== 'completed' && (!op.lineId || !reactorLines.some(r => r.id === op.lineId))),
     [manipulacaoOps, reactorLines]
   );
+
+  // ---------------- LINHA DE CONFERÊNCIA ----------------
+  // Conferência por OP (ou pelo nº da OSM, caso a OP tenha sido recriada).
+  const conferenciaFor = useCallback((op: ProductionOrder): ManipConferencia | null => {
+    const byId = conferencias.find(c => c.opId === op.id);
+    if (byId) return byId;
+    const num = (op.number || '').trim();
+    return num ? (conferencias.find(c => c.osmNumber && c.osmNumber.trim() === num) || null) : null;
+  }, [conferencias]);
+
+  // Fila da conferência: primeiro a PRÓXIMA OSM de cada reator, depois as
+  // demais do cronograma (mesma ordem por data). Qualquer uma pode ser conferida.
+  const conferenciaQueue = useMemo(() => {
+    const pending = manipulacaoOps.filter(op => op.status === 'pending');
+    const notConf = pending.filter(op => !conferenciaFor(op));
+    const nextIds = new Set<string>();
+    reactorLines.forEach(r => {
+      const nextPending = (reactorState[r.id]?.activeOp?.status === 'pending')
+        ? reactorState[r.id]?.activeOp
+        : reactorState[r.id]?.queuedOps[0];
+      if (nextPending) nextIds.add(nextPending.id);
+    });
+    const proximas = notConf
+      .filter(op => nextIds.has(op.id))
+      .sort((a, b) => reactorLines.findIndex(r => r.id === a.lineId) - reactorLines.findIndex(r => r.id === b.lineId));
+    const demais = notConf.filter(op => !nextIds.has(op.id)).sort(compareQueue);
+    const conferidas = pending.filter(op => !!conferenciaFor(op)).sort(compareQueue);
+    return { proximas, demais, conferidas };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manipulacaoOps, reactorLines, reactorState, conferenciaFor, todayStrForQueue]);
+
+  // SETUP: sempre que uma OP termina, o reator entra em setup até a próxima
+  // OP ser iniciada. Conta como ociosidade (tempo parado no expediente).
+  const reactorSetupSince = useMemo(() => {
+    const map: Record<string, string | null> = {};
+    reactorLines.forEach(r => {
+      const reactorOps = manipulacaoOps.filter(op => op.lineId === r.id);
+      if (reactorOps.some(op => op.status === 'in_progress' || op.status === 'paused')) { map[r.id] = null; return; }
+      const lastDone = reactorOps
+        .filter(op => op.status === 'completed' && op.completedAt)
+        .sort((a, b) => new Date(b.completedAt as string).getTime() - new Date(a.completedAt as string).getTime())[0];
+      if (!lastDone) { map[r.id] = null; return; }
+      const doneMs = new Date(lastDone.completedAt as string).getTime();
+      const startedAfter = events.some(e => e.lineId === r.id && e.type === 'STARTED' && new Date(e.createdAt).getTime() > doneMs);
+      // Setup só vale no mesmo dia (o expediente seguinte começa "limpo")
+      const sameDay = new Date(doneMs).toDateString() === new Date().toDateString();
+      map[r.id] = !startedAfter && sameDay ? (lastDone.completedAt as string) : null;
+    });
+    return map;
+  }, [reactorLines, manipulacaoOps, events]);
+
+  const fmtDuration = (fromIso: string | null) => {
+    if (!fromIso) return '';
+    const mins = Math.max(0, Math.floor((currentTime.getTime() - new Date(fromIso).getTime()) / 60000));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m} min`;
+  };
 
   // OSMs de Manipulação Concluídas
   const completedManipulacaoOps = useMemo(() => {
@@ -490,6 +601,10 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   const handleStart = async (op: ProductionOrder) => {
     if (!profile || !op.lineId) return;
+    if (!conferenciaFor(op)) {
+      showToast('Esta OSM ainda não foi conferida — confira a pesagem na Linha de Conferência antes de iniciar.', 'error');
+      return;
+    }
     setActionBusyOpId(op.id);
     try {
       await ensureShiftOpen(op.lineId);
@@ -541,10 +656,97 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     }
   };
 
-  const handleOpenFinishModal = (op: ProductionOrder) => {
+  const handleOpenFinishModal = (op: ProductionOrder, mode: 'manip' | 'drenagem' = 'drenagem') => {
+    setFinishMode(mode);
     setFinishingOp(op);
-    setFinalKg('');
+    // Na drenagem já vem o Kg apontado ao finalizar a manipulação
+    const manipKg = mode === 'drenagem' ? getManipPhase(op, events).manipKg : null;
+    const suggestedKg = manipKg && manipKg > 0 ? manipKg : (mode === 'drenagem' ? Number(op.plannedQuantity) || 0 : 0);
+    setFinalKg(suggestedKg > 0 ? String(suggestedKg) : '');
     setSelectedShift(detectedShift);
+  };
+
+  // ---------------- FASES: AMOSTRAGEM / CQ / DRENAGEM ----------------
+  const runPhaseAction = async (op: ProductionOrder, fn: () => Promise<{ ok: boolean; error?: string } | void | undefined>, okMsg: string) => {
+    if (!profile || !op.lineId) return;
+    setActionBusyOpId(op.id);
+    try {
+      const res = await fn();
+      if (res && (res as any).ok === false) {
+        showToast((res as any).error || 'Não foi possível registrar.', 'error');
+      } else {
+        showToast(okMsg);
+      }
+      await fetchData(true);
+    } catch (err) {
+      console.error('Erro na fase da manipulação:', err);
+      showToast('Erro ao registrar esta etapa.', 'error');
+    } finally {
+      setActionBusyOpId(null);
+    }
+  };
+
+  // ANÁLISE: encerra a manipulação e já manda a Amostra 01 para o CQ
+  // (sem pausa e sem modal — o Kg é informado só ao finalizar a drenagem).
+  const handleAnalise = (op: ProductionOrder) => runPhaseAction(
+    op,
+    () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Manipulação finalizada · Amostra 01 enviada para análise') as any,
+    `OP ${op.number} enviada para análise — aguardando CQ.`
+  );
+
+  const handleCollectSample = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples + 1;
+    return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, `Amostra ${String(n).padStart(2, '0')} enviada para análise`), `Amostra ${String(n).padStart(2, '0')} enviada para análise — aguardando CQ.`);
+  };
+
+  const handleCqApproved = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples;
+    return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoDrenagem, `CQ: aprovado — Amostra ${String(n).padStart(2, '0')} · liberado para drenagem`), 'Aprovado pelo CQ — liberado para drenagem.');
+  };
+
+  const handleCqRejected = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples;
+    return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.emAjuste, `CQ: não aprovado — Amostra ${String(n).padStart(2, '0')} · ajuste iniciado`), 'Não aprovado — reator em ajuste.');
+  };
+
+  const handleStartDrain = (op: ProductionOrder) => runPhaseAction(op, async () => {
+    await ensureShiftOpen(op.lineId as string);
+    return resumeOP(op.id, op.lineId as string, profile!.uid);
+  }, `Drenagem da OP ${op.number} iniciada.`);
+
+  // ---------------- CONFERÊNCIA ----------------
+  // Um clique confirma que a pesagem foi conferida (quem clicou fica registrado).
+  const handleConferir = async (op: ProductionOrder) => {
+    if (!profile) return;
+    setActionBusyOpId(op.id);
+    try {
+      const res = await addManipConferencia({
+        opId: op.id,
+        osmNumber: (op.number || '').trim(),
+        lote: (op.lote || '').trim(),
+        reactorId: op.lineId || '',
+        items: {},
+        operador: profile.name || '',
+        observacao: '',
+        conferidoPor: profile.uid,
+        conferidoNome: profile.name || '',
+      });
+      if (!res.ok) {
+        showToast(res.error || 'Não foi possível registrar a conferência.', 'error');
+        return;
+      }
+      showToast(`OSM ${op.number} conferida — liberada para iniciar no reator.`);
+      await fetchData(true);
+    } finally {
+      setActionBusyOpId(null);
+    }
+  };
+
+  const handleUndoConferencia = async (conf: ManipConferencia) => {
+    const res = await deleteManipConferencia(conf.id);
+    if (!res.ok) showToast(`Não foi possível desfazer: ${res.error}`, 'error');
+    else showToast(`Conferência da OSM ${conf.osmNumber} desfeita.`);
+    await fetchData(true);
   };
 
   const handleConfirmFinish = async (e: React.FormEvent) => {
@@ -562,9 +764,23 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       // Usa o reator real da OP (lineId) — assim que finalizada, ela some
       // desta lista de "não concluídas" e a próxima da fila do MESMO reator
       // vira a nova OP ativa automaticamente (ver reactorState acima).
+      if (finishMode === 'manip') {
+        // Fim da manipulação: reator fica aguardando amostragem (OP pausada
+        // com o motivo da fase — não conta como tempo trabalhando).
+        const res = await pauseOP(finishingOp.id, finishingOp.lineId, profile.uid, MANIP_PHASE_REASONS.aguardandoAmostragem, `Manipulação finalizada · ${kgNum.toLocaleString('pt-BR')} kg`, kgNum);
+        if (res && (res as any).ok === false) {
+          showToast('Não foi possível finalizar a manipulação.', 'error');
+          return;
+        }
+        showToast(`Manipulação da OP ${finishingOp.number} finalizada — aguardando amostragem.`, 'success');
+        setFinishingOp(null);
+        await fetchData(true);
+        return;
+      }
+
       await finishOP(finishingOp.id, finishingOp.lineId, profile.uid, selectedShift, kgNum);
 
-      showToast(`OP ${finishingOp.number} finalizada no turno da ${selectedShift}!`, 'success');
+      showToast(`Drenagem finalizada — OP ${finishingOp.number} concluída. Reator em setup.`, 'success');
       setFinishingOp(null);
       await fetchData(true);
     } catch (err) {
@@ -602,33 +818,44 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // Card da OP ativa de um reator — Iniciar / Pausar / Retomar / Finalizar,
   // no mesmo estilo visual usado antes (bloco de observação/horário etc.).
+  // Visual de cada fase do reator
+  const PHASE_STYLE: Record<ManipPhase, { border: string; badge: string; icon: React.ReactNode }> = {
+    aguardando_inicio: { border: 'border-[#27272a]', badge: 'bg-[#1a1a22] text-[#a1a1aa] border-[#2c2c3c]', icon: <Clock className="w-3 h-3" /> },
+    manipulando: { border: 'border-cyan-500/50 shadow-lg shadow-cyan-950/20', badge: 'bg-cyan-950/90 text-cyan-300 border-cyan-800/60', icon: <FlaskConical className="w-3 h-3 text-cyan-400 animate-pulse" /> },
+    pausada: { border: 'border-amber-500/50 shadow-lg shadow-amber-950/20', badge: 'bg-amber-950/90 text-amber-300 border-amber-800/60', icon: <Pause className="w-3 h-3 text-amber-400" /> },
+    aguardando_amostragem: { border: 'border-violet-500/50 shadow-lg shadow-violet-950/20', badge: 'bg-violet-950/90 text-violet-300 border-violet-800/60', icon: <TestTube className="w-3 h-3 text-violet-400" /> },
+    aguardando_cq: { border: 'border-sky-500/50 shadow-lg shadow-sky-950/20', badge: 'bg-sky-950/90 text-sky-300 border-sky-800/60', icon: <ShieldCheck className="w-3 h-3 text-sky-400 animate-pulse" /> },
+    em_ajuste: { border: 'border-orange-500/50 shadow-lg shadow-orange-950/20', badge: 'bg-orange-950/90 text-orange-300 border-orange-800/60', icon: <Wrench className="w-3 h-3 text-orange-400" /> },
+    aguardando_drenagem: { border: 'border-emerald-500/50 shadow-lg shadow-emerald-950/20', badge: 'bg-emerald-950/90 text-emerald-300 border-emerald-800/60', icon: <ThumbsUp className="w-3 h-3 text-emerald-400" /> },
+    drenando: { border: 'border-teal-500/50 shadow-lg shadow-teal-950/20', badge: 'bg-teal-950/90 text-teal-300 border-teal-800/60', icon: <Droplets className="w-3 h-3 text-teal-400 animate-pulse" /> },
+    drenagem_pausada: { border: 'border-amber-500/50 shadow-lg shadow-amber-950/20', badge: 'bg-amber-950/90 text-amber-300 border-amber-800/60', icon: <Pause className="w-3 h-3 text-amber-400" /> },
+    encerrado: { border: 'border-[#27272a]', badge: 'bg-emerald-950/90 text-emerald-300 border-emerald-800/60', icon: <CheckCircle2 className="w-3 h-3" /> },
+  };
+
+  // min-w-0 + quebra de linha: com 4 colunas o card fica estreito e os
+  // botões não podem vazar para fora dele.
+  const btnBase = 'shrink min-h-10 h-auto py-2 min-w-0 whitespace-normal leading-tight text-center rounded-xl text-white font-bold text-xs shadow-md flex items-center justify-center gap-1.5 transition-all transform active:scale-95 [&>svg]:shrink-0';
+
+  // Card da OP ativa de um reator — botões conforme a FASE do fluxo:
+  // Iniciar → Finalizar manipulação → Coletar amostra → Aprovado/Reprovado
+  // (→ ajuste → nova amostra) → Iniciar drenagem → Finalizar drenagem.
   const renderActiveCard = (op: ProductionOrder) => {
     const isBusy = actionBusyOpId === op.id;
-    // Horário real de início = 1º evento STARTED da OP. Antes caía no horário
-    // em que a OP foi CRIADA (quando entrou na fila do reator), mostrando um
-    // "Início" que nunca aconteceu.
-    // (desconsidera inícios que foram cancelados por engano)
-    const lastCancelMs = events
-      .filter(e => e.opId === op.id && e.type === 'CANCELLED')
-      .reduce((max, e) => Math.max(max, new Date(e.createdAt).getTime()), -Infinity);
-    const startEvents = events.filter(e => e.opId === op.id && e.type === 'STARTED' && new Date(e.createdAt).getTime() > lastCancelMs);
-    const firstStart = startEvents.length > 0
-      ? startEvents.reduce((a, b) => (new Date(a.createdAt).getTime() < new Date(b.createdAt).getTime() ? a : b)).createdAt
-      : null;
+    const info = getManipPhase(op, events);
+    const phase = info.phase;
+    const style = PHASE_STYLE[phase];
+    const conf = conferenciaFor(op);
+    const opEvents = getManipOpEvents(op.id, events);
+    const firstStart = opEvents.find(e => e.type === 'STARTED')?.createdAt || null;
     const formattedTime = firstStart
       ? new Date(firstStart).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
       : '--:--';
+    const manipFinished = opEvents.some(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason));
+    const canCancelStart = (phase === 'manipulando' || phase === 'pausada') && !manipFinished && !(Number(op.producedQuantity) > 0);
+    const sampleLabel = info.samples > 0 ? `Amostra ${String(info.samples).padStart(2, '0')}` : '';
 
     return (
-      <div
-        className={`rounded-2xl p-4 flex flex-col gap-3 transition-all border-2 ${
-          op.status === 'in_progress'
-            ? 'bg-[#18181b] border-cyan-500/50 shadow-lg shadow-cyan-950/20'
-            : op.status === 'paused'
-            ? 'bg-[#18181b] border-amber-500/50 shadow-lg shadow-amber-950/20'
-            : 'bg-[#18181b] border-[#27272a]'
-        }`}
-      >
+      <div className={`rounded-2xl p-4 flex flex-col gap-3 transition-all border-2 bg-[#18181b] ${style.border}`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5 flex-wrap">
             {op.industria && (
@@ -636,33 +863,32 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 {op.industria}
               </span>
             )}
-            {op.status === 'in_progress' ? (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-cyan-950/90 text-cyan-300 border border-cyan-800/60 flex items-center gap-1 shadow-sm">
-                <FlaskConical className="w-3 h-3 text-cyan-400 animate-pulse" />
-                <span>Em Processo</span>
-              </span>
-            ) : op.status === 'paused' ? (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-amber-950/90 text-amber-300 border border-amber-800/60 flex items-center gap-1 shadow-sm">
-                <Pause className="w-3 h-3 text-amber-400" />
-                <span>Pausada</span>
-              </span>
-            ) : (
-              <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg bg-[#1a1a22] text-[#a1a1aa] border border-[#2c2c3c] flex items-center gap-1 shadow-sm">
-                <Clock className="w-3 h-3" />
-                <span>Pronta pra Iniciar</span>
-              </span>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border flex items-center gap-1 shadow-sm ${style.badge}`}>
+              {style.icon}
+              <span>{phase === 'aguardando_inicio' && !conf ? 'Aguardando conferência' : MANIP_PHASE_LABELS[phase]}</span>
+            </span>
+            {phase !== 'aguardando_inicio' && info.since && (
+              <span className="text-[10px] font-mono text-[#71717a]" title="Tempo nesta etapa">há {fmtDuration(info.since)}</span>
             )}
           </div>
-          {/* Cancelar início: só pra OP já iniciada (em processo/pausada) e sem Kg apontado */}
-          {(op.status === 'in_progress' || op.status === 'paused') && !(Number(op.producedQuantity) > 0) && (
+          <div className="flex items-center gap-1">
             <Button
-              onClick={() => setCancellingOp(op)}
-              title="Cancelar início (iniciada por engano)"
-              className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-rose-950/30 text-rose-400/70 hover:text-rose-300 border border-rose-500/20 flex items-center justify-center transition-all p-0"
+              onClick={() => setHistoryOp(op)}
+              title="Histórico da OP"
+              className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-[#27272a] text-[#a1a1aa] hover:text-white border border-[#27272a] flex items-center justify-center transition-all p-0"
             >
-              <XCircle className="w-3.5 h-3.5" />
+              <History className="w-3.5 h-3.5" />
             </Button>
-          )}
+            {canCancelStart && (
+              <Button
+                onClick={() => setCancellingOp(op)}
+                title="Cancelar início (iniciada por engano)"
+                className="h-7 w-7 shrink-0 rounded-lg bg-transparent hover:bg-rose-950/30 text-rose-400/70 hover:text-rose-300 border border-rose-500/20 flex items-center justify-center transition-all p-0"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+              </Button>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between gap-2">
@@ -702,60 +928,150 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          {op.status === 'pending' && (
-            <Button
-              onClick={() => handleStart(op)}
-              disabled={isBusy}
-              className="flex-1 h-10 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-            >
-              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
-              <span>Iniciar Manipulação</span>
+        {/* Conferência / Kg manipulado / amostras */}
+        <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
+          {conf ? (
+            <span className="px-2 py-0.5 rounded-lg bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 flex items-center gap-1" title={`Conferida por ${conf.conferidoNome || '—'}`}>
+              <ClipboardCheck className="w-3 h-3" />
+              Conferida {new Date(conf.conferidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          ) : op.status === 'pending' && (
+            <span className="px-2 py-0.5 rounded-lg bg-rose-950/50 text-rose-300 border border-rose-800/40 flex items-center gap-1">
+              <ClipboardCheck className="w-3 h-3" />
+              Não conferida
+            </span>
+          )}
+          {manipFinished && info.manipKg ? (
+            <span className="px-2 py-0.5 rounded-lg bg-[#121215] text-white border border-[#27272a] font-mono font-bold">
+              {Number(info.manipKg).toLocaleString('pt-BR')} kg
+            </span>
+          ) : null}
+          {sampleLabel && (
+            <span className="px-2 py-0.5 rounded-lg bg-sky-950/50 text-sky-300 border border-sky-800/40 flex items-center gap-1">
+              <TestTube className="w-3 h-3" />
+              {sampleLabel}
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-stretch gap-2">
+          {phase === 'aguardando_inicio' && (
+            conf ? (
+              <Button onClick={() => handleStart(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
+                {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+                <span>Iniciar Manipulação</span>
+              </Button>
+            ) : (
+              <>
+                <Button onClick={() => handleConferir(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`} title="Confirmar que esta pesagem foi conferida">
+                  {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ListChecks className="w-4 h-4" />}
+                  <span>Conferido</span>
+                </Button>
+              </>
+            )
+          )}
+
+          {phase === 'manipulando' && (
+            <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+              <span>Análise</span>
             </Button>
           )}
-          {op.status === 'in_progress' && (
+
+          {(phase === 'pausada' || phase === 'drenagem_pausada') && (
+            <Button onClick={() => handleResume(op)} disabled={isBusy} className={`${phase === 'pausada' ? 'flex-1 basis-[7.5rem]' : 'px-3'} bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
+              {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+              <span>{phase === 'pausada' ? 'Retomar manipulação' : 'Retomar'}</span>
+            </Button>
+          )}
+
+          {(phase === 'aguardando_amostragem' || phase === 'em_ajuste') && (
+            <Button onClick={() => handleCollectSample(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
+              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+              <span>{phase === 'em_ajuste' ? 'Nova análise' : 'Análise'}</span>
+            </Button>
+          )}
+
+          {phase === 'aguardando_cq' && (
             <>
-              <Button
-                onClick={() => handleOpenPauseModal(op)}
-                disabled={isBusy}
-                className="h-10 px-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-md shadow-amber-950/40 flex items-center justify-center gap-1.5 transition-all"
-              >
-                <Pause className="w-3.5 h-3.5" />
-                <span>Pausar</span>
+              <Button onClick={() => handleCqRejected(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-rose-600 hover:bg-rose-500 shadow-rose-950/40 ${btnBase}`}>
+                <ThumbsDown className="w-4 h-4" />
+                <span>Reprovado</span>
               </Button>
-              <Button
-                onClick={() => handleOpenFinishModal(op)}
-                disabled={isBusy}
-                className="flex-1 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Finalizar</span>
+              <Button onClick={() => handleCqApproved(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40 ${btnBase}`}>
+                <ThumbsUp className="w-4 h-4" />
+                <span>Aprovado</span>
               </Button>
             </>
           )}
-          {op.status === 'paused' && (
-            <>
-              <Button
-                onClick={() => handleResume(op)}
-                disabled={isBusy}
-                className="h-10 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shadow-md shadow-cyan-950/40 flex items-center justify-center gap-1.5 transition-all"
-              >
-                {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-                <span>Retomar</span>
-              </Button>
-              <Button
-                onClick={() => handleOpenFinishModal(op)}
-                disabled={isBusy}
-                className="flex-1 h-10 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md shadow-emerald-950/40 flex items-center justify-center gap-2 transition-all transform active:scale-95"
-              >
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Finalizar</span>
-              </Button>
-            </>
+
+          {phase === 'aguardando_drenagem' && (
+            <Button onClick={() => handleStartDrain(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-teal-600 hover:bg-teal-500 shadow-teal-950/40 ${btnBase}`}>
+              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Droplets className="w-4 h-4" />}
+              <span>Iniciar drenagem</span>
+            </Button>
+          )}
+
+          {(phase === 'drenando' || phase === 'drenagem_pausada') && (
+            <Button onClick={() => handleOpenFinishModal(op, 'drenagem')} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40 ${btnBase}`}>
+              <CheckCircle2 className="w-4 h-4" />
+              <span>Finalizar drenagem</span>
+            </Button>
           )}
         </div>
       </div>
     );
+  };
+
+  // Card de uma OSM na Linha de Conferência
+  const renderConferenciaItem = (op: ProductionOrder, highlight: boolean) => {
+    const reactorName = reactorLines.find(r => r.id === op.lineId)?.name || '—';
+    const late = queueRank(op) === 0;
+    return (
+      <div key={op.id} className={`rounded-xl border p-2.5 space-y-2 ${highlight ? 'bg-[#18181b] border-violet-500/40' : 'bg-[#0e0e12] border-[#1f1f26]'}`}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-mono font-black text-sm text-white">{op.number}</span>
+          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-cyan-950/60 text-cyan-300 border border-cyan-800/40 shrink-0">{reactorName}</span>
+        </div>
+        <div className="text-[10px] text-[#a1a1aa] uppercase truncate">{op.product}</div>
+        <div className="flex items-center justify-between gap-2">
+          <span className={`text-[10px] font-mono ${late ? 'text-rose-300' : 'text-[#71717a]'}`}>
+            {op.lote ? `Lote ${op.lote} · ` : ''}{op.scheduledDate ? new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : 'sem data'}{late ? ' · atrasada' : ''}
+          </span>
+          <Button onClick={() => handleConferir(op)} disabled={actionBusyOpId === op.id} className="h-7 px-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold flex items-center gap-1">
+            {actionBusyOpId === op.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ListChecks className="w-3.5 h-3.5" />}
+            Conferido
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  // Linha do tempo da OP (modal Histórico)
+  const buildHistory = (op: ProductionOrder) => {
+    const evs = getManipOpEvents(op.id, events);
+    const rows: { at: string; text: string; tone: string }[] = [];
+    const conf = conferenciaFor(op);
+    if (conf) rows.push({ at: conf.conferidoEm, text: `Pesagem conferida${conf.conferidoNome ? ` por ${conf.conferidoNome}` : ''}`, tone: 'text-emerald-300' });
+    let manipFinished = false;
+    let inDrain = false;
+    evs.forEach(e => {
+      if (e.type === 'STARTED') rows.push({ at: e.createdAt, text: 'Manipulação iniciada', tone: 'text-cyan-300' });
+      else if (e.type === 'PAUSED') {
+        if (e.reason === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Aguardando amostragem', tone: 'text-violet-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.aguardandoCq) { manipFinished = true; rows.push({ at: e.createdAt, text: `${e.observation || 'Amostra enviada para análise'} · aguardando CQ`, tone: 'text-sky-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.emAjuste) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: não aprovado · em ajuste', tone: 'text-orange-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.aguardandoDrenagem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: aprovado · liberado para drenagem', tone: 'text-emerald-300' }); }
+        else rows.push({ at: e.createdAt, text: `${inDrain ? 'Drenagem pausada' : 'Pausada'}${e.reason ? ` — ${e.reason}` : ''}${e.observation ? ` · ${e.observation}` : ''}`, tone: 'text-amber-300' });
+      } else if (e.type === 'RESUMED') {
+        if (manipFinished && !inDrain) { inDrain = true; rows.push({ at: e.createdAt, text: 'Drenagem iniciada', tone: 'text-teal-300' }); }
+        else rows.push({ at: e.createdAt, text: inDrain ? 'Drenagem retomada' : 'Manipulação retomada', tone: 'text-cyan-300' });
+      } else if (e.type === 'FINISHED') {
+        rows.push({ at: e.createdAt, text: `Drenagem finalizada${e.quantity ? ` · ${Number(e.quantity).toLocaleString('pt-BR')} kg` : ''} — OP concluída`, tone: 'text-emerald-300' });
+        rows.push({ at: e.createdAt, text: 'Reator em setup', tone: 'text-[#a1a1aa]' });
+      }
+    });
+    return rows.sort((x, y) => new Date(x.at).getTime() - new Date(y.at).getTime());
   };
 
   return (
@@ -969,9 +1285,74 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   <span className="text-xs">Carregando reatores...</span>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
+                  {/* LINHA DE CONFERÊNCIA — confere a pesagem antes do reator
+                      poder iniciar. Próximas de cada reator em cima; qualquer
+                      OSM do cronograma pode ser conferida. Não conta tempo de reator. */}
+                  <div className="bg-[#121215] border border-violet-900/50 rounded-2xl p-3.5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ClipboardCheck className="w-4 h-4 text-violet-400" />
+                        <h3 className="text-sm font-black text-white uppercase tracking-wide">Conferência</h3>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-violet-950/70 text-violet-300 border border-violet-800/40">
+                        {conferenciaQueue.proximas.length + conferenciaQueue.demais.length}
+                      </span>
+                    </div>
+                    {conferenciasError && /does not exist|relation|manipulacao_conferencias/i.test(conferenciasError) && (
+                      <p className="text-[10px] text-rose-300 bg-rose-950/40 border border-rose-800/40 rounded-lg px-2 py-1.5">
+                        Tabela de conferência não encontrada — rode sql/add_conferencia_manipulacao.sql no Supabase.
+                      </p>
+                    )}
+                    {conferenciaQueue.proximas.length === 0 && conferenciaQueue.demais.length === 0 ? (
+                      <p className="text-[11px] text-[#52525b] text-center py-8">Nenhuma pesagem aguardando conferência.</p>
+                    ) : (
+                      <>
+                        {conferenciaQueue.proximas.length > 0 && (
+                          <div className="space-y-1.5">
+                            <p className="text-[10px] text-violet-300 font-semibold uppercase tracking-wide">Próximas dos reatores</p>
+                            {conferenciaQueue.proximas.map(op => renderConferenciaItem(op, true))}
+                          </div>
+                        )}
+                        {conferenciaQueue.demais.length > 0 && (
+                          <div className="space-y-1.5 pt-1">
+                            <p className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wide">Demais no cronograma ({conferenciaQueue.demais.length})</p>
+                            {conferenciaQueue.demais.map(op => renderConferenciaItem(op, false))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {conferenciaQueue.conferidas.length > 0 && (
+                      <div className="pt-1 space-y-1.5">
+                        <button type="button" onClick={() => setShowConferidas(v => !v)} className="text-[10px] text-emerald-400 font-semibold uppercase tracking-wide hover:text-emerald-300">
+                          {showConferidas ? '▾' : '▸'} Conferidas aguardando início ({conferenciaQueue.conferidas.length})
+                        </button>
+                        {showConferidas && conferenciaQueue.conferidas.map(op => {
+                          const c = conferenciaFor(op);
+                          const canUndo = !!c && (c.conferidoPor === profile?.uid);
+                          return (
+                            <div key={op.id} className="flex items-center justify-between gap-2 bg-[#0e0e12] border border-emerald-900/40 rounded-lg px-2.5 py-1.5">
+                              <div className="min-w-0">
+                                <div className="font-mono font-bold text-[11px] text-white">{op.number}</div>
+                                <div className="text-[10px] text-[#71717a] truncate">
+                                  {reactorLines.find(r => r.id === op.lineId)?.name || '—'} · {c?.conferidoNome || '—'} {c ? new Date(c.conferidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                                </div>
+                              </div>
+                              {canUndo && c && (
+                                <button type="button" onClick={() => handleUndoConferencia(c)} title="Desfazer conferência" className="h-6 w-6 rounded-md text-[#a1a1aa] hover:text-rose-300 hover:bg-rose-950/30 flex items-center justify-center shrink-0">
+                                  <Undo2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
                   {reactorLines.map((reactor) => {
                     const { activeOp, queuedOps } = reactorState[reactor.id] || { activeOp: null, queuedOps: [] };
+                    const setupSince = reactorSetupSince[reactor.id];
                     return (
                       <div key={reactor.id} className="bg-[#121215] border border-[#27272a] rounded-2xl p-3.5 space-y-3">
                         <div className="flex items-center justify-between">
@@ -983,6 +1364,16 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                             {queuedOps.length + (activeOp ? 1 : 0)}
                           </span>
                         </div>
+
+                        {setupSince && (
+                          <div className="flex items-center justify-between gap-2 bg-amber-950/30 border border-amber-800/40 rounded-xl px-3 py-2" title="O reator entra em setup quando uma OP termina e sai ao iniciar a próxima. Conta como ociosidade.">
+                            <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-300">
+                              <Timer className="w-3.5 h-3.5" />
+                              Em setup
+                            </div>
+                            <span className="font-mono text-[11px] text-amber-200">{fmtDuration(setupSince)}</span>
+                          </div>
+                        )}
 
                         {!activeOp ? (
                           <p className="text-[11px] text-[#52525b] text-center py-8">
@@ -1083,7 +1474,10 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                           )}
                         </div>
 
-                        <div className="text-right">
+                        <div className="text-right flex flex-col items-end gap-1">
+                          <button type="button" onClick={() => setHistoryOp(op)} className="text-[10px] text-[#a1a1aa] hover:text-white flex items-center gap-1">
+                            <History className="w-3 h-3" /> Histórico
+                          </button>
                           <div className="font-mono font-black text-sm text-emerald-400">
                             {finishedKg.toLocaleString('pt-BR')} Kg
                           </div>
@@ -1222,10 +1616,12 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               <FlaskConical className="w-5 h-5" />
             </div>
             <DialogTitle className="text-lg font-bold text-white">
-              Finalizar OP {finishingOp?.number}
+              {finishMode === 'manip' ? 'Finalizar manipulação' : 'Finalizar drenagem'} · OP {finishingOp?.number}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
-              Confirme a quantidade de granel manipulada e selecione o turno de encerramento.
+              {finishMode === 'manip'
+                ? 'Informe o Kg manipulado. O reator passa para "Aguardando amostragem".'
+                : 'Confirme o Kg drenado e o turno. A OP é concluída e o reator entra em setup.'}
             </p>
           </DialogHeader>
 
@@ -1240,7 +1636,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               {/* Quantidade em Kg */}
               <div>
                 <Label className="text-xs font-semibold text-[#d4d4d8]">
-                  Quantidade Manipulada Final (Kg) <span className="text-cyan-400">*</span>
+                  {finishMode === 'manip' ? 'Quantidade manipulada (Kg)' : 'Quantidade final (Kg)'} <span className="text-cyan-400">*</span>
                 </Label>
                 <Input
                   type="number"
@@ -1254,8 +1650,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 />
               </div>
 
-              {/* Seleção de Turno: Manhã ou Tarde */}
-              <div>
+              {/* Seleção de Turno: Manhã ou Tarde (só ao encerrar a OP) */}
+              <div className={finishMode === 'manip' ? 'hidden' : ''}>
                 <Label className="text-xs font-semibold text-[#d4d4d8] mb-2 block">
                   Turno de Conclusão <span className="text-cyan-400">*</span>
                 </Label>
@@ -1314,13 +1710,54 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   ) : (
                     <>
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Confirmar Finalização</span>
+                      <span>{finishMode === 'manip' ? 'Finalizar manipulação' : 'Concluir OP'}</span>
                     </>
                   )}
                 </Button>
               </DialogFooter>
             </form>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: HISTÓRICO DA OP */}
+      <Dialog open={!!historyOp} onOpenChange={(open) => !open && setHistoryOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold text-white flex items-center gap-2">
+              <History className="w-5 h-5 text-cyan-400" />
+              Histórico · OP {historyOp?.number}
+            </DialogTitle>
+            <p className="text-xs text-[#a1a1aa]">
+              {historyOp?.product} · {reactorLines.find(r => r.id === historyOp?.lineId)?.name || '—'}
+            </p>
+          </DialogHeader>
+          {historyOp && (() => {
+            const rows = buildHistory(historyOp);
+            if (rows.length === 0) return <p className="text-xs text-[#71717a] py-6 text-center">Nenhum registro ainda.</p>;
+            return (
+              <div className="max-h-[60vh] overflow-y-auto pr-1 py-2">
+                <ol className="relative border-l border-[#27272a] ml-2 space-y-3">
+                  {rows.map((r, i) => (
+                    <li key={i} className="ml-4">
+                      <span className="absolute -left-[5px] mt-1.5 w-2.5 h-2.5 rounded-full bg-[#3f3f46] border border-[#18181b]" />
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-mono text-[11px] text-[#a1a1aa] shrink-0">
+                          {new Date(r.at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} {new Date(r.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                        <span className={`text-xs font-semibold ${r.tone}`}>{r.text}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setHistoryOp(null)} className="h-9 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a]">
+              Fechar
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

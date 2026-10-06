@@ -5357,3 +5357,259 @@ export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurr
   for (const o of list) if (o.type in out) out[o.type] += o.quantity || 1;
   return out;
 }
+
+// ---------------- MANIPULAÇÃO: FASES DO REATOR E CONFERÊNCIA ----------------
+// Fluxo: Conferência → Iniciar → Manipulando → Finalizar manipulação (Kg) →
+// Aguardando amostragem → Coletar amostra → Aguardando CQ → Aprovado (→
+// Aguardando drenagem) ou Reprovado (→ Em ajuste → nova amostra) → Iniciar
+// drenagem → Drenando → Finalizar drenagem (OP concluída, reator em Setup).
+// O banco só aceita STARTED/PAUSED/RESUMED/FINISHED/QUANTITY_REPORTED, então
+// cada fase é um evento PAUSED com um MOTIVO fixo (abaixo) — a OP fica
+// 'paused' durante amostragem/CQ/ajuste e volta a 'in_progress' na drenagem.
+
+export const MANIP_PHASE_REASONS = {
+  aguardandoAmostragem: 'Aguardando amostragem',
+  aguardandoCq: 'Aguardando CQ',
+  emAjuste: 'Em ajuste',
+  aguardandoDrenagem: 'Aguardando drenagem',
+} as const;
+
+export type ManipPhase =
+  | 'aguardando_inicio'
+  | 'manipulando'
+  | 'pausada'
+  | 'aguardando_amostragem'
+  | 'aguardando_cq'
+  | 'em_ajuste'
+  | 'aguardando_drenagem'
+  | 'drenando'
+  | 'drenagem_pausada'
+  | 'encerrado';
+
+export const MANIP_PHASE_LABELS: Record<ManipPhase, string> = {
+  aguardando_inicio: 'Aguardando início',
+  manipulando: 'Manipulando',
+  pausada: 'Pausada',
+  aguardando_amostragem: 'Aguardando amostragem',
+  aguardando_cq: 'Aguardando CQ',
+  em_ajuste: 'Em ajuste',
+  aguardando_drenagem: 'Liberado p/ drenagem',
+  drenando: 'Drenando',
+  drenagem_pausada: 'Drenagem pausada',
+  encerrado: 'Encerrado',
+};
+
+const MANIP_PHASE_BY_REASON: Record<string, ManipPhase> = {
+  [MANIP_PHASE_REASONS.aguardandoAmostragem]: 'aguardando_amostragem',
+  [MANIP_PHASE_REASONS.aguardandoCq]: 'aguardando_cq',
+  [MANIP_PHASE_REASONS.emAjuste]: 'em_ajuste',
+  [MANIP_PHASE_REASONS.aguardandoDrenagem]: 'aguardando_drenagem',
+};
+
+export const isManipPhaseReason = (reason?: string | null) => !!reason && reason in MANIP_PHASE_BY_REASON;
+
+/** Eventos da OP depois do último cancelamento de início, em ordem cronológica. */
+export function getManipOpEvents(opId: string, events: ProductionEvent[]): ProductionEvent[] {
+  const own = events.filter(e => e.opId === opId);
+  const lastCancelMs = own
+    .filter(e => e.type === 'CANCELLED')
+    .reduce((max, e) => Math.max(max, new Date(e.createdAt).getTime()), -Infinity);
+  return own
+    .filter(e => new Date(e.createdAt).getTime() > lastCancelMs)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+export interface ManipPhaseInfo {
+  phase: ManipPhase;
+  /** Momento em que a fase atual começou (ISO) */
+  since: string | null;
+  /** Nº de amostras já coletadas */
+  samples: number;
+  /** Kg apontado ao finalizar a manipulação */
+  manipKg: number | null;
+}
+
+/** Fase atual da OP de Manipulação, derivada do status + eventos. */
+export function getManipPhase(op: ProductionOrder, events: ProductionEvent[]): ManipPhaseInfo {
+  const evs = getManipOpEvents(op.id, events);
+  const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
+  // Manipulação encerrada = já existe qualquer evento de fase (Análise/CQ/ajuste)
+  const manipFinished = evs.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason));
+  const manipKg = manipFinished && manipFinished.quantity != null ? Number(manipFinished.quantity) : (Number(op.producedQuantity) || null);
+  const last = evs.length > 0 ? evs[evs.length - 1] : null;
+  const since = last?.createdAt || null;
+
+  if (op.status === 'completed') return { phase: 'encerrado', since: op.completedAt || since, samples, manipKg };
+  if (op.status === 'pending') return { phase: 'aguardando_inicio', since: null, samples, manipKg };
+  if (op.status === 'in_progress') {
+    return { phase: manipFinished ? 'drenando' : 'manipulando', since, samples, manipKg };
+  }
+  // paused: o último PAUSED diz em que fase está
+  const lastPause = [...evs].reverse().find(e => e.type === 'PAUSED');
+  const byReason = lastPause?.reason ? MANIP_PHASE_BY_REASON[lastPause.reason] : undefined;
+  if (byReason) return { phase: byReason, since: lastPause!.createdAt, samples, manipKg };
+  return { phase: manipFinished ? 'drenagem_pausada' : 'pausada', since: lastPause?.createdAt || since, samples, manipKg };
+}
+
+/**
+ * Registra a mudança de fase de uma OP que JÁ está pausada (coletar amostra,
+ * aprovado, reprovado) — só grava o evento, não mexe no status da OP.
+ */
+export const recordManipulacaoPhase = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  reason: string,
+  observation: string
+): Promise<{ ok: boolean; error?: string }> => {
+  const createdAt = new Date().toISOString();
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      createdAt,
+    }, ...trainingEvents];
+    return { ok: true };
+  }
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'PAUSED',
+    reason,
+    observation,
+    createdAt,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+  try {
+    await recordEventRemote({ opId, lineId, leaderId, type: 'PAUSED', reason, observation, createdAt });
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+export interface ManipConferencia {
+  id: string;
+  opId: string;
+  osmNumber: string;
+  lote: string;
+  reactorId: string;
+  items: Record<string, boolean>;
+  operador: string;
+  observacao: string;
+  conferidoPor: string | null;
+  conferidoNome: string;
+  conferidoEm: string;
+}
+
+export const MANIP_CONFERENCIA_ITEMS: { key: string; label: string }[] = [
+  { key: 'identificacao', label: 'OP / produto / lote conferem com a etiqueta' },
+  { key: 'reator', label: 'Reator de destino correto' },
+  { key: 'materias_primas', label: 'Todas as matérias-primas presentes' },
+  { key: 'quantidades', label: 'Quantidades (Kg) conferem com a OSM' },
+  { key: 'operador', label: 'Operador responsável identificado' },
+];
+
+const mapConferenciaRow = (r: any): ManipConferencia => ({
+  id: String(r.id),
+  opId: String(r.op_id),
+  osmNumber: String(r.osm_number || ''),
+  lote: String(r.lote || ''),
+  reactorId: String(r.reactor_id || ''),
+  items: (r.items && typeof r.items === 'object') ? r.items : {},
+  operador: String(r.operador || ''),
+  observacao: String(r.observacao || ''),
+  conferidoPor: r.conferido_por || null,
+  conferidoNome: String(r.conferido_nome || ''),
+  conferidoEm: r.conferido_em,
+});
+
+let trainingConferencias: ManipConferencia[] = [];
+
+export const getManipConferencias = async (): Promise<{ list: ManipConferencia[]; error: string | null }> => {
+  if (trainingModeActive) return { list: [...trainingConferencias], error: null };
+  try {
+    const { data, error } = await supabase
+      .from('manipulacao_conferencias')
+      .select('*')
+      .order('conferido_em', { ascending: false })
+      .limit(2000);
+    if (error) {
+      console.warn('[getManipConferencias] Não foi possível ler (rodou sql/add_conferencia_manipulacao.sql?):', error.message);
+      return { list: [], error: error.message };
+    }
+    return { list: (data || []).map(mapConferenciaRow), error: null };
+  } catch (err: any) {
+    return { list: [], error: String(err?.message || err) };
+  }
+};
+
+export const addManipConferencia = async (
+  conf: Omit<ManipConferencia, 'id' | 'conferidoEm'>
+): Promise<{ ok: boolean; error?: string }> => {
+  // Conferência por botão único: quem clicou é o responsável.
+  const operador = String(conf.operador || conf.conferidoNome || '').trim();
+  if (trainingModeActive) {
+    trainingConferencias = [
+      { ...conf, operador, id: `sim-conf-${Date.now()}`, conferidoEm: new Date().toISOString() },
+      ...trainingConferencias.filter(c => c.opId !== conf.opId),
+    ];
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('manipulacao_conferencias')
+      .insert({
+        op_id: conf.opId,
+        osm_number: conf.osmNumber || '',
+        lote: conf.lote || '',
+        reactor_id: conf.reactorId || '',
+        items: conf.items,
+        operador,
+        observacao: String(conf.observacao || '').trim(),
+        conferido_por: conf.conferidoPor && isUUID(conf.conferidoPor) ? conf.conferidoPor : null,
+        conferido_nome: conf.conferidoNome || '',
+      })
+      .select('id');
+    if (error) {
+      notifyDbWriteFailure('Registrar conferência da pesagem', error.message);
+      if (/duplicate|unique/i.test(error.message)) return { ok: false, error: 'Esta OSM já foi conferida.' };
+      return { ok: false, error: /manipulacao_conferencias|does not exist|relation/i.test(error.message) ? 'A tabela de conferência ainda não existe — rode sql/add_conferencia_manipulacao.sql no Supabase.' : error.message };
+    }
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+export const deleteManipConferencia = async (id: string): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) {
+    trainingConferencias = trainingConferencias.filter(c => c.id !== id);
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase.from('manipulacao_conferencias').delete().eq('id', id).select('id');
+    if (error) return { ok: false, error: error.message };
+    if (!data || data.length === 0) return { ok: false, error: 'só quem conferiu ou a coordenação pode desfazer' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};

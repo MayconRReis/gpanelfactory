@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X } from 'lucide-react';
+import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X, Printer } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 import { GranelBadge } from './GranelBadge';
+import { getGranelStatus } from '../services/db';
 
 interface CronogramaBoardProps {
   lines: ProductionLine[];
@@ -60,6 +61,8 @@ interface CronogramaBoardProps {
    * CoordinatorDashboard).
    */
   lineOpsFilter?: (op: ProductionOrder, line: ProductionLine) => boolean;
+  /** Título da folha impressa (ex.: "Cronograma de Envase"). */
+  printTitle?: string;
 }
 
 export const BACKLOG_COLUMN_ID = '__estoque__';
@@ -116,6 +119,7 @@ export function CronogramaBoard({
   readOnly = false,
   reworkByOp,
   lineOpsFilter,
+  printTitle,
 }: CronogramaBoardProps) {
   const [draggingOpId, setDraggingOpId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
@@ -220,23 +224,118 @@ export function CronogramaBoard({
     );
   }, [backlogOps, backlogSearchTerm]);
 
+  // OPs de uma linha num dia — mesma regra das colunas (e da impressão):
+  // em produção/pausada primeiro, depois as atrasadas (só no dia de hoje),
+  // depois a fila pela sequência.
+  const opsForLineOnDay = (line: ProductionLine, day: string): ProductionOrder[] => {
+    const extraFilter = lineOpsFilter || ((o: ProductionOrder) => o.status !== 'completed');
+    return ops
+      .filter(o => o.lineId === line.id && showsOnDay(o, day) && extraFilter(o, line))
+      .sort((a, b) => {
+        const rank = (o: ProductionOrder) =>
+          o.status === 'in_progress' || o.status === 'paused' ? 0 : (day === todayStr && isOverdue(o) ? 1 : 2);
+        return rank(a) - rank(b) || (a.sequence || 0) - (b.sequence || 0);
+      });
+  };
+
   // Colunas de linha mostram só as OPs agendadas para o dia selecionado.
   const opsByLine = useMemo(() => {
-    const extraFilter = lineOpsFilter || ((o: ProductionOrder) => o.status !== 'completed');
     const map: Record<string, ProductionOrder[]> = {};
-    for (const line of lines) {
-      map[line.id] = ops
-        .filter(o => o.lineId === line.id && showsOnDay(o, selectedDate) && extraFilter(o, line))
-        .sort((a, b) => {
-          // Em produção/pausada primeiro, depois as atrasadas, depois a fila
-          const rank = (o: ProductionOrder) =>
-            o.status === 'in_progress' || o.status === 'paused' ? 0 : (selectedDate === todayStr && isOverdue(o) ? 1 : 2);
-          return rank(a) - rank(b) || (a.sequence || 0) - (b.sequence || 0);
-        });
-    }
+    for (const line of lines) map[line.id] = opsForLineOnDay(line, selectedDate);
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, ops, selectedDate, lineOpsFilter, todayStr]);
+
+  // ---------- Impressão (folha para consulta no chão de fábrica) ----------
+  const [printError, setPrintError] = useState<string | null>(null);
+  const handlePrint = (scope: 'dia' | 'semana') => {
+    setPrintError(null);
+    const esc = (v: unknown) => String(v ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+    const ddmm = (d: string) => d ? d.split('-').reverse().slice(0, 2).join('/') : '';
+    const dayName = (d: string) => {
+      const [y, m, dd] = d.split('-').map(Number);
+      return ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'][new Date(y, m - 1, dd).getDay()];
+    };
+    const granelLabel: Record<string, string> = { manipulado: 'Manipulado', manipulando: 'Manipulando', separado: 'Separado', nao_separado: 'Não separado' };
+    const isReactorBoard = lines.length > 0 && lines.every(l => /reator/i.test(l.id) || /reator/i.test(l.name));
+    const title = printTitle || (isReactorBoard ? 'Cronograma de Manipulação' : 'Cronograma de Envase');
+    const days = scope === 'dia' ? [selectedDate] : weekDays.map(d => d.dateStr);
+    const now = new Date();
+    const printedAt = `${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+
+    const sections = days.map((day, di) => {
+      const tables = lines.map(line => {
+        const list = opsForLineOnDay(line, day);
+        const total = list.reduce((s2, o) => s2 + (Number(o.plannedQuantity) || 0), 0);
+        const rows = list.length === 0
+          ? `<tr><td colspan="10" class="empty">Nenhuma OP programada</td></tr>`
+          : list.map((o, i) => {
+              const gs = getGranelStatus(o.granel, ops);
+              const rw = reworkByOp?.get(o.id);
+              const sit = [
+                o.status === 'in_progress' ? 'Em produção' : o.status === 'paused' ? 'Pausada' : '',
+                day === todayStr && isOverdue(o) ? `ATRASADA desde ${ddmm(lastScheduledDay(o))}` : '',
+                rw && !rw.done ? `Retrabalho: ${rw.reason}` : '',
+              ].filter(Boolean).join(' · ');
+              const prio = o.priority && o.priority !== 'Normal' ? o.priority : '';
+              return `<tr${prio === 'Crítica' ? ' class="crit"' : ''}>
+                <td class="c">${i + 1}</td>
+                <td class="b">${esc(o.number)}</td>
+                <td>${esc(o.product)}</td>
+                <td class="r">${(Number(o.plannedQuantity) || 0).toLocaleString('pt-BR')} ${esc(o.unidade || 'Un')}</td>
+                <td>${esc(o.lote || '')}</td>
+                <td>${esc(o.granel || '')}${gs ? `<br><span class="small">${granelLabel[gs] || ''}</span>` : ''}</td>
+                <td>${esc(prio)}</td>
+                <td>${esc(sit)}</td>
+                <td class="c box">☐</td>
+                <td class="obs"></td>
+              </tr>`;
+            }).join('');
+        return `<table>
+          <thead>
+            <tr><th colspan="10" class="line">${esc(line.name)} <span class="small">— ${list.length} OP(s) · ${total.toLocaleString('pt-BR')} un</span></th></tr>
+            <tr><th class="c" style="width:28px">#</th><th style="width:70px">OP</th><th>Produto</th><th class="r" style="width:80px">Qtd</th><th style="width:95px">Lote</th><th style="width:90px">Granel</th><th style="width:60px">Prior.</th><th style="width:150px">Situação</th><th class="c" style="width:38px">Feito</th><th style="width:140px">Obs.</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+      }).join('');
+      return `<section${di > 0 ? ' class="break"' : ''}>
+        <div class="head"><div><div class="t">${esc(title)}</div><div class="d">${dayName(day)} · ${ddmm(day)}/${day.slice(0, 4)}</div></div><div class="meta">Impresso em ${printedAt}</div></div>
+        ${tables}
+      </section>`;
+    }).join('');
+
+    const w = window.open('', '_blank');
+    if (!w) {
+      setPrintError('O navegador bloqueou a janela de impressão — libere pop-ups para este site.');
+      return;
+    }
+    w.document.write(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>${esc(title)} — ${scope === 'dia' ? ddmm(selectedDate) : `semana ${weekRangeLabel}`}</title>
+      <style>
+        @page { size: A4 landscape; margin: 10mm; }
+        * { box-sizing: border-box; }
+        body { font-family: Arial, Helvetica, sans-serif; color: #111827; margin: 0; font-size: 11px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #111827; padding-bottom: 4px; margin-bottom: 8px; }
+        .t { font-size: 16px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px; }
+        .d { font-size: 13px; font-weight: 700; margin-top: 2px; }
+        .meta { font-size: 9px; color: #6b7280; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 10px; page-break-inside: auto; }
+        tr { page-break-inside: avoid; }
+        th, td { border: 1px solid #9ca3af; padding: 4px 5px; vertical-align: top; text-align: left; }
+        th { background: #e5e7eb; font-size: 10px; text-transform: uppercase; }
+        th.line { background: #1f2937; color: #fff; font-size: 12px; text-transform: none; }
+        th.line .small { color: #d1d5db; font-weight: 400; }
+        .c { text-align: center; } .r { text-align: right; white-space: nowrap; } .b { font-weight: 700; white-space: nowrap; }
+        .small { font-size: 9px; color: #4b5563; }
+        .box { font-size: 15px; }
+        .obs { min-width: 120px; }
+        .empty { text-align: center; color: #6b7280; font-style: italic; }
+        tr.crit td { background: #fee2e2; }
+        section.break { page-break-before: always; }
+      </style></head><body>${sections}</body></html>`);
+    w.document.close();
+    setTimeout(() => { w.focus(); w.print(); }, 300);
+  };
 
   const columnOps = (columnId: string): ProductionOrder[] =>
     columnId === BACKLOG_COLUMN_ID ? backlogOps : (opsByLine[columnId] || []);
@@ -610,6 +709,26 @@ export function CronogramaBoard({
             Hoje
           </button>
         )}
+
+        <div className="flex items-center gap-1.5 ml-3">
+          <button
+            type="button"
+            onClick={() => handlePrint('dia')}
+            className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase text-[#d4d4d8] hover:text-white bg-[#121216] hover:bg-[#1c1c22] border border-[#2a2a33] transition-colors shrink-0 flex items-center gap-1.5"
+            title="Imprimir o cronograma do dia selecionado (A4 deitado)"
+          >
+            <Printer className="w-3.5 h-3.5" /> Imprimir dia
+          </button>
+          <button
+            type="button"
+            onClick={() => handlePrint('semana')}
+            className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase text-[#d4d4d8] hover:text-white bg-[#121216] hover:bg-[#1c1c22] border border-[#2a2a33] transition-colors shrink-0 flex items-center gap-1.5"
+            title="Imprimir a semana inteira (uma página por dia)"
+          >
+            <Printer className="w-3.5 h-3.5" /> Imprimir semana
+          </button>
+          {printError && <span className="text-[10px] text-rose-300 normal-case">{printError}</span>}
+        </div>
       </div>
 
       {/* Abas de dia da semana em exibição — cada coluna de linha mostra só

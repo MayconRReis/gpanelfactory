@@ -1621,6 +1621,7 @@ WHERE email IN (
               {cronogramaMode === 'envase' ? (
                 <CronogramaBoard
                   lines={envaseLines}
+                  printTitle="Cronograma de Envase"
                   ops={ops}
                   onAssignToQueue={handleAssignToQueue}
                   onUnassign={(opId) => handleSaveAssignment(opId, { lineId: null })}
@@ -1633,6 +1634,7 @@ WHERE email IN (
               ) : (
                 <CronogramaBoard
                   lines={reactorLines}
+                  printTitle="Cronograma de Manipulação"
                   ops={ops}
                   onAssignToQueue={handleAssignToReactor}
                   onUnassign={handleUnassignFromReactor}
