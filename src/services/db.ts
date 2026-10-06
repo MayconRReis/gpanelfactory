@@ -4365,6 +4365,9 @@ export const finishOP = async (
   // cobre tudo, não há resto e a conclusão se comporta como Total.
   const remainderQty = isPartial ? Math.max(0, plannedQty - finalProducedQty) : 0;
   const effectivePartial = Boolean(isPartial) && remainderQty > 0;
+  // Concluindo na própria linha do Sleev: nunca "envia para o Sleev" de novo.
+  const finishingOnSleeve = isSleeveLineId(lineId) || /sle+v/i.test(String(currentLine?.name || ''));
+  if (finishingOnSleeve) sendToSleeve = false;
 
   if (sendToSleeve) {
     markOpAsSleeve(opId, true);
@@ -4387,7 +4390,9 @@ export const finishOP = async (
   } else if (effectivePartial && currentOp) {
     // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
     // como novo planejado, pronta para ser retomada num novo envase.
-    markOpAsSleeve(opId, false);
+    // Parcial NA LINHA DO SLEEV: o saldo volta ao estoque ainda aguardando o
+    // Sleev (a OP continua marcada como Sleev).
+    markOpAsSleeve(opId, finishingOnSleeve);
     inMemoryOps = inMemoryOps.map(op =>
       op.id === opId
         ? {
@@ -4400,6 +4405,7 @@ export const finishOP = async (
             rejectedQuantity: 0,
             finishedShift: undefined,
             completedAt: undefined,
+            isSleeve: finishingOnSleeve,
           }
         : op
     );
@@ -4427,6 +4433,8 @@ export const finishOP = async (
 
   const observation = sendToSleeve
     ? `Envase finalizado (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Retornou ao estoque para acabamento no Sleev${effectivePartial ? `, com ${remainderQty.toLocaleString('pt-BR')} un de saldo liberadas em uma nova OP` : ''}.`
+    : effectivePartial && finishingOnSleeve
+    ? `Sleev parcial (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Saldo de ${remainderQty.toLocaleString('pt-BR')} un voltou ao estoque aguardando finalização no Sleev.`
     : effectivePartial
     ? `Envase parcial (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Saldo de ${remainderQty.toLocaleString('pt-BR')} un voltou ao estoque para um novo envase.`
     : undefined;

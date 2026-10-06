@@ -69,6 +69,7 @@ import {
   sendOpToRework,
   finishReworkOP,
   getReworkInfoByOp,
+  isSleeveLineId,
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
@@ -655,7 +656,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       profile.uid,
       finishShift || undefined,
       parsedQty,
-      finishSendToSleeve,
+      onSleeveLine ? false : finishSendToSleeve,
       parsedLostQty,
       finishProductionType === 'parcial'
     );
@@ -936,6 +937,13 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     currentLine?.id === 'line-sleeve' ||
     (currentLine?.name && /sleeve/i.test(currentLine.name)) ||
     activeOp?.isSleeve
+  );
+
+  // A linha atual É o Sleev? (aqui a OP já está no acabamento: não existe
+  // "enviar para o Sleev"; uma conclusão parcial devolve o saldo ao estoque
+  // ainda aguardando o Sleev).
+  const onSleeveLine = Boolean(
+    currentLine && (isSleeveLineId(currentLine.id) || /sle+v/i.test(currentLine.name || ''))
   );
 
   // Variáveis contextuais do Chão de Fábrica (Envase)
@@ -2639,7 +2647,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </p>
             </div>
 
-            {/* Checkbox Sleev */}
+            {/* Checkbox Sleev — não aparece na própria linha do Sleev */}
+            {!onSleeveLine && (
             <div
               id="card-sleeve-option"
               onClick={() => { setFinishSendToSleeve(!finishSendToSleeve); if (!finishSendToSleeve) setFinishAwaitRework(false); }}
@@ -2679,6 +2688,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 </p>
               </div>
             </div>
+            )}
 
             {/* Aguardando material — envasada, retrabalho depois (ex.: divisória) */}
             <div
@@ -2734,6 +2744,8 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 ? finishSendToSleeve
                   ? 'Ao concluir, o envase nesta linha é finalizado com a quantidade apontada e a linha fica livre. A OP inteira volta ao estoque já pronta para acabamento no Sleev.'
                   : 'Esta é a quantidade final desta OP. Ao concluir, ela é encerrada definitivamente e a linha fica livre — não será mais possível envasar essa OP novamente.'
+                : onSleeveLine
+                ? 'A quantidade apontada é registrada como acabada no Sleev agora. O saldo que sobrar volta para o estoque ainda aguardando finalização no Sleev, pronto para ser retomado nesta linha.'
                 : finishSendToSleeve
                 ? 'Ao concluir, a quantidade apontada segue para o Sleev normalmente. Já o saldo que sobrar da estimativa volta ao estoque como uma nova OP pendente, pronta para um novo envase (sem passar pelo Sleev).'
                 : 'A quantidade apontada é descontada da estimativa e registrada como produzida agora. O saldo que sobrar volta para o estoque como pendência, pronto para ser retomado em um novo envase desta OP.'}
