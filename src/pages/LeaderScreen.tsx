@@ -382,6 +382,25 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     return envaseOps.filter(op => String(op.lineId) === String(currentLine.id));
   }, [envaseOps, currentLine]);
 
+  // Ordem da fila da linha — a mesma do Cronograma: primeiro as ATRASADAS
+  // (último dia programado já passou), depois as programadas para HOJE, depois
+  // as sem data e, por último, as de dias FUTUROS. Dentro de cada grupo vale a
+  // data programada e a sequência. Antes era só a sequência, e uma OP de
+  // amanhã podia aparecer para o líder antes da OP atrasada/de hoje.
+  const queueRank = (o: ProductionOrder): number => {
+    const today = toLocalDateStr(new Date().toISOString());
+    const start = o.scheduledDate || '';
+    if (!start) return 2;
+    const end = (o.scheduledEndDate && o.scheduledEndDate >= start ? o.scheduledEndDate : start);
+    if (end < today) return 0;
+    if (start <= today) return 1;
+    return 3;
+  };
+  const compareQueue = (a: ProductionOrder, b: ProductionOrder) =>
+    queueRank(a) - queueRank(b) ||
+    (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
+    (a.sequence || 0) - (b.sequence || 0);
+
   // OP ativa da linha (em progresso, pausada ou primeira pendente)
   const activeOp = useMemo(() => {
     if (!lineOps.length) return null;
@@ -389,7 +408,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     if (inProgress) return inProgress;
     const paused = lineOps.find(o => o.status === 'paused');
     if (paused) return paused;
-    const pending = lineOps.filter(o => o.status === 'pending').sort((a, b) => a.sequence - b.sequence);
+    const pending = lineOps.filter(o => o.status === 'pending').sort(compareQueue);
     return pending[0] || null;
   }, [lineOps]);
 
@@ -403,7 +422,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     if (!lineOps.length) return [];
     return lineOps
       .filter(o => o.status === 'pending' && o.id !== activeOp?.id)
-      .sort((a, b) => a.sequence - b.sequence);
+      .sort(compareQueue);
   }, [lineOps, activeOp]);
 
   // Eventos da linha atual
