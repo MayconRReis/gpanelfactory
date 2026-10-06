@@ -48,6 +48,7 @@ import {
   startWorkSession,
   endWorkSession,
   getOpenWorkSession,
+  autoCloseStaleWorkSessions,
   getRecentEvents,
   cancelOP,
   logPesagemHistory,
@@ -66,7 +67,7 @@ import {
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
-import { getAutoShiftNow } from '../lib/productionTime';
+import { getAutoShiftNow, REACTOR_MEAL_BREAKS, REACTOR_WORK_SCHEDULE } from '../lib/productionTime';
 
 interface ManipulacaoScreenProps {
   embedded?: boolean;
@@ -193,6 +194,15 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
       setOps(allOps);
       setWorkSessions(allSessions);
+      // Fim da jornada sem manipulação rodando: encerra o expediente sozinho
+      // (OP em amostragem/CQ/ajuste/drenagem ainda ocupa o reator — conta como em produção)
+      autoCloseStaleWorkSessions(
+        allSessions.filter(ws => ws.lineId.startsWith('reator-')),
+        allOps.map(o => (o.setor === 'Manipulação' && o.status === 'paused' && ['aguardando_amostragem', 'aguardando_cq', 'em_ajuste', 'aguardando_drenagem'].includes(getManipPhase(o, allEvents).phase)) ? { ...o, status: 'in_progress' as const } : o),
+        allEvents
+      ).then(n => {
+        if (n > 0) getWorkSessions(3).then(ws => { if (requestId === fetchRequestIdRef.current) setWorkSessions(ws); });
+      }).catch(() => {});
       setEvents(allEvents);
       setConferencias(confRes.list);
       setConferenciasError(confRes.error);
@@ -516,7 +526,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     ? openReactorShifts.reduce((a, b) => (new Date(a.startedAt).getTime() < new Date(b.startedAt).getTime() ? a : b)).startedAt
     : null;
 
-  // Expediente automático: reator com OP no dia começa às 7h sozinho e
+  // Expediente automático: reator com OP no dia começa às 5h sozinho e
   // termina no fim da jornada se ninguém encerrar.
   const currentMinuteKey = Math.floor(currentTime.getTime() / 60000);
   const autoReactorShifts = useMemo(
@@ -551,7 +561,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       await pauseOP(op.id, op.lineId as string, profile.uid, 'Fim de Expediente', 'Pausa automática ao encerrar o expediente');
     }
     // Reatores com expediente registrado: encerra. Reatores no expediente
-    // automático (sem registro): grava o trecho 7h → agora já encerrado.
+    // automático (sem registro): grava o trecho 5h → agora já encerrado.
     const autoIds = autoReactorShifts.map(a => a.lineId);
     const explicitIds = reactorLines.map(r => r.id).filter(id => !autoIds.includes(id));
     let res = explicitIds.length > 0 ? await endWorkSession(explicitIds, profile.uid) : { error: null as string | null };
@@ -1245,6 +1255,15 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   <h2 className="text-lg font-bold text-white tracking-tight">Reatores</h2>
                 </div>
                 <div className="flex items-center gap-3">
+                  {(() => {
+                    const h = currentTime.getHours();
+                    const meal = REACTOR_MEAL_BREAKS.find(b => h >= b.start && h < b.end);
+                    return meal && REACTOR_WORK_SCHEDULE[currentTime.getDay()] ? (
+                      <span className="px-3 py-2 rounded-xl bg-emerald-950/40 border border-emerald-800/40 text-xs font-bold text-emerald-300" title="Pausa automática — não conta como ociosidade">
+                        {meal.label} · {meal.start}h–{meal.end}h
+                      </span>
+                    ) : null;
+                  })()}
                   {shiftOpenSince ? (
                     <button
                       onClick={() => setIsEndShiftOpen(true)}
@@ -1261,7 +1280,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                     <button
                       onClick={handleStartShift}
                       disabled={isShiftBusy}
-                      title="O expediente começa sozinho às 7h nos reatores com OP no dia. Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
+                      title="O expediente dos reatores começa sozinho às 5h e vai até as 23h (almoço 12h–13h e janta 20h–21h não contam como ociosidade). Use este botão para começar antes (hora extra) ou para reabrir depois de encerrar."
                       className="px-3 py-2 rounded-xl bg-emerald-950/50 hover:bg-emerald-900/50 border border-emerald-800/50 text-xs font-bold text-emerald-200 flex items-center gap-2 transition-all disabled:opacity-60"
                     >
                       <Sunrise className="w-4 h-4 text-emerald-400" />

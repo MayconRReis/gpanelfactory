@@ -259,7 +259,14 @@ export function CronogramaBoard({
     const granelLabel: Record<string, string> = { manipulado: 'Manipulado', manipulando: 'Manipulando', separado: 'Separado', nao_separado: 'Não separado' };
     const isReactorBoard = lines.length > 0 && lines.every(l => /reator/i.test(l.id) || /reator/i.test(l.name));
     const title = printTitle || (isReactorBoard ? 'Cronograma de Manipulação' : 'Cronograma de Envase');
-    const days = scope === 'dia' ? [selectedDate] : weekDays.map(d => d.dateStr);
+    // Semana: só os dias que têm alguma OP no cronograma
+    const days = scope === 'dia'
+      ? [selectedDate]
+      : weekDays.map(d => d.dateStr).filter(day => lines.some(line => opsForLineOnDay(line, day).length > 0));
+    if (days.length === 0) {
+      setPrintError('Nenhuma OP programada nesta semana para imprimir.');
+      return;
+    }
     const now = new Date();
     const printedAt = `${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
 

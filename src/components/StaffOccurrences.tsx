@@ -14,14 +14,23 @@ import {
 
 /**
  * OCORRÊNCIAS DE PESSOAL — faltas, atrasos, atestados, saídas antecipadas,
- * acidentes/incidentes, hora extra e free do balde, com nome e motivo.
+ * acidentes/incidentes, hora extra e retorno (de quem saiu antes e voltou), com nome, horário e motivo.
  * - <StaffOccurrencesButton/>: botão + janela que o líder usa na tela da linha/setor.
  * - <StaffOccurrencesSummary/>: resumo + lista (Histórico & Gráficos).
  */
 
+// Tipos do formulário/filtros. "Free do balde" foi descontinuado (os
+// lançamentos antigos continuam aparecendo na lista).
 export const STAFF_TYPES: StaffOccurrenceType[] = [
-  'falta', 'atraso', 'atestado', 'saida_antecipada', 'acidente', 'incidente', 'hora_extra', 'free_balde',
+  'falta', 'atraso', 'atestado', 'saida_antecipada', 'retorno', 'acidente', 'incidente', 'hora_extra',
 ];
+
+/** Tipos que pedem o horário em que aconteceu */
+const TIMED_TYPES: StaffOccurrenceType[] = ['saida_antecipada', 'retorno'];
+const nowHHMM = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
 
 const TYPE_STYLE: Record<StaffOccurrenceType, string> = {
   falta: 'bg-rose-950/60 text-rose-300 border-rose-800/50',
@@ -31,6 +40,7 @@ const TYPE_STYLE: Record<StaffOccurrenceType, string> = {
   acidente: 'bg-red-900/60 text-red-200 border-red-600/60',
   incidente: 'bg-yellow-950/60 text-yellow-300 border-yellow-800/50',
   hora_extra: 'bg-violet-950/60 text-violet-300 border-violet-800/50',
+  retorno: 'bg-teal-950/60 text-teal-300 border-teal-800/50',
   free_balde: 'bg-emerald-950/60 text-emerald-300 border-emerald-800/50',
 };
 
@@ -38,10 +48,11 @@ const REASON_PLACEHOLDER: Record<StaffOccurrenceType, string> = {
   falta: 'Ex.: não avisou / problema familiar',
   atraso: 'Ex.: chegou 07:40 — ônibus',
   atestado: 'Ex.: atestado de 2 dias',
-  saida_antecipada: 'Ex.: saiu às 15:00 — consulta',
+  saida_antecipada: 'Ex.: consulta médica',
   acidente: 'O que aconteceu, onde e se houve afastamento',
   incidente: 'O que aconteceu (quase acidente, derramamento etc.)',
   hora_extra: 'Ex.: das 17:00 às 19:00',
+  retorno: 'Ex.: voltou da consulta',
   free_balde: 'Ex.: lavagem de baldes — 4h',
 };
 
@@ -457,28 +468,57 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
   const [employeeName, setEmployeeName] = useState('');
   const [quantity, setQuantity] = useState('1');
   const [reason, setReason] = useState('');
+  const [occTime, setOccTime] = useState(nowHHMM());
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formOk, setFormOk] = useState<string | null>(null);
+  const isTimed = TIMED_TYPES.includes(type);
+
+  // Ao trocar para saída/retorno, sugere o horário de agora
+  useEffect(() => { if (TIMED_TYPES.includes(type)) setOccTime(nowHHMM()); }, [type]);
+
+  // Quem saiu antes nesse dia (e área) e ainda não teve retorno lançado —
+  // atalho para o líder registrar o retorno com um clique no nome.
+  const [dayList, setDayList] = useState<StaffOccurrence[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getStaffOccurrences(fDate, fDate).then(res => { if (!cancelled) setDayList(res.list); });
+    return () => { cancelled = true; };
+  }, [fDate, reloadKey]);
+  const pendingReturns = useMemo(() => {
+    const key = (o: StaffOccurrence) => `${o.lineId}|${o.employeeName.trim().toLowerCase()}`;
+    const exits = dayList.filter(o => o.type === 'saida_antecipada' && o.employeeName.trim() && (!fTarget || o.lineId === fTarget));
+    const returnsCount = new Map<string, number>();
+    dayList.filter(o => o.type === 'retorno').forEach(o => returnsCount.set(key(o), (returnsCount.get(key(o)) || 0) + 1));
+    const out: StaffOccurrence[] = [];
+    const used = new Map<string, number>();
+    exits.sort((a, b) => (a.occurredTime || a.createdAt).localeCompare(b.occurredTime || b.createdAt)).forEach(o => {
+      const k = key(o);
+      const u = used.get(k) || 0;
+      if (u < (returnsCount.get(k) || 0)) { used.set(k, u + 1); return; }
+      out.push(o);
+    });
+    return out;
+  }, [dayList, fTarget]);
 
   useEffect(() => {
     if (!myTargets.some(t => t.id === fTarget)) setFTarget(myTargets.length === 1 ? myTargets[0].id : '');
   }, [myTargets, fTarget]);
 
   const needsName = type !== 'free_balde';
-  const canSubmit = !!fTarget && (!needsName || !!employeeName.trim()) && !!fDate && fDate <= today;
+  const canSubmit = !!fTarget && (!needsName || !!employeeName.trim()) && !!fDate && fDate <= today && (!isTimed || /^\d{2}:\d{2}$/.test(occTime));
 
   const handleAdd = async () => {
     setFormError(null); setFormOk(null);
     if (!myTargets.some(t => t.id === fTarget)) { setFormError('Você só pode lançar ocorrências na sua área.'); return; }
     setSaving(true);
     const res = await addStaffOccurrence(
-      { date: fDate, lineId: fTarget, type, employeeName, quantity: type === 'free_balde' ? Math.max(1, parseInt(quantity, 10) || 1) : 1, reason },
+      { date: fDate, lineId: fTarget, type, employeeName, quantity: 1, reason, occurredTime: isTimed ? occTime : null },
       profile?.uid || null
     );
     setSaving(false);
     if (!res.ok) { setFormError(res.error || 'Não foi possível registrar.'); return; }
-    setFormOk(`${STAFF_OCCURRENCE_LABELS[type]} registrada${employeeName.trim() ? ` — ${employeeName.trim()}` : ''} (${targetName(fTarget)}, ${fmtDate(fDate)}).`);
+    setFormOk(`Registrado: ${STAFF_OCCURRENCE_LABELS[type]}${employeeName.trim() ? ` — ${employeeName.trim()}` : ''} (${targetName(fTarget)}, ${fmtDate(fDate)}${isTimed ? ` às ${occTime}` : ''}).`);
     setEmployeeName(''); setReason(''); setQuantity('1');
     // se lançou fora do período em tela, mostra o dia lançado
     if (fDate < rangeStart || fDate > rangeEnd) {
@@ -514,7 +554,7 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
     const map = new Map<string, { name: string; total: number; byType: Partial<Record<StaffOccurrenceType, number>>; lines: Set<string> }>();
     for (const o of filtered) {
       const name = o.employeeName.trim();
-      if (!name || o.type === 'free_balde' || o.type === 'hora_extra') continue;
+      if (!name || o.type === 'free_balde' || o.type === 'hora_extra' || o.type === 'retorno') continue;
       const key = name.toLowerCase();
       const row = map.get(key) || { name, total: 0, byType: {}, lines: new Set<string>() };
       row.total += 1;
@@ -530,10 +570,11 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
   const exportCsv = () => {
     const esc = (v: string) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = [
-      ['Data', 'Hora do lançamento', 'Linha / setor', 'Tipo', 'Colaborador', 'Quantidade', 'Motivo / detalhe'].map(esc).join(';'),
+      ['Data', 'Hora do lançamento', 'Horário (saída/retorno)', 'Linha / setor', 'Tipo', 'Colaborador', 'Quantidade', 'Motivo / detalhe'].map(esc).join(';'),
       ...filtered.map(o => [
         fmtDate(o.date),
         new Date(o.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+        o.occurredTime || '',
         targetName(o.lineId),
         STAFF_OCCURRENCE_LABELS[o.type],
         o.employeeName,
@@ -563,7 +604,7 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
             <ClipboardList className="w-4 h-4 text-blue-400" /> Ocorrências de Pessoal
           </h2>
           <p className="text-xs text-[#71717a] mt-0.5">
-            Faltas, atrasos, atestados, saídas antecipadas, acidentes/incidentes, hora extra e free do balde.
+            Faltas, atrasos, atestados, saídas antecipadas e retornos, acidentes/incidentes e hora extra.
             {!areas.all && myTargets.length > 0 && <> Você lança em: <span className="text-[#d4d4d8] font-semibold">{areas.envase && areas.pesagem === false && areas.manipulacao === false ? 'linhas de envase' : myTargets.map(t => t.name).join(', ')}</span>.</>}
           </p>
         </div>
@@ -617,15 +658,34 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
                 </div>
               </div>
 
-              <div className={`grid gap-2 ${type === 'free_balde' ? 'grid-cols-[1fr_90px]' : 'grid-cols-1'}`}>
+              {type === 'retorno' && (
+                <div className="bg-[#0f1a19] border border-teal-900/50 rounded-lg p-2.5 space-y-1.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-teal-300">Saíram antes e ainda não voltaram ({fmtDate(fDate)})</p>
+                  {pendingReturns.length === 0 ? (
+                    <p className="text-[11px] text-[#71717a]">Nenhuma saída antecipada pendente{fTarget ? ' nesta área' : ''}. Você pode digitar o nome abaixo.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {pendingReturns.map(o => (
+                        <button key={o.id} type="button" onClick={() => setEmployeeName(o.employeeName)}
+                          className={`h-7 px-2 rounded-md text-[11px] font-semibold border transition-all ${employeeName.trim().toLowerCase() === o.employeeName.trim().toLowerCase() ? 'bg-teal-600 border-teal-500 text-white' : 'bg-[#16161e] border-[#26262f] text-[#d4d4d8] hover:text-white'}`}
+                          title={o.reason || undefined}>
+                          {o.employeeName}{o.occurredTime ? <span className="opacity-70 font-mono"> · saiu {o.occurredTime}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className={`grid gap-2 ${isTimed ? 'grid-cols-[1fr_100px]' : 'grid-cols-1'}`}>
                 <div>
                   <input list="staff-names-page" value={employeeName} onChange={e => setEmployeeName(e.target.value)}
                     placeholder={needsName ? 'Nome do colaborador *' : 'Nome (opcional)'} className={input} />
                   <datalist id="staff-names-page">{names.map(n => <option key={n} value={n} />)}</datalist>
                 </div>
-                {type === 'free_balde' && (
-                  <input type="number" min={1} value={quantity} onChange={e => setQuantity(e.target.value)}
-                    placeholder="Qtd." title="Quantidade de free (diaristas) do balde" className={input} />
+                {isTimed && (
+                  <input type="time" value={occTime} onChange={e => setOccTime(e.target.value)}
+                    title={type === 'retorno' ? 'Horário em que voltou' : 'Horário em que saiu'}
+                    className={input + ' [color-scheme:dark] font-mono'} />
                 )}
               </div>
               <input value={reason} onChange={e => setReason(e.target.value)} placeholder={`Motivo / detalhe — ${REASON_PLACEHOLDER[type]}`} className={input} />
@@ -714,7 +774,9 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
                         <tr key={o.id} className="text-[#d4d4d8] align-top">
                           <td className="py-2 pr-3 font-mono whitespace-nowrap">
                             {fmtDate(o.date)}
-                            <span className="block text-[9px] text-[#52525b]">{new Date(o.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                            {o.occurredTime
+                              ? <span className="block text-[10px] text-teal-300 font-bold">às {o.occurredTime}</span>
+                              : <span className="block text-[9px] text-[#52525b]">{new Date(o.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>}
                           </td>
                           <td className="py-2 pr-3 whitespace-nowrap">{targetName(o.lineId)}</td>
                           <td className="py-2 pr-3"><StaffTypeBadge type={o.type} /></td>

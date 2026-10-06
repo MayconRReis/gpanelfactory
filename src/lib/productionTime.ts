@@ -92,10 +92,61 @@ function localDayStr(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * MANIPULAÇÃO (reatores): único setor com 2 turnos — expediente das 5h às
+ * 23h (seg–sex). Almoço 12h–13h e janta 20h–21h são pausas automáticas: não
+ * contam como ociosidade nem entram na base do expediente. Depois das 23h,
+ * reator ainda em produção conta como hora extra; sem nada em produção, o
+ * expediente encerra sozinho às 23h.
+ */
+export const REACTOR_WORK_SCHEDULE: Record<number, { start: number; end: number } | null> = {
+  0: null,
+  1: { start: 5, end: 23 },
+  2: { start: 5, end: 23 },
+  3: { start: 5, end: 23 },
+  4: { start: 5, end: 23 },
+  5: { start: 5, end: 23 },
+  6: null,
+};
+/** Pausas automáticas dos reatores (hora local, [início, fim)) */
+export const REACTOR_MEAL_BREAKS: Array<{ start: number; end: number; label: string }> = [
+  { start: 12, end: 13, label: 'Almoço' },
+  { start: 20, end: 21, label: 'Janta' },
+];
+
+export function isReactorLineId(lineId?: string | null): boolean {
+  return !!lineId && /reator/i.test(String(lineId));
+}
+
+/** Jornada do dia da semana para a linha (reatores têm jornada própria). */
+export function getWorkScheduleFor(weekDay: number, lineId?: string | null): { start: number; end: number } | null {
+  return (isReactorLineId(lineId) ? REACTOR_WORK_SCHEDULE : WORK_SCHEDULE)[weekDay] || null;
+}
+
+/** Trechos de almoço/janta dos reatores entre dois instantes. */
+export function getReactorMealBreakRanges(fromMs: number, toMs: number): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  if (!(toMs > fromMs)) return out;
+  const cursor = new Date(fromMs);
+  cursor.setHours(0, 0, 0, 0);
+  while (cursor.getTime() <= toMs) {
+    if (REACTOR_WORK_SCHEDULE[cursor.getDay()]) {
+      const y = cursor.getFullYear(), m = cursor.getMonth(), d = cursor.getDate();
+      for (const b of REACTOR_MEAL_BREAKS) {
+        const a = Math.max(fromMs, new Date(y, m, d, b.start, 0, 0, 0).getTime());
+        const z = Math.min(toMs, new Date(y, m, d, b.end, 0, 0, 0).getTime());
+        if (z > a) out.push([a, z]);
+      }
+    }
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return out;
+}
+
 /** Janela da jornada padrão de um dia (hora local), ou null em fim de semana. */
-export function getScheduledWindow(dayMs: number): [number, number] | null {
+export function getScheduledWindow(dayMs: number, lineId?: string | null): [number, number] | null {
   const d = new Date(dayMs);
-  const win = WORK_SCHEDULE[d.getDay()];
+  const win = getWorkScheduleFor(d.getDay(), lineId);
   if (!win) return null;
   const y = d.getFullYear(), m = d.getMonth(), dd = d.getDate();
   return [new Date(y, m, dd, win.start, 0, 0, 0).getTime(), new Date(y, m, dd, win.end, 0, 0, 0).getTime()];
@@ -132,7 +183,7 @@ export function getAutoShiftRange(
 ): [number, number] | null {
   const dayStr = localDayStr(dayMs);
   if (dayStr < AUTO_SHIFT_START_DATE) return null;
-  const win = getScheduledWindow(dayMs);
+  const win = getScheduledWindow(dayMs, lineId);
   if (!win) return null;
   const todayStr = localDayStr(refTime);
   if (dayStr > todayStr) return null;
@@ -162,7 +213,7 @@ export function getAutoShiftNow(
   sessions: WorkSession[],
   now: number = Date.now()
 ): { active: boolean; startMs: number | null; endMs: number | null } {
-  const win = getScheduledWindow(now);
+  const win = getScheduledWindow(now, lineId);
   const none = { active: false, startMs: null as number | null, endMs: null as number | null };
   if (!win || now < win[0] || now >= win[1]) return none;
   const range = getAutoShiftRange(lineId, now, ops, sessions, now, true);
@@ -195,7 +246,7 @@ export function splitWorkingAcrossDays(
   const lineSessions = lineId ? sessions.filter(ss => ss.lineId === lineId) : [];
   const dayWindow = (dayMs: number): [number, number] | null => {
     const dayStr = localDayStr(dayMs);
-    const sched = getScheduledWindow(dayMs);
+    const sched = getScheduledWindow(dayMs, lineId);
     let a = sched ? sched[0] : Infinity;
     let b = sched ? sched[1] : -Infinity;
     for (const ss of lineSessions) {
@@ -884,12 +935,12 @@ export function calculateProductionTime(
       }
       return b > a ? [a, b] : null;
     };
-    const scheduledRangesFor = (fromMs: number, toMs: number): Array<[number, number]> => {
+    const scheduledRangesFor = (fromMs: number, toMs: number, lineId?: string): Array<[number, number]> => {
       const out: Array<[number, number]> = [];
       const cursor = new Date(fromMs);
       cursor.setHours(0, 0, 0, 0);
       while (cursor.getTime() <= toMs) {
-        const win = WORK_SCHEDULE[cursor.getDay()];
+        const win = getWorkScheduleFor(cursor.getDay(), lineId);
         if (win) {
           const y = cursor.getFullYear(), m = cursor.getMonth(), d = cursor.getDate();
           out.push([new Date(y, m, d, win.start, 0, 0, 0).getTime(), new Date(y, m, d, win.end, 0, 0, 0).getTime()]);
@@ -959,7 +1010,7 @@ export function calculateProductionTime(
         if (isNaN(endMs)) {
           const sameDayWork = workingUnion.filter(r => dayKey(r[0]) === dayKey(startMs) && r[1] > startMs);
           const lastWorkEnd = sameDayWork.length > 0 ? Math.max(...sameDayWork.map(r => r[1])) : startMs;
-          const sched = getScheduledWindow(startMs);
+          const sched = getScheduledWindow(startMs, lId);
           if (sched && startMs < sched[1] && localDayStr(startMs) >= AUTO_SHIFT_START_DATE) {
             // Não encerrado: vale até o fim da jornada (ou até a última OP,
             // se a produção passou do horário — isso é hora extra).
@@ -999,13 +1050,18 @@ export function calculateProductionTime(
       const coverage = mergeRanges([...explicitUnion, ...autoRanges, ...Array.from(implicitByDay.values()), ...workingUnion]);
 
       // Intervalo tolerado (até 1h) não é ocioso nem conta na base do expediente
-      const breaksUnion = subtractRanges(mergeRanges(breakRangesByLine.get(lId) || []), workingUnion);
+      // Reatores: almoço (12h–13h) e janta (20h–21h) são pausas automáticas —
+      // o que não foi trabalhado nesses horários não é ocioso.
+      const mealBreaks = isReactorLineId(lId) && coverage.length > 0
+        ? getReactorMealBreakRanges(coverage[0][0], coverage[coverage.length - 1][1])
+        : [];
+      const breaksUnion = subtractRanges(mergeRanges([...(breakRangesByLine.get(lId) || []), ...mealBreaks]), workingUnion);
       const effectiveCoverage = subtractRanges(coverage, breaksUnion);
       const idleUnion = subtractRanges(effectiveCoverage, workingUnion);
       const coverageMs = rangesLength(effectiveCoverage);
       let overtimeMs = 0;
       if (coverage.length > 0) {
-        const scheduled = mergeRanges(scheduledRangesFor(coverage[0][0], coverage[coverage.length - 1][1]));
+        const scheduled = mergeRanges(scheduledRangesFor(coverage[0][0], coverage[coverage.length - 1][1], lId));
         overtimeMs = rangesLength(subtractRanges(effectiveCoverage, scheduled));
       }
 

@@ -352,7 +352,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     window.addEventListener('focus', onFocus);
     return () => { cancelled = true; window.clearInterval(timer); window.removeEventListener('focus', onFocus); };
   }, [monthStart, selectedDate]);
-  const OCC_ORDER = ['falta', 'atestado', 'atraso', 'saida_antecipada', 'acidente', 'incidente', 'hora_extra', 'free_balde'];
+  const OCC_ORDER = ['falta', 'atestado', 'atraso', 'saida_antecipada', 'retorno', 'acidente', 'incidente', 'hora_extra', 'free_balde'];
   const dayOccurrences = useMemo(() => monthOccurrences
     .filter(o => o.date === selectedDate)
     .sort((a, b) => OCC_ORDER.indexOf(a.type) - OCC_ORDER.indexOf(b.type) || a.lineId.localeCompare(b.lineId) || a.createdAt.localeCompare(b.createdAt)),
@@ -659,12 +659,13 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
             ) : (
               <>
                 <table className="w-full border-collapse">
-                  <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
+                  <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={th}>Hora</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
                   <tbody>
                     {dayOccurrences.map(o => (
                       <tr key={o.id}>
                         <td className={td}>{occLineName(o.lineId)}</td>
                         <td className={td}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
+                        <td className={td}>{o.occurredTime || '—'}</td>
                         <td className={td}>{o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}</td>
                         <td className={td}>{o.reason || '—'}</td>
                       </tr>

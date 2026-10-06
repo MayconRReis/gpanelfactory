@@ -70,6 +70,7 @@ import {
   resumeOP, 
   finishOP, 
   getRecentEvents, 
+  getPartialOpsInStock,
   getPauseReasons,
   getReworkInfoByOp,
   resetProductionDatabase,
@@ -168,7 +169,7 @@ export function CoordinatorDashboard() {
   // UI state
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('unassigned');
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState<'all' | 'pending' | 'coordinator' | 'leader'>('all');
   
@@ -1279,6 +1280,26 @@ WHERE email IN (
     return op.status === 'completed';
   };
 
+  // OPs com conclusão parcial que voltaram ao estoque aguardando o restante
+  const partialStockIds = new Set(getPartialOpsInStock(ops, events).map(o => o.id));
+
+  // Regra de cada filtro do Estoque de OPs (usada na lista e nos contadores)
+  const matchesStockFilter = (op: ProductionOrder, filter: string) => {
+    if (filter === 'completed') return isOpFinalizada(op);
+    // Fora da aba "Concluídas", uma OP finalizada nunca aparece — ela some
+    // do estoque disponível assim que é concluída.
+    if (isOpFinalizada(op)) return false;
+    if (filter === 'unassigned') return !op.lineId;
+    // Em produção = já na linha rodando (inclui pausada no meio da produção)
+    if (filter === 'in_progress') return op.status === 'in_progress' || op.status === 'paused';
+    if (filter === 'partial') return partialStockIds.has(op.id);
+    if (filter === 'today') return op.scheduledDate === todayStr;
+    if (filter === 'week') return Boolean(op.scheduledDate && op.scheduledDate >= currentWeekRange.startStr && op.scheduledDate <= currentWeekRange.endStr);
+    if (filter === 'stock') return op.status === 'pending';
+    if (filter !== 'all') return op.status === filter;
+    return true;
+  };
+
   // Filtered OPs
   const filteredOps = ops.filter(op => {
     const term = searchTerm.toLowerCase();
@@ -1287,24 +1308,7 @@ WHERE email IN (
                         (op.lote ? op.lote.toLowerCase().includes(term) : false) ||
                         (op.granel ? op.granel.toLowerCase().includes(term) : false);
 
-    let matchStatus = true;
-    if (statusFilter === 'completed') {
-      matchStatus = isOpFinalizada(op);
-    } else if (isOpFinalizada(op)) {
-      // Fora da aba "Concluídas", uma OP finalizada nunca deve aparecer —
-      // ela some do estoque disponível assim que é concluída.
-      matchStatus = false;
-    } else if (statusFilter === 'today') {
-      matchStatus = op.scheduledDate === todayStr;
-    } else if (statusFilter === 'week') {
-      matchStatus = Boolean(op.scheduledDate && op.scheduledDate >= currentWeekRange.startStr && op.scheduledDate <= currentWeekRange.endStr);
-    } else if (statusFilter === 'unassigned') {
-      matchStatus = !op.lineId;
-    } else if (statusFilter === 'stock') {
-      matchStatus = op.status === 'pending';
-    } else if (statusFilter !== 'all') {
-      matchStatus = op.status === statusFilter;
-    }
+    const matchStatus = matchesStockFilter(op, statusFilter);
 
     return matchSearch && matchStatus;
   });
@@ -1783,25 +1787,33 @@ WHERE email IN (
 
                 <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
                   {[
-                    { id: 'today', label: 'Hoje' },
-                    { id: 'week', label: 'Esta Semana' },
-                    { id: 'in_progress', label: 'Em Produção' },
                     { id: 'unassigned', label: 'Sem Linha' },
+                    { id: 'in_progress', label: 'Em Produção' },
                     { id: 'completed', label: 'Concluídas' },
+                    { id: 'partial', label: 'Parciais no Estoque' },
                     { id: 'all', label: 'Todas as OPs' }
-                  ].map(tab => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setStatusFilter(tab.id)}
-                      className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${
-                        statusFilter === tab.id
-                          ? 'bg-blue-600 text-white shadow-sm'
-                          : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
+                  ].map(tab => {
+                    const count = ops.filter(op => matchesStockFilter(op, tab.id)).length;
+                    const active = statusFilter === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        onClick={() => setStatusFilter(tab.id)}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap flex items-center gap-1.5 ${
+                          active
+                            ? (tab.id === 'partial' ? 'bg-amber-500 text-amber-950 shadow-sm' : 'bg-blue-600 text-white shadow-sm')
+                            : 'text-[#71717a] hover:text-[#f4f4f5] hover:bg-[#1c1c22]'
+                        }`}
+                      >
+                        {tab.label}
+                        <span className={`text-[10px] font-mono px-1.5 rounded-full ${
+                          active ? 'bg-black/20' : (tab.id === 'partial' && count > 0 ? 'bg-amber-950/70 text-amber-300' : 'bg-[#1c1c22] text-[#a1a1aa]')
+                        }`}>
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1875,6 +1887,11 @@ WHERE email IN (
                             <span className="font-bold text-[#f4f4f5] text-xs truncate" title={op.product}>
                               {op.product}
                             </span>
+                            {partialStockIds.has(op.id) && (
+                              <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-amber-950/80 text-amber-300 border-amber-600/60 shadow-sm shrink-0" title="Teve conclusão parcial — o saldo voltou ao estoque">
+                                Parcial
+                              </span>
+                            )}
                             {op.isSleeve && (
                               <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-purple-950/80 text-purple-300 border-purple-600/60 shadow-sm shrink-0">
                                 Sleev

@@ -8,7 +8,7 @@ import {
   isSupabaseRuntimeEnabled,
 } from '../lib/supabase';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction, DailyReportManual, StaffOccurrence, StaffOccurrenceType } from '../types';
-import { calculateProductionTime } from '../lib/productionTime';
+import { calculateProductionTime, getScheduledWindow } from '../lib/productionTime';
 
 /**
  * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
@@ -3504,6 +3504,66 @@ export const endWorkSession = async (
   }
 };
 
+/**
+ * Encerra sozinho o expediente que ficou aberto depois do fim da jornada
+ * (17h / 16h na sexta) quando NÃO há OP em produção na linha — ninguém
+ * precisa lembrar de clicar em "Encerrar Expediente" quando todo mundo vai
+ * embora. O expediente só continua aberto se uma OP ainda está rodando.
+ * Fecha no fim da jornada, ou no último registro da linha se a produção
+ * passou do horário (hora extra). Retorna quantos foram encerrados.
+ */
+export const autoCloseStaleWorkSessions = async (
+  sessions: WorkSession[],
+  ops: ProductionOrder[],
+  events: ProductionEvent[],
+  nowMs: number = Date.now()
+): Promise<number> => {
+  const dayOf = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+  const todayKey = dayOf(nowMs);
+  let closed = 0;
+  for (const ws of sessions) {
+    if (ws.endedAt) continue;
+    const startMs = new Date(ws.startedAt).getTime();
+    if (isNaN(startMs)) continue;
+    // OP em produção na linha: o expediente continua aberto
+    if (ops.some(o => o.lineId === ws.lineId && o.status === 'in_progress')) continue;
+    const sched = getScheduledWindow(startMs, ws.lineId);
+    const startedInsideJornada = !!sched && startMs < sched[1];
+    const pastDay = dayOf(startMs) !== todayKey;
+    // Hoje: só depois do fim da jornada. Expediente aberto depois do horário
+    // (hora extra) hoje fica aberto até o líder encerrar.
+    if (!pastDay && !(startedInsideJornada && nowMs >= (sched as [number, number])[1])) continue;
+    // Último registro da linha no mesmo dia, depois do início do expediente
+    const lastActivity = (events || [])
+      .filter(e => e.lineId === ws.lineId && dayOf(new Date(e.createdAt).getTime()) === dayOf(startMs))
+      .map(e => new Date(e.createdAt).getTime())
+      .filter(t => !isNaN(t) && t > startMs)
+      .reduce((m, t) => Math.max(m, t), startMs);
+    let endMs = startedInsideJornada ? Math.max((sched as [number, number])[1], lastActivity) : lastActivity;
+    endMs = Math.min(endMs, nowMs);
+    if (!(endMs > startMs)) endMs = startMs + 60 * 1000;
+    const endIso = new Date(endMs).toISOString();
+    if (trainingModeActive) {
+      trainingWorkSessions = trainingWorkSessions.map(s => (s.id === ws.id && !s.endedAt ? { ...s, endedAt: endIso, endedBy: null } : s));
+      closed++;
+      continue;
+    }
+    try {
+      const { data, error } = await supabase
+        .from('work_sessions')
+        .update({ ended_at: endIso, ended_by: null })
+        .eq('id', ws.id)
+        .is('ended_at', null)
+        .select('id');
+      if (error) { console.warn('[autoCloseStaleWorkSessions]', error.message); continue; }
+      if (data && data.length > 0) closed++;
+    } catch (err) {
+      console.warn('[autoCloseStaleWorkSessions] Erro inesperado:', err);
+    }
+  }
+  return closed;
+};
+
 /** Expediente aberto (sem ended_at) de uma linha, se houver. */
 export function getOpenWorkSession(sessions: WorkSession[], lineId: string): WorkSession | null {
   const open = sessions.filter(s => s.lineId === lineId && !s.endedAt);
@@ -5248,6 +5308,7 @@ export const STAFF_OCCURRENCE_LABELS: Record<StaffOccurrenceType, string> = {
   acidente: 'Acidente',
   incidente: 'Incidente',
   hora_extra: 'Hora extra',
+  retorno: 'Retorno',
   free_balde: 'Free do balde',
 };
 
@@ -5259,6 +5320,7 @@ const mapStaffOccurrenceRow = (r: any): StaffOccurrence => ({
   employeeName: String(r.employee_name || ''),
   quantity: Math.max(1, Number(r.quantity) || 1),
   reason: String(r.reason || ''),
+  occurredTime: r.occurred_time ? String(r.occurred_time).slice(0, 5) : null,
   createdBy: r.created_by || null,
   createdAt: r.created_at,
 });
@@ -5307,24 +5369,31 @@ export const addStaffOccurrence = async (
   const reason = String(occ.reason || '').trim();
   const quantity = Math.max(1, Math.floor(Number(occ.quantity) || 1));
   if (!name && occ.type !== 'free_balde') return { ok: false, error: 'Informe o nome do colaborador.' };
+  const occurredTime = /^\d{2}:\d{2}$/.test(String(occ.occurredTime || '')) ? String(occ.occurredTime) : null;
+  if (occ.type === 'retorno' && !occurredTime) return { ok: false, error: 'Informe o horário do retorno.' };
   if (trainingModeActive) {
-    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
+    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, occurredTime, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
     return { ok: true };
   }
   try {
+    const payload: any = {
+      occurred_on: occ.date,
+      line_id: occ.lineId,
+      type: occ.type,
+      employee_name: name,
+      quantity,
+      reason,
+      created_by: userId && isUUID(userId) ? userId : null,
+    };
+    if (occurredTime) payload.occurred_time = occurredTime;
     const { data, error } = await supabase
       .from('staff_occurrences')
-      .insert({
-        occurred_on: occ.date,
-        line_id: occ.lineId,
-        type: occ.type,
-        employee_name: name,
-        quantity,
-        reason,
-        created_by: userId && isUUID(userId) ? userId : null,
-      })
+      .insert(payload)
       .select('id');
     if (error) {
+      if (/occurred_time|staff_occurrences_type_check|check constraint/i.test(error.message)) {
+        return { ok: false, error: 'Falta atualizar o banco para o "Retorno" — rode sql/add_staff_occurrence_retorno.sql no Supabase.' };
+      }
       notifyDbWriteFailure('Registrar ocorrência de pessoal', error.message);
       return { ok: false, error: /staff_occurrences|does not exist|relation/i.test(error.message) ? 'A tabela de ocorrências ainda não existe — rode sql/add_staff_occurrences.sql no Supabase.' : error.message };
     }
@@ -5353,7 +5422,7 @@ export const deleteStaffOccurrence = async (id: string): Promise<{ ok: boolean; 
 
 /** Soma das quantidades por tipo. */
 export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurrenceType, number> {
-  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
+  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, retorno: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
   for (const o of list) if (o.type in out) out[o.type] += o.quantity || 1;
   return out;
 }
@@ -5612,4 +5681,70 @@ export const deleteManipConferencia = async (id: string): Promise<{ ok: boolean;
   } catch (err: any) {
     return { ok: false, error: String(err?.message || err) };
   }
+};
+
+// ---------------- CORRIGIR CONCLUSÃO PARCIAL FEITA POR ENGANO ----------------
+// A OP foi concluída como PARCIAL quando na verdade era TOTAL: ela voltou pro
+// estoque com o "saldo" como planejado. A correção fecha a OP como concluída
+// na data, linha e turno da última parcial, sem mexer no banco à mão.
+// A produção continua vindo das parciais (produzido da OP fica 0 e o
+// planejado fica o saldo) — assim o rendimento é calculado igual a uma
+// conclusão total: produzido = parciais; esperado = planejado original.
+
+/** Última conclusão parcial da OP (ou null se não houver). */
+export function getLastPartialFinishEvent(opId: string, events: ProductionEvent[]): ProductionEvent | null {
+  let last: ProductionEvent | null = null;
+  for (const ev of events || []) {
+    if (String(ev.opId) !== String(opId) || !isPartialFinishEvent(ev)) continue;
+    if (!last || new Date(ev.createdAt).getTime() > new Date(last.createdAt).getTime()) last = ev;
+  }
+  return last;
+}
+
+export const convertPartialToTotal = async (
+  op: ProductionOrder,
+  events: ProductionEvent[]
+): Promise<{ ok: boolean; error?: string }> => {
+  const lastPartial = getLastPartialFinishEvent(op.id, events);
+  if (!lastPartial) return { ok: false, error: 'Esta OP não tem conclusão parcial registrada.' };
+  if (op.status !== 'pending') return { ok: false, error: 'A OP já voltou para uma linha — só dá para corrigir enquanto ela está no estoque.' };
+
+  const completedAt = lastPartial.createdAt;
+  const finishedShift: 'Manhã' | 'Tarde' = new Date(completedAt).getHours() < 12 ? 'Manhã' : 'Tarde';
+  const lineId = lastPartial.lineId || null;
+  const patch = {
+    status: 'completed' as const,
+    lineId,
+    completedAt,
+    finishedShift,
+    producedQuantity: 0,
+    rejectedQuantity: 0,
+    isSleeve: false,
+  };
+
+  if (trainingModeActive) {
+    trainingOps = trainingOps.map(o => (o.id === op.id ? { ...o, ...patch } : o));
+    return { ok: true };
+  }
+
+  const localSnapshot = snapshotLocalState();
+  inMemoryOps = inMemoryOps.map(o => (o.id === op.id ? { ...o, ...patch } : o));
+  persistOps();
+
+  const opWrite = await updateOpVerified(op.id, {
+    status: 'completed',
+    line_id: lineId,
+    completed_at: completedAt,
+    finished_shift: finishedShift,
+    produced_quantity: 0,
+    rejected_quantity: 0,
+  }, ['pending']);
+
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Corrigir parcial para total', opWrite, op.id, op.number);
+    return { ok: false, error: opWrite.error || 'O banco não gravou (a OP mudou de status ou falta permissão).' };
+  }
+  markOpAsSleeve(op.id, false);
+  return { ok: true };
 };

@@ -238,6 +238,8 @@ export type StaffOccurrenceType =
   | 'acidente'
   | 'incidente'
   | 'hora_extra'
+  | 'retorno'
+  /** descontinuado (não aparece mais no formulário) — mantido p/ o histórico */
   | 'free_balde';
 
 export interface StaffOccurrence {
@@ -248,6 +250,8 @@ export interface StaffOccurrence {
   employeeName: string;
   quantity: number; // normalmente 1; "free do balde" pode lançar vários de uma vez
   reason: string;
+  /** Horário em que aconteceu ('HH:MM') — saída antecipada e retorno */
+  occurredTime?: string | null;
   createdBy?: string | null;
   createdAt: string;
 }
