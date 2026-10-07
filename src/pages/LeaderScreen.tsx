@@ -55,6 +55,7 @@ import {
   startWorkSession,
   endWorkSession,
   getOpenWorkSession,
+  autoCloseStaleWorkSessions,
   getLineDailyGoals,
   computeProductionByLineAndDay,
   toLocalDateStr,
@@ -264,6 +265,10 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       setAllOps(loadedOps);
       setRecentEvents(loadedEvents);
       setWorkSessions(loadedSessions);
+      // Fim da jornada sem OP em produção: encerra o expediente sozinho
+      autoCloseStaleWorkSessions(loadedSessions, loadedOps, loadedEvents).then(n => {
+        if (n > 0) getWorkSessions(3).then(ws => { if (requestId === fetchRequestIdRef.current) setWorkSessions(ws); });
+      }).catch(() => {});
       setLineDailyGoals(loadedLineGoals || []);
       setHeadcounts(loadedHeadcounts || []);
       setChangeovers(loadedChangeovers || []);
@@ -596,8 +601,25 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     await fetchData(true);
   };
 
+  // "Outro" sem descrição não diz nada no relatório — a observação passa a ser obrigatória
+  const pauseNeedsObs = /^\s*outro/i.test(pauseReason || '');
+  // Líder indo embora pela pausa ("Outro" + "fim de expediente"): orienta a usar o
+  // botão Encerrar Expediente, que pausa a OP com o motivo certo e fecha a linha.
+  const pauseLooksLikeEndOfDay =
+    /fim\s*d[eo]\s*expediente/i.test(pauseReason || '') ||
+    /fim\s*d[eo]\s*(expediente|turno|dia)|indo\s+embora|encerr\w*\s+(o\s+)?(expediente|turno|dia)/i.test(pauseObs || '');
+  const blockOutroEndOfDay = pauseNeedsObs && pauseLooksLikeEndOfDay;
+  const goToEndShift = () => {
+    setIsPauseOpen(false);
+    setPauseReason('');
+    setPauseObs('');
+    setShiftError(null);
+    setIsEndShiftOpen(true);
+  };
   const handlePause = async () => {
     if (!currentLine || !activeOp || !profile || !pauseReason) return;
+    if (pauseNeedsObs && !pauseObs.trim()) return;
+    if (blockOutroEndOfDay) return;
     // A quantidade não é mais pedida na pausa — o apontamento é feito só pelo botão próprio
     await pauseOP(activeOp.id, currentLine.id, profile.uid, pauseReason, pauseObs);
     setIsPauseOpen(false);
@@ -2298,15 +2320,37 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Observação Complementar (Opcional)
+                {pauseNeedsObs ? 'O que aconteceu? *' : 'Observação Complementar (Opcional)'}
               </Label>
               <Input
                 value={pauseObs}
                 onChange={e => setPauseObs(e.target.value)}
-                placeholder="Ex: Aguardando liberação do técnico..."
-                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-xs"
+                placeholder={pauseNeedsObs ? 'Descreva o motivo (obrigatório para "Outro")' : 'Ex: Aguardando liberação do técnico...'}
+                className={`bg-[#181822] rounded-xl text-xs ${pauseNeedsObs && !pauseObs.trim() ? 'border-amber-500' : 'border-[#2c2c3c]'}`}
               />
+              {pauseNeedsObs && !pauseObs.trim() && (
+                <p className="text-[11px] text-amber-400">Para "Outro", descreva o que aconteceu — aparece no Relatório do Dia.</p>
+              )}
             </div>
+
+            {pauseLooksLikeEndOfDay && (
+              <div className="rounded-xl border border-rose-700/60 bg-rose-950/40 p-3 space-y-2">
+                <p className="text-xs font-bold text-rose-200 flex items-center gap-1.5">
+                  <Sunset className="w-4 h-4 text-rose-400" /> Indo embora? Use "Encerrar Expediente"
+                </p>
+                <p className="text-[11px] text-rose-200/80">
+                  Ele pausa a OP com o motivo certo e fecha o expediente da linha — assim a noite não aparece como parada no Relatório do Dia.
+                  {blockOutroEndOfDay && ' Não é possível registrar fim de expediente como "Outro".'}
+                </p>
+                <Button
+                  type="button"
+                  onClick={goToEndShift}
+                  className="h-9 w-full rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-black uppercase tracking-wider flex items-center justify-center gap-1.5"
+                >
+                  <Sunset className="w-3.5 h-3.5" /> Encerrar Expediente
+                </Button>
+              </div>
+            )}
           </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
@@ -2319,7 +2363,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             </Button>
             <Button
               onClick={handlePause}
-              disabled={!pauseReason}
+              disabled={!pauseReason || (pauseNeedsObs && !pauseObs.trim()) || blockOutroEndOfDay}
               className="bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
             >
               Confirmar Pausa

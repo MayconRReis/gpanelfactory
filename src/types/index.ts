@@ -225,6 +225,8 @@ export interface DailyReportManual {
   /** Principais pontos do dia: tópico + texto (vazios não aparecem no relatório) */
   pontos: { titulo: string; texto: string }[];
   seguranca: string;
+  /** DSS (Diálogo de Segurança) do dia — só aparece no relatório quando preenchido */
+  dss?: string;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }
@@ -245,7 +247,7 @@ export type StaffOccurrenceType =
 export interface StaffOccurrence {
   id: string;
   date: string; // 'AAAA-MM-DD'
-  lineId: string; // linha ou setor (ex.: line-1, setor-manipulacao, setor-pesagem)
+  lineId: string; // linha ou setor (ex.: line-1, setor-manipulacao, setor-pesagem, setor-estoque-mepa, setor-estoque-mp)
   type: StaffOccurrenceType;
   employeeName: string;
   quantity: number; // normalmente 1; "free do balde" pode lançar vários de uma vez

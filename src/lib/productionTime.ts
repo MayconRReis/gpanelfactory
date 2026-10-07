@@ -28,7 +28,7 @@ export interface LineTimeMetrics {
   idleFormatted: string;
   disponibilidade: number; // 0 a 100% (Working / (Working + Idle))
   pauseCount: number;
-  pauses: { reason: string; durationMs: number; createdAt: string }[];
+  pauses: { reason: string; durationMs: number; createdAt: string; observation?: string; opId?: string }[];
   /** Tempo de expediente da linha no período (só quando workSessions é informado). */
   sessionMs?: number;
   /** Parte do expediente fora da jornada padrão = hora extra (só com workSessions). */
@@ -862,6 +862,8 @@ export function calculateProductionTime(
             reason: interval.reason,
             durationMs: interval.durationMs,
             createdAt: new Date(interval.startMs).toISOString(),
+            observation: interval.observation,
+            opId: interval.opId,
           });
         }
       }

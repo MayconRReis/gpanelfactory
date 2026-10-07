@@ -133,7 +133,7 @@ export function Sidebar({
       label: 'Dashboard Detalhado',
       icon: BarChart3,
       badge: null,
-      description: 'OEE por setor, produção diária & mensal',
+      description: 'Resumo, OEE, linhas, OPs, setups e ocorrências',
       section: 'GESTÃO & PCP',
     },
     {

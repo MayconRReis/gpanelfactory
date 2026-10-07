@@ -71,6 +71,8 @@ import {
   finishOP, 
   getRecentEvents, 
   getPartialOpsInStock,
+  getLastPartialFinishEvent,
+  convertPartialToTotal,
   getPauseReasons,
   getReworkInfoByOp,
   resetProductionDatabase,
@@ -90,7 +92,7 @@ import { Sidebar, DashboardTab } from '../components/Sidebar';
 import { HomeDashboard } from '../components/HomeDashboard';
 import { ShareDashboardModal } from '../components/ShareDashboardModal';
 import { GoalsModal } from '../components/GoalsModal';
-import { DailyProductionHistory } from '../components/DailyProductionHistory';
+import { DetailedDashboard } from '../components/DetailedDashboard';
 import { PesagemScreen } from './PesagemScreen';
 import { ManipulacaoScreen } from './ManipulacaoScreen';
 import { LeaderScreen } from './LeaderScreen';
@@ -112,6 +114,28 @@ function getLocalDateStr(d: Date = new Date()): string {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+
+// Tempo esperado da OP: o coordenador digita no formato padrão de tempo
+// (H:MM — "1:30" = 1h30, "0:35" = 35 min). No banco continua em horas
+// decimais (1.5, 0.583…), que é o que o cálculo do OEE usa.
+function parseHoursHHMM(v: string): number | null {
+  const t = String(v || '').trim();
+  if (!t) return null;
+  const m = t.match(/^(\d{1,3}):([0-5]?\d)$/);
+  if (m) {
+    const total = Number(m[1]) + Number(m[2]) / 60;
+    return total > 0 ? Math.round(total * 10000) / 10000 : null;
+  }
+  // Só número inteiro = horas cheias ("2" = 2:00)
+  if (/^\d{1,3}$/.test(t)) return Number(t) > 0 ? Number(t) : null;
+  return null;
+}
+function formatHoursHHMM(h?: number | null): string {
+  if (h === undefined || h === null || !(Number(h) > 0)) return '';
+  const totalMin = Math.round(Number(h) * 60);
+  return `${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, '0')}`;
 }
 
 export function CoordinatorDashboard() {
@@ -217,6 +241,9 @@ export function CoordinatorDashboard() {
 
   // Modal: "Mais informações" do card de OP no Estoque de OPs
   const [detailsModalOp, setDetailsModalOp] = useState<ProductionOrder | null>(null);
+  // Corrigir OP concluída como PARCIAL por engano (vira conclusão total)
+  const [fixPartialOp, setFixPartialOp] = useState<ProductionOrder | null>(null);
+  const [isFixingPartial, setIsFixingPartial] = useState(false);
 
   // Modal: Cadastros & Confirmações de Usuários
   const [showAuthorizeModal, setShowAuthorizeModal] = useState(false);
@@ -825,7 +852,7 @@ WHERE email IN (
     const currentSetor = op.setor || 'Envase';
     setNewOpSetor(currentSetor);
     setNewOpUnidade(op.unidade || (currentSetor === 'Manipulação' ? 'Kg' : currentSetor === 'Pesagem' ? 'Qtd' : 'Un'));
-    setNewOpPlannedHours(op.plannedHours !== undefined && op.plannedHours !== null ? String(op.plannedHours) : '');
+    setNewOpPlannedHours(formatHoursHHMM(op.plannedHours));
     setNewOpRejectedQuantity(op.rejectedQuantity !== undefined && op.rejectedQuantity !== null ? String(op.rejectedQuantity) : '0');
     setNewOpLote(op.lote || '');
     setNewOpPlanned(String(op.plannedQuantity || ''));
@@ -859,6 +886,10 @@ WHERE email IN (
       showToast('Quantidade refugada não pode ser maior que a produzida.', 'error');
       return;
     }
+    if (newOpPlannedHours.trim() && !parseHoursHHMM(newOpPlannedHours)) {
+      showToast('Tempo esperado inválido — use horas:minutos, ex.: 1:30 ou 0:35.', 'error');
+      return;
+    }
 
     setIsSubmittingOp(true);
     try {
@@ -878,7 +909,7 @@ WHERE email IN (
         tipoDocumento,
         unidade: newOpUnidade,
         industria: newOpIndustria || undefined,
-        plannedHours: newOpPlannedHours ? Number(newOpPlannedHours) : undefined,
+        plannedHours: parseHoursHHMM(newOpPlannedHours) ?? undefined,
         rejectedQuantity: newOpRejectedQuantity ? Number(newOpRejectedQuantity) : 0,
         scheduledDate: newOpScheduledDate || undefined,
         scheduledEndDate: newOpScheduledEndDate || undefined,
@@ -1380,7 +1411,7 @@ WHERE email IN (
     },
     daily_production: {
       title: 'Dashboard Detalhado',
-      subtitle: 'Histórico produtivo diário com rastreabilidade detalhada e gráficos consolidados',
+      subtitle: 'Análise do período por abas — mesmos números do Dashboard',
       icon: BarChart3,
     },
     ops: {
@@ -1526,31 +1557,31 @@ WHERE email IN (
 
             {/* ---------------- TELA: HISTÓRICO PRODUTIVO & GRÁFICOS DIÁRIOS/MENSAIS ---------------- */}
             {activeTab === 'daily_production' && (
-              <div className="space-y-6">
-              <HomeDashboard
-                lines={lines}
+              <DetailedDashboard
                 ops={ops}
-                leaders={leaders}
-                allUsers={allUsers}
+                lines={lines}
                 events={events}
-                rotations={rotations}
+                users={[...(allUsers || []), ...(leaders || [])]}
                 goals={goals}
-                factoryMonthlyGoal={factoryMonthlyGoal}
                 factoryMonthlyGoals={factoryMonthlyGoals}
-                lineDailyGoals={lineDailyGoals}
-                isReadOnly
-                oeeOnly
-                showSectorOee={isAdminRule(getUserRule(profile))}
+                oeeSlot={
+                  <HomeDashboard
+                    lines={lines}
+                    ops={ops}
+                    leaders={leaders}
+                    allUsers={allUsers}
+                    events={events}
+                    rotations={rotations}
+                    goals={goals}
+                    factoryMonthlyGoal={factoryMonthlyGoal}
+                    factoryMonthlyGoals={factoryMonthlyGoals}
+                    lineDailyGoals={lineDailyGoals}
+                    isReadOnly
+                    oeeOnly
+                    showSectorOee={isAdminRule(getUserRule(profile))}
+                  />
+                }
               />
-              <DailyProductionHistory
-                ops={ops}
-                lines={lines}
-                leaders={leaders}
-                allUsers={allUsers}
-                goals={goals}
-                events={events}
-              />
-              </div>
             )}
 
             {/* ---------------- TELA: RELATÓRIO DO DIA (Coordenação) ---------------- */}
@@ -1942,6 +1973,17 @@ WHERE email IN (
                             <Info className="w-3.5 h-3.5" />
                             <span>Mais informações</span>
                           </button>
+
+                          {partialStockIds.has(op.id) && op.status === 'pending' && (
+                            <button
+                              type="button"
+                              onClick={() => setFixPartialOp(op)}
+                              className="h-9 w-9 flex items-center justify-center text-amber-400/80 hover:text-amber-300 hover:bg-amber-950/40 border border-amber-800/40 rounded-lg p-0 transition-colors shrink-0"
+                              title="Foi concluída como parcial por engano? Corrigir para conclusão total"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
                           <Button
                             size="sm"
@@ -2678,20 +2720,24 @@ WHERE email IN (
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Tempo esperado (horas)</Label>
+                  <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Tempo esperado (h:mm)</Label>
                   <Input
-                    type="number"
-                    min="0"
-                    step="0.25"
-                    placeholder="Ex: 6.5"
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="Ex: 1:30"
                     value={newOpPlannedHours}
-                    onChange={(e) => setNewOpPlannedHours(e.target.value)}
-                    className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-orange-300"
+                    onChange={(e) => setNewOpPlannedHours(e.target.value.replace(/[^\d:]/g, '').slice(0, 6))}
+                    onBlur={() => { const h = parseHoursHHMM(newOpPlannedHours); if (h) setNewOpPlannedHours(formatHoursHHMM(h)); }}
+                    className={`bg-[#0b0b0e] border-[#25252c] text-xs font-mono font-bold text-orange-300 ${newOpPlannedHours && !parseHoursHHMM(newOpPlannedHours) ? 'border-rose-600' : ''}`}
                   />
-                  <p className="text-[9px] text-[#71717a] leading-tight">
-                    {Number(newOpPlannedHours) > 0
-                      ? `= ${Math.floor(Number(newOpPlannedHours))}h ${String(Math.round((Number(newOpPlannedHours) % 1) * 60)).padStart(2, '0')}m · base da Performance do OEE`
-                      : 'Tempo para produzir a quantidade planejada (Performance do OEE)'}
+                  <p className={`text-[9px] leading-tight ${newOpPlannedHours && !parseHoursHHMM(newOpPlannedHours) ? 'text-rose-400' : 'text-[#71717a]'}`}>
+                    {(() => {
+                      if (!newOpPlannedHours) return 'Horas:minutos — ex.: 1:30 = 1h30 · 0:35 = 35 min (Performance do OEE)';
+                      const h = parseHoursHHMM(newOpPlannedHours);
+                      if (!h) return 'Formato inválido — use horas:minutos, ex.: 1:30 ou 0:35';
+                      const min = Math.round(h * 60);
+                      return `= ${Math.floor(min / 60) > 0 ? `${Math.floor(min / 60)}h ` : ''}${String(min % 60).padStart(2, '0')}min · base da Performance do OEE`;
+                    })()}
                   </p>
                 </div>
               </div>
@@ -2922,6 +2968,69 @@ WHERE email IN (
           </div>
         </div>
       )}
+
+      {/* ---------------- MODAL: CORRIGIR PARCIAL → TOTAL ---------------- */}
+      {fixPartialOp && (() => {
+        const lastPartial = getLastPartialFinishEvent(fixPartialOp.id, events);
+        const partialTotal = events
+          .filter(ev => String(ev.opId) === String(fixPartialOp.id) && /^envase parcial/i.test(String(ev.observation || '').trim()))
+          .reduce((acc, ev) => acc + (Number(ev.quantity) || 0), 0);
+        const lineName = lines.find(l => l.id === lastPartial?.lineId)?.name || lastPartial?.lineName || lastPartial?.lineId || '—';
+        const when = lastPartial ? new Date(lastPartial.createdAt) : null;
+        const handleConfirm = async () => {
+          setIsFixingPartial(true);
+          const res = await convertPartialToTotal(fixPartialOp, events);
+          setIsFixingPartial(false);
+          if (!res.ok) {
+            showToast(res.error || 'Não foi possível corrigir esta OP.', 'error');
+            return;
+          }
+          showToast(`OP ${fixPartialOp.number} corrigida: concluída como total.`);
+          setFixPartialOp(null);
+          await loadData();
+        };
+        return (
+          <div
+            onClick={(e) => { if (e.target === e.currentTarget && !isFixingPartial) setFixPartialOp(null); }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+          >
+            <div className="bg-[#121216] border border-[#222228] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div className="p-5 border-b border-[#222228] bg-amber-950/20 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-600/20 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">Corrigir para conclusão total</h3>
+                  <p className="text-[11px] text-[#a1a1aa]">OP {fixPartialOp.number} · {fixPartialOp.product}</p>
+                </div>
+              </div>
+              <div className="p-5 space-y-3 text-xs">
+                <p className="text-[#d4d4d8]">
+                  Esta OP foi concluída como <strong className="text-amber-300">parcial</strong> e voltou ao estoque com saldo. Se foi engano, ela será fechada como <strong className="text-emerald-300">concluída</strong>:
+                </p>
+                <div className="bg-[#0b0b0e] border border-[#222227] rounded-xl p-3 space-y-1.5">
+                  <div className="flex justify-between gap-3"><span className="text-[#71717a]">Produzido (parciais)</span><span className="font-mono font-bold text-white">{partialTotal.toLocaleString('pt-BR')} {fixPartialOp.unidade || 'un'}</span></div>
+                  <div className="flex justify-between gap-3"><span className="text-[#71717a]">Saldo que deixa de existir</span><span className="font-mono font-bold text-amber-300">{(Number(fixPartialOp.plannedQuantity) || 0).toLocaleString('pt-BR')} {fixPartialOp.unidade || 'un'}</span></div>
+                  <div className="flex justify-between gap-3"><span className="text-[#71717a]">Linha</span><span className="font-semibold text-white">{lineName}</span></div>
+                  <div className="flex justify-between gap-3"><span className="text-[#71717a]">Concluída em</span><span className="font-mono text-white">{when ? `${when.toLocaleDateString('pt-BR')} ${when.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : '—'}</span></div>
+                </div>
+                <p className="text-[11px] text-[#71717a]">
+                  A data, a linha e o turno são os da última parcial. A produção registrada não muda; a OP sai do estoque e passa para "Concluídas".
+                </p>
+              </div>
+              <div className="p-4 border-t border-[#222228] flex flex-col sm:flex-row gap-2 justify-end">
+                <Button variant="outline" onClick={() => setFixPartialOp(null)} disabled={isFixingPartial} className="h-9 rounded-xl border-[#2c2c3c] text-[#a1a1aa] hover:text-white hover:bg-[#1f1f2a] text-xs font-bold">
+                  Voltar
+                </Button>
+                <Button onClick={handleConfirm} disabled={isFixingPartial || !lastPartial} className="h-9 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5">
+                  {isFixingPartial ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  Concluir como total
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ---------------- MODAL: MAIS INFORMAÇÕES DA OP (Estoque de OPs) ---------------- */}
       {detailsModalOp && (

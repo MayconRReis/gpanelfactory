@@ -11,6 +11,7 @@ import {
   Boxes,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
+import { buildProductionLedger, sumLedgerByDay } from '../services/productionLedger';
 import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
@@ -922,30 +923,9 @@ export function HomeDashboard({
   // apontamento/pausa/conclusão conta no dia em que aconteceu — uma OP que
   // ainda está em produção já soma o que foi envasado hoje. OP sem nenhum
   // apontamento (histórico importado) conta no dia em que foi fechada.
-  const envaseProducedByDay = useMemo(() => {
-    const envOps = ops.filter(o => o && !o.isPartialRecord && isEnvaseLineOpBase(o));
-    const envIds = new Set(envOps.map(o => String(o.id)));
-    const envEvents = events.filter(e => e.opId && envIds.has(String(e.opId)));
-    const withQty = new Set(
-      envEvents
-        .filter(e => e.type === 'QUANTITY_REPORTED' || ((e.type === 'PAUSED' || e.type === 'FINISHED') && e.quantity !== undefined && e.quantity !== null))
-        .map(e => String(e.opId))
-    );
-    const byLineDay = computeProductionByLineAndDay(envEvents, envOps);
-    const byDay = new Map<string, number>();
-    for (const [lineId, days] of Object.entries(byLineDay)) {
-      if (isSleeveLineId(lineId) || /reator|pesagem|manipula/i.test(lineId)) continue;
-      for (const [day, q] of Object.entries(days)) byDay.set(day, (byDay.get(day) || 0) + Number(q || 0));
-    }
-    for (const op of envOps) {
-      if (withQty.has(String(op.id)) || isSleeveLineId(op.lineId)) continue;
-      const qty = Number(op.producedQuantity) || 0;
-      if (qty <= 0) continue;
-      const day = getOpReferenceDateStr(op);
-      if (day) byDay.set(day, (byDay.get(day) || 0) + qty);
-    }
-    return byDay;
-  }, [ops, events]);
+  // Mesma fonte do Dashboard Detalhado (services/productionLedger) — os
+  // números das duas telas sempre batem.
+  const envaseProducedByDay = useMemo(() => sumLedgerByDay(buildProductionLedger(ops, events), 'Envase'), [ops, events]);
   const envaseProducedInPeriod = useMemo(() => {
     let t = 0;
     for (const [day, q] of envaseProducedByDay.entries()) {

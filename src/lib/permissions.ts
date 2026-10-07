@@ -241,15 +241,18 @@ export function getStaffOccurrenceAreas(profile: UserProfile | null): {
   envase: boolean;
   pesagem: boolean;
   manipulacao: boolean;
+  estoque: boolean;
 } {
-  if (!profile) return { all: false, envase: false, pesagem: false, manipulacao: false };
+  if (!profile) return { all: false, envase: false, pesagem: false, manipulacao: false, estoque: false };
   const rule = getUserRule(profile);
-  if (isAdminRule(rule)) return { all: true, envase: true, pesagem: true, manipulacao: true };
+  if (isAdminRule(rule)) return { all: true, envase: true, pesagem: true, manipulacao: true, estoque: true };
   const tabs = getUserAllowedTabs(profile);
   return {
     all: false,
     envase: tabs.includes('envase'),
     pesagem: tabs.includes('pesagem'),
     manipulacao: tabs.includes('manipulacao'),
+    // Estoque: quem tem a tela "Estoque de OPs" ou o cargo de estoque
+    estoque: tabs.includes('ops') || /estoque/i.test(String(profile.cargo || '')),
   };
 }

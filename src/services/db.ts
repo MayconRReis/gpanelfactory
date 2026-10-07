@@ -5213,13 +5213,17 @@ function resetTrainingPesagemHistory(): void {
 // segurança). Tabela criada por sql/add_daily_reports.sql. Os números de
 // produção, tempos e equipe NÃO ficam aqui — saem dos registros do app.
 
+// O DSS é guardado dentro do jsonb `pontos` com um tópico reservado — assim
+// não precisa de coluna nova no banco.
+const DSS_KEY = '__dss__';
 const mapDailyReportRow = (r: any): DailyReportManual => ({
   date: String(r.report_date).slice(0, 10),
+  dss: Array.isArray(r.pontos) ? String((r.pontos.find((p: any) => p?.titulo === DSS_KEY) || {}).texto || '') : '',
   atestados: Number(r.atestados) || 0,
   faltas: Number(r.faltas) || 0,
   atrasos: Number(r.atrasos) || 0,
   saidasAntecipadas: Number(r.saidas_antecipadas) || 0,
-  pontos: Array.isArray(r.pontos) ? r.pontos.map((p: any) => ({ titulo: String(p?.titulo || ''), texto: String(p?.texto || '') })) : [],
+  pontos: Array.isArray(r.pontos) ? r.pontos.filter((p: any) => p?.titulo !== DSS_KEY).map((p: any) => ({ titulo: String(p?.titulo || ''), texto: String(p?.texto || '') })) : [],
   seguranca: String(r.seguranca || ''),
   updatedAt: r.updated_at || null,
   updatedBy: r.updated_by || null,
@@ -5257,9 +5261,11 @@ export const saveDailyReport = async (report: DailyReportManual, userId?: string
     faltas: Math.max(0, Math.floor(Number(report.faltas) || 0)),
     atrasos: Math.max(0, Math.floor(Number(report.atrasos) || 0)),
     saidasAntecipadas: Math.max(0, Math.floor(Number(report.saidasAntecipadas) || 0)),
-    pontos: (report.pontos || []).map(p => ({ titulo: String(p.titulo || '').trim(), texto: String(p.texto || '').trim() })),
+    pontos: (report.pontos || []).map(p => ({ titulo: String(p.titulo || '').trim(), texto: String(p.texto || '').trim() })).filter(p => p.titulo !== DSS_KEY),
     seguranca: String(report.seguranca || '').trim(),
+    dss: String(report.dss || '').trim(),
   };
+  const pontosToStore = clean.dss ? [...clean.pontos, { titulo: DSS_KEY, texto: clean.dss }] : clean.pontos;
   const nowIso = new Date().toISOString();
   if (trainingModeActive) {
     trainingDailyReports = [...trainingDailyReports.filter(r => r.date !== clean.date), { ...clean, updatedAt: nowIso, updatedBy: userId || null }];
@@ -5274,7 +5280,7 @@ export const saveDailyReport = async (report: DailyReportManual, userId?: string
         faltas: clean.faltas,
         atrasos: clean.atrasos,
         saidas_antecipadas: clean.saidasAntecipadas,
-        pontos: clean.pontos,
+        pontos: pontosToStore,
         seguranca: clean.seguranca,
         updated_at: nowIso,
         updated_by: userId && isUUID(userId) ? userId : null,

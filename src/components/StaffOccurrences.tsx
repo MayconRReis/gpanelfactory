@@ -280,6 +280,9 @@ interface SummaryProps {
 const SECTOR_NAMES: Record<string, string> = {
   'setor-manipulacao': 'Manipulação',
   'setor-pesagem': 'Pesagem',
+  'setor-estoque': 'Estoque',
+  'setor-estoque-mepa': 'Estoque ME/PA',
+  'setor-estoque-mp': 'Estoque MP',
 };
 
 export function StaffOccurrencesSummary({ rangeStart, rangeEnd, periodLabel, lines, scopeToggle }: SummaryProps) {
@@ -409,6 +412,8 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
       ...envase,
       { id: 'setor-pesagem', name: 'Pesagem', group: 'Setores' },
       { id: 'setor-manipulacao', name: 'Manipulação', group: 'Setores' },
+      { id: 'setor-estoque-mepa', name: 'Estoque ME/PA', group: 'Setores' },
+      { id: 'setor-estoque-mp', name: 'Estoque MP', group: 'Setores' },
     ];
   }, [lines]);
 
@@ -417,8 +422,9 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
     if (areas.all) return true;
     if (t.id === 'setor-pesagem') return areas.pesagem;
     if (t.id === 'setor-manipulacao') return areas.manipulacao;
+    if (t.id.startsWith('setor-estoque')) return areas.estoque;
     return areas.envase;
-  }), [allTargets, areas.all, areas.envase, areas.pesagem, areas.manipulacao]);
+  }), [allTargets, areas.all, areas.envase, areas.pesagem, areas.manipulacao, areas.estoque]);
 
   const targetName = useCallback((id: string) => allTargets.find(t => t.id === id)?.name || SECTOR_NAMES[id] || id, [allTargets]);
 
@@ -605,7 +611,7 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
           </h2>
           <p className="text-xs text-[#71717a] mt-0.5">
             Faltas, atrasos, atestados, saídas antecipadas e retornos, acidentes/incidentes e hora extra.
-            {!areas.all && myTargets.length > 0 && <> Você lança em: <span className="text-[#d4d4d8] font-semibold">{areas.envase && areas.pesagem === false && areas.manipulacao === false ? 'linhas de envase' : myTargets.map(t => t.name).join(', ')}</span>.</>}
+            {!areas.all && myTargets.length > 0 && <> Você lança em: <span className="text-[#d4d4d8] font-semibold">{areas.envase && !areas.pesagem && !areas.manipulacao && !areas.estoque ? 'linhas de envase' : myTargets.map(t => t.name).join(', ')}</span>.</>}
           </p>
         </div>
         <button onClick={exportCsv} disabled={filtered.length === 0}

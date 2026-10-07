@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, Printer, Save, Plus, Trash2, ChevronLeft, ChevronRight, Info, Loader2 } from 'lucide-react';
+import { FileText, Printer, Plus, Trash2, ChevronLeft, ChevronRight, Info, Loader2, Download } from 'lucide-react';
 import {
   ProductionLine,
   ProductionOrder,
@@ -17,7 +17,6 @@ import {
   toLocalDateStr,
   getOpReferenceDateStr,
   isPartialFinishEvent,
-  computeProductionByLineAndDay,
   getWorkSessions,
   getLineHeadcounts,
   getChangeovers,
@@ -28,7 +27,8 @@ import {
   sumStaffOccurrences,
   STAFF_OCCURRENCE_LABELS,
 } from '../services/db';
-import { calculateProductionTime, formatMsToHoursMinutes } from '../lib/productionTime';
+import { calculateProductionTime, formatMsToHoursMinutes, getScheduledWindow } from '../lib/productionTime';
+import { buildProductionLedger } from '../services/productionLedger';
 
 /**
  * RELATÓRIO DO DIA — mesmo modelo do "Relatório Diário de Produção" que a
@@ -54,7 +54,6 @@ interface DailyReportProps {
 }
 
 const MONTHS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
-const DEFAULT_TOPICS = ['Pesagem', 'Manipulação', 'Envase', 'Mão de obra', 'Hora extra', 'Energia'];
 const DEFAULT_SAFETY = 'Sem acidente ou incidente registrado hoje.';
 
 const nf = (n: number, digits = 0) =>
@@ -84,8 +83,10 @@ function emptyManual(date: string): DailyReportManual {
     faltas: 0,
     atrasos: 0,
     saidasAntecipadas: 0,
-    pontos: DEFAULT_TOPICS.map(t => ({ titulo: t, texto: '' })),
-    seguranca: DEFAULT_SAFETY,
+    // Um tópico em branco por padrão — o Coordenador adiciona os que precisar
+    pontos: [{ titulo: '', texto: '' }],
+    seguranca: '',
+    dss: '',
   };
 }
 
@@ -146,51 +147,45 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     setSaveMsg(null);
   };
 
-  const handleSave = async () => {
+  // Salva automaticamente ao baixar/imprimir (não existe mais botão Salvar).
+  // Retorna true se gravou (ou se não havia nada novo para gravar).
+  const saveReport = async (): Promise<boolean> => {
+    if (!dirty) return true;
     setSaving(true);
-    setSaveMsg(null);
     const { error } = await saveDailyReport({ ...manual, date: selectedDate }, userId);
     setSaving(false);
     if (error) {
-      setSaveMsg({ type: 'error', text: /daily_reports|relation|does not exist/i.test(error) ? 'A tabela do relatório ainda não existe no banco — rode sql/add_daily_reports.sql no Supabase.' : `Não foi possível salvar: ${error}` });
-      return;
+      setSaveMsg({ type: 'error', text: /daily_reports|relation|does not exist/i.test(error) ? 'A tabela do relatório ainda não existe no banco — rode sql/add_daily_reports.sql no Supabase.' : `Não foi possível salvar o relatório: ${error}` });
+      return false;
     }
     setDirty(false);
-    setSaveMsg({ type: 'ok', text: 'Relatório salvo.' });
     loadMonth();
+    return true;
+  };
+
+  // Trocar de dia com alterações pendentes: salva antes, para não perder o que foi digitado
+  const goToDate = async (d: string) => {
+    if (dirty) await saveReport();
+    setSelectedDate(d);
   };
 
   // ---------- produção do Envase por dia (e por linha) ----------
   // OP com apontamentos: vale o dia de cada apontamento/pausa/conclusão
   // (mesma regra do "Dashboard Diário"). OP sem nenhum apontamento
   // (histórico importado): vale o dia em que foi fechada.
+  // Mesma fonte do Dashboard e do Dashboard Detalhado (services/productionLedger)
   const envaseProduction = useMemo(() => {
-    const envOps = ops.filter(o => o && !o.isPartialRecord && isEnvaseOp(o));
-    const envIds = new Set(envOps.map(o => String(o.id)));
-    const envEvents = events.filter(e => e.opId && envIds.has(String(e.opId)));
-    const withQty = new Set(
-      envEvents
-        .filter(e => e.type === 'QUANTITY_REPORTED' || ((e.type === 'PAUSED' || e.type === 'FINISHED') && e.quantity !== undefined && e.quantity !== null))
-        .map(e => String(e.opId))
-    );
-    const byLineDay: Record<string, Record<string, number>> = computeProductionByLineAndDay(envEvents, envOps);
-    for (const op of envOps) {
-      if (withQty.has(String(op.id))) continue;
-      const qty = Number(op.producedQuantity) || 0;
-      if (qty <= 0) continue;
-      const day = getOpReferenceDateStr(op);
-      if (!day) continue;
-      const key = op.lineId || 'sem-linha';
-      const m = byLineDay[key] || (byLineDay[key] = {});
-      m[day] = (m[day] || 0) + qty;
-    }
+    const ledger = buildProductionLedger(ops, events);
+    const byLineDay: Record<string, Record<string, number>> = {};
     const byDay = new Map<string, number>();
     const sleeveByDay = new Map<string, number>();
-    for (const [lineId, days] of Object.entries(byLineDay)) {
-      if (isReactorId(lineId)) continue;
-      // Sleev é métrica separada (acabamento) — não soma no Envase
-      const target = /sle+v/i.test(lineId) ? sleeveByDay : byDay;
-      for (const [day, q] of Object.entries(days)) target.set(day, (target.get(day) || 0) + Number(q || 0));
+    for (const e of ledger) {
+      if (e.sector !== 'Envase' && e.sector !== 'Sleev') continue;
+      const key = e.lineId || 'sem-linha';
+      const m = byLineDay[key] || (byLineDay[key] = {});
+      m[e.day] = (m[e.day] || 0) + e.qty;
+      const target = e.sector === 'Sleev' ? sleeveByDay : byDay;
+      target.set(e.day, (target.get(e.day) || 0) + e.qty);
     }
     return { byDay, sleeveByDay, byLineDay };
   }, [ops, events]);
@@ -289,6 +284,8 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
       working,
       idle,
       disp: working + idle > 0 ? Math.round((working / (working + idle)) * 1000) / 10 : null,
+      // Ociosidade em % = ocioso ÷ (trabalhado + ocioso) — complemento da disponibilidade
+      idlePct: working + idle > 0 ? Math.round((idle / (working + idle)) * 1000) / 10 : null,
       overtime: m?.overtimeMs || 0,
       setups: daySetups.length,
       setupMs,
@@ -296,22 +293,78 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     };
   }), [envaseLines, dayTime, envaseProduction, selectedDate, lineDailyGoals, headcounts, changeovers]);
 
+  // Média das linhas que tiveram expediente/trabalho no dia (média simples por linha)
+  const lineAvg = useMemo(() => {
+    const withTime = lineRows.filter(r => r.working + r.idle > 0);
+    const n = withTime.length;
+    if (n === 0) return null;
+    const avg = (f: (r: typeof withTime[number]) => number) => withTime.reduce((a, r) => a + f(r), 0) / n;
+    return {
+      n,
+      working: avg(r => r.working),
+      idle: avg(r => r.idle),
+      idlePct: Math.round(avg(r => r.idlePct || 0) * 10) / 10,
+      disp: Math.round(avg(r => r.disp || 0) * 10) / 10,
+    };
+  }, [lineRows]);
+
   const appAbsences = lineRows.reduce((acc, r) => acc + (r.team?.absent || 0), 0);
 
   // ---------- Paradas do dia (Envase) por motivo ----------
   const pauseRows = useMemo(() => {
-    const map = new Map<string, { count: number; ms: number }>();
+    const map = new Map<string, { count: number; ms: number; details: { at: string; line: string; ms: number; obs: string; op: string }[] }>();
     for (const l of envaseLines.filter(x => !isSleeveLine(x))) {
       for (const p of dayTime.byLine[l.id]?.pauses || []) {
         const k = p.reason || 'Sem motivo';
-        const cur = map.get(k) || { count: 0, ms: 0 };
+        // "Fim de expediente" não é parada de produção — fica fora do relatório
+        // (também quando o líder escolheu "Outro" e escreveu "fim de expediente")
+        if (/fim\s*de\s*expediente/i.test(k) || /fim\s*d[eo]\s*expediente|fim\s*do\s*turno/i.test(String(p.observation || ''))) continue;
+        // Só o pedaço da pausa dentro do expediente da linha (jornada + expediente
+        // aberto/hora extra). Sem isso, uma pausa ainda aberta (ex.: Limpeza no fim
+        // do dia) continuava "subindo" a noite inteira.
+        const pStart = new Date(p.createdAt).getTime();
+        const pEnd = pStart + p.durationMs;
+        const cov: Array<[number, number]> = [];
+        const sched = getScheduledWindow(pStart, l.id);
+        if (sched) cov.push(sched);
+        for (const ws of workSessions) {
+          if (ws.lineId !== l.id) continue;
+          const a = new Date(ws.startedAt).getTime();
+          if (isNaN(a) || toLocalDateStr(ws.startedAt) !== selectedDate) continue;
+          const b = ws.endedAt ? new Date(ws.endedAt).getTime() : Date.now();
+          if (b > a) cov.push([a, b]);
+        }
+        cov.sort((x, y) => x[0] - y[0]);
+        let clippedMs = 0;
+        let lastEnd = -Infinity;
+        for (const [a, b] of cov) {
+          const s2 = Math.max(pStart, a, lastEnd);
+          const e2 = Math.min(pEnd, b);
+          if (e2 > s2) clippedMs += e2 - s2;
+          lastEnd = Math.max(lastEnd, b);
+        }
+        if (clippedMs < 60000) continue;
+        const cur = map.get(k) || { count: 0, ms: 0, details: [] };
         cur.count += 1;
-        cur.ms += p.durationMs;
+        cur.ms += clippedMs;
+        // Observação digitada pelo líder (ex.: o que foi o "Outro")
+        const obs = String(p.observation || '').trim();
+        if (obs) {
+          cur.details.push({
+            at: p.createdAt,
+            line: l.name,
+            ms: clippedMs,
+            obs,
+            op: p.opId ? (ops.find(o => String(o.id) === String(p.opId))?.number || '') : '',
+          });
+        }
         map.set(k, cur);
       }
     }
-    return Array.from(map.entries()).map(([reason, v]) => ({ reason, ...v })).sort((a, b) => b.ms - a.ms);
-  }, [envaseLines, dayTime]);
+    return Array.from(map.entries())
+      .map(([reason, v]) => ({ reason, ...v, details: v.details.sort((x, y) => x.at.localeCompare(y.at)) }))
+      .sort((a, b) => b.ms - a.ms);
+  }, [envaseLines, dayTime, ops, workSessions, selectedDate]);
 
   // ---------- Evolução do Envase no mês ----------
   const monthDays = useMemo(() => {
@@ -369,6 +422,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     atrasos: dayHasAppOcc ? dayOccTotals.atraso : manual.atrasos,
     saidas: dayHasAppOcc ? dayOccTotals.saida_antecipada : manual.saidasAntecipadas,
     horaExtra: dayOccTotals.hora_extra,
+    retornos: dayOccTotals.retorno,
     freeBalde: dayOccTotals.free_balde,
     acidentes: dayOccTotals.acidente,
     incidentes: dayOccTotals.incidente,
@@ -376,7 +430,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
 
   // ---------- Quadro do dia: total do mês (até a data) ----------
   const monthTotals = useMemo(() => {
-    const t = { atestados: 0, faltas: 0, atrasos: 0, saidas: 0, horaExtra: 0, freeBalde: 0, acidentes: 0, incidentes: 0 };
+    const t = { atestados: 0, faltas: 0, atrasos: 0, saidas: 0, horaExtra: 0, retornos: 0, freeBalde: 0, acidentes: 0, incidentes: 0 };
     const byDay = new Map<string, StaffOccurrence[]>();
     for (const o of monthOccurrences) {
       if (o.date < monthStart || o.date > selectedDate) continue;
@@ -395,6 +449,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
       t.atrasos += hasApp ? sum.atraso : Number(rep?.atrasos) || 0;
       t.saidas += hasApp ? sum.saida_antecipada : Number(rep?.saidasAntecipadas) || 0;
       t.horaExtra += sum.hora_extra;
+      t.retornos += sum.retorno;
       t.freeBalde += sum.free_balde;
       t.acidentes += sum.acidente;
       t.incidentes += sum.incidente;
@@ -403,7 +458,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
   }, [monthOccurrences, monthReports, manual, monthStart, selectedDate]);
 
   const occLineName = (id: string) =>
-    id === 'setor-manipulacao' ? 'Manipulação' : id === 'setor-pesagem' ? 'Pesagem' : lines.find(l => l.id === id)?.name || id;
+    id === 'setor-manipulacao' ? 'Manipulação' : id === 'setor-pesagem' ? 'Pesagem' : id === 'setor-estoque-mepa' ? 'Estoque ME/PA' : id === 'setor-estoque-mp' ? 'Estoque MP' : id === 'setor-estoque' ? 'Estoque' : lines.find(l => l.id === id)?.name || id;
   const safetyOcc = dayOccurrences.filter(o => o.type === 'acidente' || o.type === 'incidente');
 
   const filledPontos = manual.pontos.filter(p => p.texto.trim());
@@ -413,6 +468,8 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
   const handlePrint = () => {
     const sheet = sheetRef.current;
     if (!sheet) return;
+    // salva em segundo plano (a janela precisa abrir na hora do clique, senão o navegador bloqueia)
+    saveReport();
     const w = window.open('', '_blank');
     if (!w) {
       setSaveMsg({ type: 'error', text: 'O navegador bloqueou a janela de impressão — libere pop-ups para este site.' });
@@ -428,13 +485,88 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     setTimeout(go, 600);
   };
 
-  // ---------- Estilos da folha (claro, igual ao PDF) ----------
-  const th = 'border border-[#b7c4d6] bg-[#dce6f1] px-2 py-1 text-left font-bold text-[#1f2937]';
+  // ---------- Baixar PDF direto (sem abrir a impressão) ----------
+  // Carrega sob demanda html-to-image (foto da folha, renderizada pelo próprio
+  // navegador — funciona com as cores do Tailwind) e jsPDF (monta o A4).
+  const [downloading, setDownloading] = useState(false);
+  const loadScript = (src: string) => new Promise<void>((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const el = document.createElement('script');
+    el.src = src;
+    el.async = true;
+    el.onload = () => resolve();
+    el.onerror = () => reject(new Error(`Falha ao carregar ${src}`));
+    document.head.appendChild(el);
+  });
+  const handleDownload = async () => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    setDownloading(true);
+    setSaveMsg(null);
+    const saved = await saveReport();
+    try {
+      const w = window as any;
+      if (!w.htmlToImage) await loadScript('https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js');
+      if (!w.jspdf?.jsPDF) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+      const dataUrl: string = await w.htmlToImage.toPng(sheet, {
+        pixelRatio: 2,
+        backgroundColor: '#ffffff',
+        style: { boxShadow: 'none', borderRadius: '0', margin: '0' },
+      });
+      const img = new Image();
+      await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('imagem')); img.src = dataUrl; });
+      const pdf = new w.jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const margin = 8;
+      const pageW = 210 - margin * 2;
+      const pageH = 297 - margin * 2;
+      const imgH = (img.height * pageW) / img.width;
+      // Folha maior que uma página: repete a imagem deslocada em cada página
+      let offset = 0;
+      let page = 0;
+      while (offset < imgH - 0.5) {
+        if (page > 0) pdf.addPage();
+        pdf.addImage(dataUrl, 'PNG', margin, margin - offset, pageW, imgH);
+        // cobre as margens (o pedaço da imagem que vaza para fora da área útil)
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, 210, margin, 'F');
+        pdf.rect(0, 297 - margin, 210, margin, 'F');
+        offset += pageH;
+        page++;
+      }
+      pdf.save(`Relatorio_Diario_${selectedDate.split('-').reverse().join('-')}.pdf`);
+      if (saved) setSaveMsg({ type: 'ok', text: 'Relatório salvo e PDF baixado.' });
+    } catch (err) {
+      console.error('[DailyReport] Erro ao gerar PDF:', err);
+      setSaveMsg({ type: 'error', text: 'Não foi possível gerar o PDF direto (sem internet para carregar o gerador?). Use "Imprimir" e escolha "Salvar como PDF".' });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // ---------- Valores extras para a folha ----------
+  const workdaysOfMonth = (() => {
+    let n = 0;
+    const last = new Date(year, month, 0).getDate();
+    for (let i = 1; i <= last; i++) { const w = new Date(year, month - 1, i).getDay(); if (w !== 0 && w !== 6) n++; }
+    return n;
+  })();
+  const dayGoal = monthly.goal && workdaysOfMonth > 0 ? Math.round(monthly.goal / workdaysOfMonth) : null;
+  const dayGoalPct = dayGoal ? Math.round((indicators.envaseDia / dayGoal) * 1000) / 10 : null;
+  const monthGoalPct = monthly.goal ? Math.round((indicators.envaseMes / monthly.goal) * 1000) / 10 : null;
+  const pauseTotalMs = pauseRows.reduce((a2, p) => a2 + p.ms, 0);
+  const tone = (pct: number | null, good = 90, warn = 70) =>
+    pct === null ? '#6b7280' : pct >= good ? '#059669' : pct >= warn ? '#d97706' : '#dc2626';
+  const weekday = (() => { const [y, m, d] = selectedDate.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'long' }); })();
+  const monthMaxDay = Math.max(1, dayGoal || 0, ...monthDays.map(d => d.qty));
+  const monthlyMax = Math.max(1, monthly.goal || 0, ...monthly.rows.map(r => r.qty));
+
+  // ---------- Estilos da folha (clara, pronta para imprimir) ----------
+  const th = 'px-2 py-1.5 text-left text-[9.5px] font-bold uppercase tracking-wide text-[#475569] border-b-2 border-[#cbd5e1]';
   const thc = th.replace('text-left', 'text-center');
-  const td = 'border border-[#c9d1dc] px-2 py-1 text-[#1f2937]';
+  const td = 'px-2 py-1.5 text-[#1f2937] border-b border-[#e5e7eb]';
   const tdc = td + ' text-center';
-  const tdTotal = 'border border-[#c9d1dc] bg-[#e2efda] px-2 py-1 text-center font-semibold text-[#1f2937]';
-  const h2 = 'text-[13px] font-bold text-[#111827] mt-4 mb-1.5';
+  const h2 = 'flex items-center gap-2 text-[12px] font-black uppercase tracking-wider text-[#0f172a] mt-5 mb-2 pb-1 border-b border-[#e2e8f0]';
+  const num = (n: number) => <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-[#0f172a] text-white text-[10px] font-black">{n}</span>;
 
   const input = 'w-full h-9 bg-[#0b0b0e] border border-[#25252c] rounded-lg px-2.5 text-xs text-[#f4f4f5]';
 
@@ -452,19 +584,19 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1 bg-[#0e0e12] border border-[#222228] rounded-xl p-1">
-            <button type="button" onClick={() => setSelectedDate(d => shiftDay(d, -1))} className="p-1.5 rounded-lg text-[#a1a1aa] hover:text-white hover:bg-white/5" title="Dia anterior">
+            <button type="button" onClick={() => goToDate(shiftDay(selectedDate, -1))} className="p-1.5 rounded-lg text-[#a1a1aa] hover:text-white hover:bg-white/5" title="Dia anterior">
               <ChevronLeft className="w-4 h-4" />
             </button>
             <input
               type="date"
               value={selectedDate}
               max={todayStr}
-              onChange={e => e.target.value && setSelectedDate(e.target.value)}
+              onChange={e => e.target.value && goToDate(e.target.value)}
               className="h-8 bg-transparent text-xs text-[#f4f4f5] px-1 [color-scheme:dark]"
             />
             <button
               type="button"
-              onClick={() => setSelectedDate(d => (d < todayStr ? shiftDay(d, 1) : d))}
+              onClick={() => selectedDate < todayStr && goToDate(shiftDay(selectedDate, 1))}
               disabled={selectedDate >= todayStr}
               className="p-1.5 rounded-lg text-[#a1a1aa] hover:text-white hover:bg-white/5 disabled:opacity-30"
               title="Próximo dia"
@@ -472,21 +604,27 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving || !dirty}
-            className="h-9 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-bold flex items-center gap-1.5"
-          >
-            {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
-            {dirty ? 'Salvar' : savedForDay ? 'Salvo' : 'Salvar'}
-          </button>
+          {dirty && (
+            <span className="text-[11px] text-amber-300 font-semibold" title="As alterações são salvas automaticamente ao baixar ou imprimir">
+              alterações não salvas
+            </span>
+          )}
+          {!dirty && savedForDay && <span className="text-[11px] text-emerald-400 font-semibold">salvo</span>}
           <button
             type="button"
             onClick={handlePrint}
             className="h-9 px-3 rounded-xl bg-[#1a1a22] hover:bg-[#23232e] border border-[#2c2c3c] text-[#f4f4f5] text-xs font-bold flex items-center gap-1.5"
           >
-            <Printer className="w-3.5 h-3.5" /> Baixar PDF / Imprimir
+            <Printer className="w-3.5 h-3.5" /> Imprimir
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            disabled={downloading}
+            className="h-9 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5"
+          >
+            {downloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {downloading ? 'Gerando PDF...' : 'Baixar PDF'}
           </button>
         </div>
       </div>
@@ -503,46 +641,29 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
         {/* ---------------- Preenchimento (Coordenação) ---------------- */}
         <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-4">
           <div>
-            <h3 className="text-xs font-black text-white uppercase tracking-wider mb-2">Quadro do dia</h3>
-            <div className="grid grid-cols-2 gap-2">
+            <h3 className="text-xs font-black text-white uppercase tracking-wider mb-1">Quadro do dia</h3>
+            <p className="text-[11px] text-[#71717a] mb-2">Automático — vem das Ocorrências de Pessoal lançadas pelos líderes.</p>
+            <div className="grid grid-cols-3 gap-1.5">
               {([
-                ['atestados', 'Atestados'],
-                ['faltas', 'Faltas'],
-                ['atrasos', 'Atrasos'],
-                ['saidasAntecipadas', 'Saídas antecipadas'],
-              ] as const).map(([key, label]) => (
-                <label key={key} className="space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-[#a1a1aa]">{label}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    inputMode="numeric"
-                    value={String(manual[key] ?? 0)}
-                    onChange={e => updateManual({ [key]: Math.max(0, parseInt(e.target.value || '0', 10) || 0) } as Partial<DailyReportManual>)}
-                    className={input}
-                  />
-                </label>
+                ['Faltas', dayQuadro.faltas],
+                ['Atestados', dayQuadro.atestados],
+                ['Atrasos', dayQuadro.atrasos],
+                ['Saídas antec.', dayQuadro.saidas],
+                ['Retornos', dayQuadro.retornos],
+                ['Hora extra', dayQuadro.horaExtra],
+              ] as [string, number][]).map(([label, v]) => (
+                <div key={label} className="bg-[#0b0b0e] border border-[#25252c] rounded-lg px-2 py-1.5 text-center">
+                  <div className="text-[9px] uppercase font-bold text-[#71717a]">{label}</div>
+                  <div className={`text-base font-black font-mono ${v > 0 ? 'text-white' : 'text-[#52525b]'}`}>{v}</div>
+                </div>
               ))}
             </div>
-            <p className={`text-[11px] mt-2 flex items-start gap-1.5 ${dayHasAppOcc ? 'text-emerald-300' : 'text-[#71717a]'}`}>
-              <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
-              <span>
-                {dayHasAppOcc
-                  ? `Os líderes lançaram ${dayOccurrences.length} ocorrência(s) hoje — o quadro usa os lançamentos do app; os campos acima valem só para dias sem lançamento.`
-                  : 'Sem lançamentos dos líderes neste dia — o quadro usa os números digitados acima.'}
-              </span>
-            </p>
-            <p className="text-[11px] text-[#71717a] mt-1 flex items-start gap-1.5">
-              <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
-              <span>
-                Faltas lançadas pelos líderes nas linhas de envase neste dia: <strong className="text-[#d4d4d8]">{appAbsences}</strong>
-                {appAbsences > 0 && manual.faltas !== appAbsences && (
-                  <button type="button" onClick={() => updateManual({ faltas: appAbsences })} className="ml-1.5 text-blue-400 hover:text-blue-300 font-bold">
-                    usar esse número
-                  </button>
-                )}
-              </span>
-            </p>
+            {!dayHasAppOcc && (manual.faltas + manual.atestados + manual.atrasos + manual.saidasAntecipadas) > 0 && (
+              <p className="text-[11px] mt-2 text-amber-300 flex items-start gap-1.5">
+                <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>Dia antigo, sem lançamentos no app — o quadro usa os números digitados naquela época.</span>
+              </p>
+            )}
           </div>
 
           <div>
@@ -591,125 +712,90 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               value={manual.seguranca}
               onChange={e => updateManual({ seguranca: e.target.value })}
               rows={2}
+              placeholder={`Em branco = "${DEFAULT_SAFETY}"`}
+              className="w-full bg-[#0b0b0e] border border-[#25252c] rounded-lg p-2 text-xs text-[#f4f4f5] resize-y"
+            />
+            <h3 className="text-xs font-black text-white uppercase tracking-wider mt-3 mb-2">DSS</h3>
+            <textarea
+              value={manual.dss || ''}
+              onChange={e => updateManual({ dss: e.target.value })}
+              rows={2}
+              placeholder="Tema do Diálogo de Segurança — em branco = não aparece no relatório"
               className="w-full bg-[#0b0b0e] border border-[#25252c] rounded-lg p-2 text-xs text-[#f4f4f5] resize-y"
             />
           </div>
         </div>
 
-        {/* ---------------- Folha do relatório (igual ao PDF) ---------------- */}
+        {/* ---------------- Folha do relatório (A4, pronta para imprimir) ---------------- */}
         <div className="overflow-x-auto">
-          <div ref={sheetRef} className="report-sheet bg-white text-[#1f2937] rounded-xl shadow-xl mx-auto max-w-[820px] p-8 text-[11.5px] leading-snug font-sans">
-            <div className="text-center">
-              <div className="text-[18px] tracking-wide text-[#374151]"><span className="font-black">YBERA</span><span className="font-light">GROUP</span></div>
-              <div className="text-[15px] font-bold text-[#111827] mt-2">RELATÓRIO DIÁRIO DE PRODUÇÃO</div>
-              <div className="text-[11px] text-[#6b7280]">{MONTHS[month - 1]} • {ddmm(selectedDate)}</div>
+          <div ref={sheetRef} className="report-sheet bg-white text-[#1f2937] rounded-xl shadow-xl mx-auto max-w-[820px] p-8 text-[11px] leading-snug font-sans">
+            {/* Cabeçalho */}
+            <div className="flex items-end justify-between border-b-4 border-[#0f172a] pb-3">
+              <div>
+                <div className="text-[17px] tracking-wide text-[#0f172a]"><span className="font-black">YBERA</span><span className="font-light">GROUP</span></div>
+                <div className="text-[15px] font-black text-[#0f172a] mt-1">Relatório Diário de Produção</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[22px] font-black text-[#0f172a] leading-none">{selectedDate.split('-').reverse().join('/')}</div>
+                <div className="text-[11px] text-[#64748b] capitalize mt-1">{weekday}</div>
+              </div>
             </div>
 
-            {/* 1. Indicadores */}
-            <div className={h2}>1. Indicadores de produção</div>
-            <table className="w-full border-collapse">
-              <thead>
-                <tr><th className={th}>Indicador</th><th className={thc}>Resultado do dia</th><th className={thc}>Acumulado de {MONTHS[month - 1].toLowerCase()}</th></tr>
-              </thead>
-              <tbody>
-                <tr><td className={td + ' font-bold'}>Pesagem</td><td className={tdc}>{nf(indicators.pesagemDia)} OPs</td><td className={tdc}>{nf(indicators.pesagemMes)} OPs</td></tr>
-                <tr><td className={td + ' font-bold'}>Manipulação</td><td className={tdc}>{nf(indicators.manipDia)} kg</td><td className={tdc}>{nf(indicators.manipMes)} kg</td></tr>
-                <tr><td className={td + ' font-bold'}>Envase</td><td className={tdc}>{nf(indicators.envaseDia)} un.</td><td className={tdc}>{nf(indicators.envaseMes)} un.</td></tr>
-                <tr><td className={td + ' font-bold'}>Rendimento do Envase</td><td className={tdc}>{pctf(indicators.rendDia)}</td><td className={tdc}>{pctf(indicators.rendMes)}</td></tr>
-                <tr><td className={td + ' font-bold'}>Sleev (acabamento)</td><td className={tdc}>{nf(indicators.sleeveDia)} un.</td><td className={tdc}>{nf(indicators.sleeveMes)} un.</td></tr>
-              </tbody>
-            </table>
-
-            {/* 2. Quadro do dia */}
-            <div className={h2}>2. Quadro do dia</div>
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  <th className={thc}>Período</th><th className={thc}>Atestados</th><th className={thc}>Faltas</th><th className={thc}>Atrasos</th>
-                  <th className={thc}>Saídas antecipadas</th><th className={thc}>Hora extra</th><th className={thc}>Free do balde</th><th className={thc}>Acidentes / Incidentes</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td className={tdc + ' font-bold'}>Hoje</td>
-                  <td className={tdc}>{nf(dayQuadro.atestados)}</td>
-                  <td className={tdc}>{nf(dayQuadro.faltas)}</td>
-                  <td className={tdc}>{nf(dayQuadro.atrasos)}</td>
-                  <td className={tdc}>{nf(dayQuadro.saidas)}</td>
-                  <td className={tdc}>{nf(dayQuadro.horaExtra)}</td>
-                  <td className={tdc}>{nf(dayQuadro.freeBalde)}</td>
-                  <td className={tdc}>{nf(dayQuadro.acidentes)} / {nf(dayQuadro.incidentes)}</td>
-                </tr>
-                <tr>
-                  <td className={tdTotal}>Total do mês</td>
-                  <td className={tdTotal}>{nf(monthTotals.atestados)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.faltas)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.atrasos)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.saidas)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.horaExtra)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.freeBalde)}</td>
-                  <td className={tdTotal}>{nf(monthTotals.acidentes)} / {nf(monthTotals.incidentes)}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            <div className="text-[12.5px] font-bold text-[#111827] mt-3 mb-1">Ocorrências de pessoal do dia</div>
-            {dayOccurrences.length === 0 ? (
-              <p className="text-[#9ca3af] italic">Nenhuma ocorrência de pessoal lançada no dia.</p>
-            ) : (
-              <>
-                <table className="w-full border-collapse">
-                  <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={th}>Hora</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
-                  <tbody>
-                    {dayOccurrences.map(o => (
-                      <tr key={o.id}>
-                        <td className={td}>{occLineName(o.lineId)}</td>
-                        <td className={td}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
-                        <td className={td}>{o.occurredTime || '—'}</td>
-                        <td className={td}>{o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}</td>
-                        <td className={td}>{o.reason || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )}
-
-            {/* 3. Principais pontos */}
-            <div className={h2}>3. Principais pontos do dia</div>
-            {filledPontos.length === 0 ? (
-              <p className="text-[#9ca3af] italic">Nenhum ponto registrado.</p>
-            ) : (
-              <div className="space-y-0.5">
-                {filledPontos.map((p, i) => (
-                  <p key={i}>{p.titulo.trim() && <strong>{p.titulo.trim()}: </strong>}{p.texto.trim()}</p>
-                ))}
+            {/* 1. Destaques */}
+            <div className={h2}>{num(1)} Destaques do dia</div>
+            <div className="grid grid-cols-3 gap-2">
+              {/* Envase */}
+              <div className="rounded-lg border border-[#bfdbfe] bg-[#eff6ff] p-3 col-span-1">
+                <div className="text-[9.5px] font-black uppercase tracking-wider text-[#1d4ed8]">Envase</div>
+                <div className="text-[22px] font-black text-[#0f172a] leading-tight">{nf(indicators.envaseDia)} <span className="text-[11px] font-semibold text-[#64748b]">un</span></div>
+                {dayGoal ? (
+                  <>
+                    <div className="h-1.5 bg-white rounded-full mt-1 overflow-hidden"><div className="h-full rounded-full" style={{ width: `${Math.min(100, dayGoalPct || 0)}%`, background: tone(dayGoalPct, 100, 80) }} /></div>
+                    <div className="text-[10px] text-[#475569] mt-1">Meta do dia {nf(dayGoal)} · <strong style={{ color: tone(dayGoalPct, 100, 80) }}>{pctf(dayGoalPct)}</strong></div>
+                  </>
+                ) : <div className="text-[10px] text-[#64748b] mt-1">Sem meta cadastrada</div>}
+                <div className="text-[10px] text-[#475569] mt-0.5">Mês: <strong>{nf(indicators.envaseMes)} un</strong>{monthGoalPct !== null ? ` (${pctf(monthGoalPct)} da meta)` : ''}</div>
               </div>
-            )}
-
-            <div className="text-[12.5px] font-bold text-[#111827] mt-3 mb-1">Segurança</div>
-            {safetyOcc.length > 0 ? (
-              <div className="space-y-0.5">
-                {safetyOcc.map(o => (
-                  <p key={o.id}><strong>{STAFF_OCCURRENCE_LABELS[o.type]}</strong> — {occLineName(o.lineId)}{o.employeeName ? ` · ${o.employeeName}` : ''}{o.reason ? `: ${o.reason}` : ''}</p>
-                ))}
-                {manual.seguranca.trim() && manual.seguranca.trim() !== DEFAULT_SAFETY && <p>{manual.seguranca.trim()}</p>}
+              {/* Rendimento + Disponibilidade */}
+              <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
+                <div className="text-[9.5px] font-black uppercase tracking-wider text-[#475569]">Rendimento do Envase</div>
+                <div className="text-[22px] font-black leading-tight" style={{ color: tone(indicators.rendDia, 95, 85) }}>{pctf(indicators.rendDia)}</div>
+                <div className="text-[10px] text-[#475569]">Mês: <strong>{pctf(indicators.rendMes)}</strong></div>
+                <div className="text-[9.5px] text-[#64748b] mt-0.5">produzido ÷ esperado das OPs concluídas</div>
               </div>
-            ) : (
-              <p>{manual.seguranca.trim() || DEFAULT_SAFETY}</p>
-            )}
+              <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
+                <div className="text-[9.5px] font-black uppercase tracking-wider text-[#475569]">Disponibilidade das linhas</div>
+                <div className="text-[22px] font-black leading-tight" style={{ color: tone(lineAvg?.disp ?? null, 85, 65) }}>{lineAvg ? pctf(lineAvg.disp) : '—'}</div>
+                <div className="text-[10px] text-[#475569]">Ociosidade: <strong>{lineAvg ? pctf(lineAvg.idlePct) : '—'}</strong></div>
+                <div className="text-[9.5px] text-[#64748b] mt-0.5">média {lineAvg ? (lineAvg.n === 1 ? 'de 1 linha' : `das ${lineAvg.n} linhas`) : 'das linhas'}</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-2">
+              {[
+                { label: 'Manipulação', dia: `${nf(indicators.manipDia)} kg`, mes: `${nf(indicators.manipMes)} kg`, color: '#0e7490', bg: '#ecfeff', border: '#a5f3fc' },
+                { label: 'Pesagem', dia: `${nf(indicators.pesagemDia)} OSMs`, mes: `${nf(indicators.pesagemMes)} OSMs`, color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+                { label: 'Sleev (acabamento)', dia: `${nf(indicators.sleeveDia)} un`, mes: `${nf(indicators.sleeveMes)} un`, color: '#7e22ce', bg: '#faf5ff', border: '#e9d5ff' },
+              ].map(k => (
+                <div key={k.label} className="rounded-lg border px-3 py-2 flex items-center justify-between" style={{ background: k.bg, borderColor: k.border }}>
+                  <div>
+                    <div className="text-[9.5px] font-black uppercase tracking-wider" style={{ color: k.color }}>{k.label}</div>
+                    <div className="text-[15px] font-black text-[#0f172a]">{k.dia}</div>
+                  </div>
+                  <div className="text-right text-[10px] text-[#475569]">Mês<br /><strong>{k.mes}</strong></div>
+                </div>
+              ))}
+            </div>
 
-            {/* 4. Linhas de envase (dados do app) */}
-            <div className={h2}>4. Linhas de envase no dia</div>
+            {/* 2. Linhas de envase */}
+            <div className={h2}>{num(2)} Linhas de envase no dia</div>
             <table className="w-full border-collapse">
               <thead>
                 <tr>
                   <th className={th}>Linha</th>
                   <th className={thc}>Produzido</th>
-                  <th className={thc}>Meta do dia</th>
                   <th className={thc}>Trabalhado</th>
                   <th className={thc}>Ocioso</th>
-                  <th className={thc}>Disp.</th>
+                  <th className={th + ' w-[150px]'}>Disponibilidade</th>
                   <th className={thc}>Hora extra</th>
                   <th className={thc}>Setups</th>
                   <th className={thc}>Equipe</th>
@@ -718,67 +804,186 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               <tbody>
                 {lineRows.map(r => (
                   <tr key={r.id}>
-                    <td className={td + ' font-bold'}>{r.name}{/sle+v/i.test(r.id) || /sle+v/i.test(r.name) ? <span className="font-normal text-[#6b7280]"> (acabamento)</span> : null}</td>
-                    <td className={tdc}>{nf(r.produced)} un.</td>
-                    <td className={tdc}>{r.goal > 0 ? `${nf(r.goal)} (${pctf(r.goalPct)})` : '—'}</td>
+                    <td className={td + ' font-bold'}>{r.name}{/sle+v/i.test(r.id) || /sle+v/i.test(r.name) ? <span className="block font-normal text-[9.5px] text-[#64748b]">acabamento</span> : null}</td>
+                    <td className={tdc}>
+                      <strong>{nf(r.produced)}</strong> un
+                      {r.goal > 0 && <span className="block text-[9.5px]" style={{ color: tone(r.goalPct, 100, 80) }}>meta {nf(r.goal)} · {pctf(r.goalPct)}</span>}
+                    </td>
                     <td className={tdc}>{r.working > 0 ? formatMsToHoursMinutes(r.working) : '—'}</td>
-                    <td className={tdc}>{r.working + r.idle > 0 ? formatMsToHoursMinutes(r.idle) : '—'}</td>
-                    <td className={tdc}>{pctf(r.disp)}</td>
+                    <td className={tdc}>{r.working + r.idle > 0 ? <>{formatMsToHoursMinutes(r.idle)}<span className="block text-[9.5px] text-[#64748b]">{pctf(r.idlePct)}</span></> : '—'}</td>
+                    <td className={td}>
+                      {r.disp !== null ? (
+                        <div className="flex items-center gap-1.5">
+                          <div className="flex-1 h-2 bg-[#f1f5f9] rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${r.disp}%`, background: tone(r.disp, 85, 65) }} /></div>
+                          <strong className="w-11 text-right" style={{ color: tone(r.disp, 85, 65) }}>{pctf(r.disp)}</strong>
+                        </div>
+                      ) : '—'}
+                    </td>
                     <td className={tdc}>{r.overtime >= 60000 ? formatMsToHoursMinutes(r.overtime) : '—'}</td>
-                    <td className={tdc}>{r.setups > 0 ? `${r.setups} · ${formatMsToHoursMinutes(r.setupMs)}` : '—'}</td>
-                    <td className={tdc}>{r.team ? `${r.team.present}${r.team.absent > 0 ? ` (${r.team.absent} falta${r.team.absent > 1 ? 's' : ''})` : ''}` : '—'}</td>
+                    <td className={tdc}>{r.setups > 0 ? <>{r.setups}<span className="block text-[9.5px] text-[#64748b]">{formatMsToHoursMinutes(r.setupMs)}</span></> : '—'}</td>
+                    <td className={tdc}>{r.team ? <>{r.team.present}{r.team.absent > 0 && <span className="block text-[9.5px] text-[#dc2626]">{r.team.absent} falta{r.team.absent > 1 ? 's' : ''}</span>}</> : '—'}</td>
                   </tr>
                 ))}
+                {lineAvg && (
+                  <tr className="bg-[#f1f5f9]">
+                    <td className={td + ' font-black'}>Média {lineAvg.n === 1 ? '(1 linha)' : `das ${lineAvg.n} linhas`}</td>
+                    <td className={tdc}>—</td>
+                    <td className={tdc + ' font-bold'}>{formatMsToHoursMinutes(lineAvg.working)}</td>
+                    <td className={tdc + ' font-bold'}>{formatMsToHoursMinutes(lineAvg.idle)}<span className="block text-[9.5px]">{pctf(lineAvg.idlePct)}</span></td>
+                    <td className={td}>
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex-1 h-2 bg-white rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${lineAvg.disp}%`, background: tone(lineAvg.disp, 85, 65) }} /></div>
+                        <strong className="w-11 text-right" style={{ color: tone(lineAvg.disp, 85, 65) }}>{pctf(lineAvg.disp)}</strong>
+                      </div>
+                    </td>
+                    <td className={tdc}>—</td><td className={tdc}>—</td><td className={tdc}>—</td>
+                  </tr>
+                )}
               </tbody>
             </table>
+            <p className="text-[9.5px] text-[#64748b] mt-1">Disponibilidade = trabalhado ÷ (trabalhado + ocioso). Ociosidade é o complemento. Intervalos tolerados (almoço até 1h, café até 15 min) não contam.</p>
 
-            {/* 5. Paradas */}
-            <div className={h2}>5. Paradas do Envase</div>
+            {/* 3. Paradas */}
+            <div className={h2}>{num(3)} Paradas do Envase {pauseTotalMs > 0 && <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-[#64748b]">total {formatMsToHoursMinutes(pauseTotalMs)}</span>}</div>
             {pauseRows.length === 0 ? (
-              <p className="text-[#9ca3af] italic">Nenhuma parada registrada.</p>
+              <p className="text-[#94a3b8] italic">Nenhuma parada registrada.</p>
             ) : (
-              <table className="w-full border-collapse">
-                <thead><tr><th className={th}>Motivo</th><th className={thc}>Paradas</th><th className={thc}>Tempo</th></tr></thead>
+              <div className="space-y-1">
+                {pauseRows.map(p => (
+                  <div key={p.reason}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-44 shrink-0 truncate font-semibold" title={p.reason}>{p.reason}</span>
+                      <div className="flex-1 h-3 bg-[#f1f5f9] rounded overflow-hidden"><div className="h-full rounded bg-[#f59e0b]" style={{ width: `${Math.max(2, (p.ms / (pauseRows[0].ms || 1)) * 100)}%` }} /></div>
+                      <span className="w-32 shrink-0 text-right"><strong>{formatMsToHoursMinutes(p.ms)}</strong> <span className="text-[#64748b]">· {p.count}x · {Math.round((p.ms / (pauseTotalMs || 1)) * 100)}%</span></span>
+                    </div>
+                    {/* O que o líder escreveu em cada parada (principalmente no "Outro") */}
+                    {p.details.length > 0 && (
+                      <ul className="ml-4 mt-0.5 mb-1 pl-2 border-l-2 border-[#fde68a] space-y-0.5">
+                        {p.details.map((d, i) => (
+                          <li key={i} className="text-[10px] text-[#334155]">
+                            <span className="font-mono text-[#64748b]">{new Date(d.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                            {' · '}{d.line}{d.op ? ` · OP ${d.op}` : ''}{' · '}{formatMsToHoursMinutes(d.ms)}
+                            {' — '}<span className="italic">{d.obs}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {p.details.length === 0 && /^outro/i.test(p.reason) && (
+                      <p className="ml-4 text-[10px] italic text-[#dc2626]">Sem descrição informada pelo líder.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 4. Pessoas */}
+            <div className={h2}>{num(4)} Pessoas</div>
+            <div className="grid grid-cols-7 gap-1.5">
+              {[
+                ['Faltas', dayQuadro.faltas, monthTotals.faltas, '#dc2626'],
+                ['Atestados', dayQuadro.atestados, monthTotals.atestados, '#0284c7'],
+                ['Atrasos', dayQuadro.atrasos, monthTotals.atrasos, '#d97706'],
+                ['Saídas antec.', dayQuadro.saidas, monthTotals.saidas, '#ea580c'],
+                ['Retornos', dayQuadro.retornos, monthTotals.retornos, '#0d9488'],
+                ['Hora extra', dayQuadro.horaExtra, monthTotals.horaExtra, '#7c3aed'],
+                ['Acid. / Incid.', `${dayQuadro.acidentes}/${dayQuadro.incidentes}`, `${monthTotals.acidentes}/${monthTotals.incidentes}`, '#b91c1c'],
+              ].map(([label, d, m, color]) => (
+                <div key={label as string} className="rounded-lg border border-[#e2e8f0] px-2 py-1.5 text-center">
+                  <div className="text-[9px] font-bold uppercase text-[#64748b] leading-tight">{label as string}</div>
+                  <div className="text-[17px] font-black leading-tight" style={{ color: (typeof d === 'number' ? d > 0 : d !== '0/0') ? (color as string) : '#94a3b8' }}>{typeof d === 'number' ? nf(d) : d}</div>
+                  <div className="text-[9px] text-[#64748b]">mês: {typeof m === 'number' ? nf(m) : m}</div>
+                </div>
+              ))}
+            </div>
+            {dayOccurrences.length > 0 && (
+              <table className="w-full border-collapse mt-2">
+                <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={thc}>Hora</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
                 <tbody>
-                  {pauseRows.map(p => (
-                    <tr key={p.reason}><td className={td}>{p.reason}</td><td className={tdc}>{p.count}</td><td className={tdc}>{formatMsToHoursMinutes(p.ms)}</td></tr>
+                  {dayOccurrences.map(o => (
+                    <tr key={o.id}>
+                      <td className={td}>{occLineName(o.lineId)}</td>
+                      <td className={td + ' font-semibold'}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
+                      <td className={tdc}>{o.occurredTime || '—'}</td>
+                      <td className={td}>{o.employeeName || '—'}</td>
+                      <td className={td + ' text-[#475569]'}>{o.reason || '—'}</td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
             )}
 
-            {/* 6 e 7. Evolução no mês + Produção mensal */}
-            <div className="grid grid-cols-2 gap-6 items-start">
-              <div>
-                <div className={h2}>6. Evolução do Envase no mês</div>
-                <table className="w-full border-collapse">
-                  <thead><tr><th className={thc}>Dia</th><th className={thc}>Envase (un.)</th></tr></thead>
-                  <tbody>
-                    {monthDays.length === 0 ? (
-                      <tr><td className={tdc} colSpan={2}>Sem produção no mês</td></tr>
-                    ) : monthDays.map(d => (
-                      <tr key={d.day}><td className={tdc}>{ddmm(d.day)}</td><td className={tdc}>{nf(d.qty)}</td></tr>
-                    ))}
-                    <tr><td className={tdTotal}>MÉDIA</td><td className={tdTotal}>{nf(monthAvg)} un.</td></tr>
-                  </tbody>
-                </table>
+            {/* 5. Pontos e segurança */}
+            <div className={h2}>{num(5)} Principais pontos e segurança</div>
+            <div className={`rounded-lg px-3 py-2 mb-2 border ${safetyOcc.length > 0 ? 'bg-[#fef2f2] border-[#fecaca]' : 'bg-[#f0fdf4] border-[#bbf7d0]'}`}>
+              <div className={`text-[9.5px] font-black uppercase tracking-wider ${safetyOcc.length > 0 ? 'text-[#b91c1c]' : 'text-[#15803d]'}`}>Segurança</div>
+              {safetyOcc.length > 0 ? (
+                <div className="space-y-0.5 mt-0.5">
+                  {safetyOcc.map(o => (
+                    <p key={o.id}><strong>{STAFF_OCCURRENCE_LABELS[o.type]}</strong> — {occLineName(o.lineId)}{o.employeeName ? ` · ${o.employeeName}` : ''}{o.reason ? `: ${o.reason}` : ''}</p>
+                  ))}
+                  {manual.seguranca.trim() && manual.seguranca.trim() !== DEFAULT_SAFETY && <p>{manual.seguranca.trim()}</p>}
+                </div>
+              ) : (
+                <p className="mt-0.5">{manual.seguranca.trim() || DEFAULT_SAFETY}</p>
+              )}
+            </div>
+            {(manual.dss || '').trim() && (
+              <div className="rounded-lg px-3 py-2 mb-2 border bg-[#eff6ff] border-[#bfdbfe]">
+                <div className="text-[9.5px] font-black uppercase tracking-wider text-[#1d4ed8]">DSS — Diálogo de Segurança</div>
+                <p className="mt-0.5 whitespace-pre-line">{(manual.dss || '').trim()}</p>
               </div>
-              <div>
-                <div className={h2}>7. Produção Mensal ({MONTHS[0].slice(0, 3)}–{MONTHS[month - 1].slice(0, 3)}/{String(year).slice(2)})</div>
-                <table className="w-full border-collapse">
-                  <thead><tr><th className={thc}>Mês</th><th className={thc}>Envase</th></tr></thead>
-                  <tbody>
-                    {monthly.rows.map(r => (
-                      <tr key={r.label}><td className={tdc}>{r.label}</td><td className={tdc}>{milf(r.qty)}</td></tr>
-                    ))}
-                    <tr><td className={tdTotal}>Média Ano</td><td className={tdTotal}>{milf(monthly.avg)}</td></tr>
-                    <tr><td className={tdTotal}>Meta {MONTHS[month - 1]}</td><td className={tdTotal}>{monthly.goal ? milf(monthly.goal) : '—'}</td></tr>
-                  </tbody>
-                </table>
+            )}
+            {filledPontos.length === 0 ? (
+              <p className="text-[#94a3b8] italic">Nenhum ponto registrado.</p>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                {filledPontos.map((p, i) => (
+                  <div key={i} className="rounded-lg border border-[#e2e8f0] px-3 py-2">
+                    {p.titulo.trim() && <div className="text-[9.5px] font-black uppercase tracking-wider text-[#475569]">{p.titulo.trim()}</div>}
+                    <p className="whitespace-pre-line">{p.texto.trim()}</p>
+                  </div>
+                ))}
               </div>
+            )}
+
+            {/* 6. Envase no mês */}
+            <div className={h2}>{num(6)} Envase em {MONTHS[month - 1].toLowerCase()}
+              <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-[#64748b]">média {nf(monthAvg)} un/dia{dayGoal ? ` · meta ${nf(dayGoal)} un/dia` : ''}</span>
+            </div>
+            {monthDays.length === 0 ? (
+              <p className="text-[#94a3b8] italic">Sem produção no mês.</p>
+            ) : (
+              <div className="relative h-[140px] flex items-end gap-[3px] pt-3">
+                {/* linha tracejada = meta diária (as barras usam 100px de altura acima dos rótulos dos dias) */}
+                {dayGoal ? <div className="absolute left-0 right-0 border-t-2 border-dashed border-[#059669]" style={{ bottom: `${14 + (dayGoal / monthMaxDay) * 100}px` }} /> : null}
+                {monthDays.map(d => (
+                  <div key={d.day} className="flex-1 flex flex-col items-center justify-end h-full min-w-0">
+                    <span className="text-[7.5px] text-[#475569] leading-none mb-0.5">{d.qty >= 1000 ? `${Math.round(d.qty / 100) / 10}k` : nf(d.qty)}</span>
+                    <div className="w-full rounded-t" style={{ height: `${Math.max(2, (d.qty / monthMaxDay) * 100)}px`, background: d.day === selectedDate ? '#1d4ed8' : dayGoal && d.qty >= dayGoal ? '#60a5fa' : '#93c5fd' }} />
+                    <span className="text-[8px] text-[#64748b] h-[14px] leading-[14px] border-t border-[#cbd5e1] w-full text-center">{d.day.slice(8)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 7. Produção mensal */}
+            <div className={h2}>{num(7)} Produção mensal do Envase — {year}
+              <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-[#64748b]">média {milf(monthly.avg)}{monthly.goal ? ` · meta ${MONTHS[month - 1].toLowerCase()} ${milf(monthly.goal)}` : ''}</span>
+            </div>
+            <div className="h-[110px] flex items-end gap-2 border-b border-[#cbd5e1] pt-4">
+              {monthly.rows.map((r, i) => (
+                <div key={r.label} className="flex-1 flex flex-col items-center justify-end h-full">
+                  <span className="text-[8.5px] font-semibold text-[#334155] mb-0.5">{milf(r.qty)}</span>
+                  <div className="w-full rounded-t" style={{ height: `${Math.max(2, (r.qty / monthlyMax) * 80)}px`, background: i === month - 1 ? '#1d4ed8' : '#93c5fd' }} />
+                  <span className="text-[8.5px] text-[#64748b] mt-0.5">{r.label.slice(0, 3)}</span>
+                </div>
+              ))}
             </div>
 
-            <p className="mt-5 text-[11px] italic font-semibold text-[#6b7280]">Elaborado pela Coordenação</p>
+            <div className="mt-6 pt-2 border-t border-[#e2e8f0] flex justify-between text-[9.5px] text-[#64748b]">
+              <span className="italic font-semibold">Elaborado pela Coordenação</span>
+              <span>Painel Industrial · dados dos registros do app</span>
+            </div>
           </div>
         </div>
       </div>
