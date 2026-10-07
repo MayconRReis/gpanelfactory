@@ -160,6 +160,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // Histórico da OP (linha do tempo)
   const [historyOp, setHistoryOp] = useState<ProductionOrder | null>(null);
+  // Detalhes de uma OSM da fila (consulta rápida dos próximos a manipular)
+  const [queueDetail, setQueueDetail] = useState<{ op: ProductionOrder; position: number; total: number } | null>(null);
 
   // Filtros da lista de OPs finalizadas
   const [donePeriod, setDonePeriod] = useState<'hoje' | '7d' | 'mes' | 'todos'>('7d');
@@ -1635,10 +1637,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                             <p className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wide">
                               Próximas na fila ({queuedOps.length})
                             </p>
-                            {queuedOps.map((op) => (
-                              <div
+                            {queuedOps.map((op, idx) => (
+                              <button
+                                type="button"
                                 key={op.id}
-                                className="flex items-center justify-between gap-2 bg-[#0e0e12] border border-[#1f1f26] rounded-lg px-2.5 py-1.5"
+                                onClick={() => setQueueDetail({ op, position: idx + 1, total: queuedOps.length })}
+                                title="Ver detalhes da OSM"
+                                className="w-full text-left flex items-center justify-between gap-2 bg-[#0e0e12] border border-[#1f1f26] hover:border-cyan-700/60 hover:bg-[#13131a] rounded-lg px-2.5 py-1.5 transition-colors cursor-pointer"
                               >
                                 <div className="flex items-center gap-1.5 min-w-0">
                                   <span className="font-mono font-bold text-[11px] text-white shrink-0">{op.number}</span>
@@ -1649,7 +1654,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                                     {op.industria}
                                   </span>
                                 )}
-                              </div>
+                              </button>
                             ))}
                           </div>
                         )}
@@ -1809,6 +1814,76 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               {isShiftBusy ? 'Encerrando...' : 'Encerrar Expediente'}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: DETALHES DA OSM NA FILA */}
+      <Dialog open={!!queueDetail} onOpenChange={(open) => !open && setQueueDetail(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          {queueDetail && (() => {
+            const op = queueDetail.op;
+            const conf = conferenciaFor(op);
+            const pesagem = ops.find(o => o.setor === 'Pesagem' && (o.number || '').trim() === (op.number || '').trim());
+            const kg = Number(op.plannedQuantity) || Number(pesagem?.plannedQuantity) || 0;
+            const fmtDate = (v?: string | null) => {
+              if (!v) return '—';
+              const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T12:00:00`) : new Date(v);
+              return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('pt-BR');
+            };
+            const obs = (op.granel && op.granel !== op.number) ? op.granel : (op.observation || '');
+            const cell = (label: string, value: React.ReactNode, tone = 'text-white') => (
+              <div className="bg-[#121215] border border-[#27272a] rounded-lg px-2.5 py-2 min-w-0">
+                <div className="text-[9px] uppercase font-bold text-[#71717a]">{label}</div>
+                <div className={`text-xs font-bold truncate ${tone}`}>{value}</div>
+              </div>
+            );
+            return (
+              <>
+                <DialogHeader>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-lg border bg-[#1a1a22] text-[#a1a1aa] border-[#2c2c3c]">
+                      {queueDetail.position}º de {queueDetail.total} na fila
+                    </span>
+                    {op.industria && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border ${getIndustriaBadgeClass(op.industria)}`}>{op.industria}</span>
+                    )}
+                  </div>
+                  <DialogTitle className="font-mono text-2xl font-black text-white mt-1">{op.number}</DialogTitle>
+                  <p className="text-xs font-bold text-white uppercase leading-snug">{op.product}</p>
+                </DialogHeader>
+                <div className="space-y-2 py-2">
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {cell('Reator', reactorLines.find(r => r.id === op.lineId)?.name || '—')}
+                    {cell('Lote', op.lote || '—', 'text-cyan-200 font-mono')}
+                    {cell('Kg planejado', kg > 0 ? `${kg.toLocaleString('pt-BR')} kg` : '—')}
+                    {cell('Programada para', fmtDate(op.scheduledDate))}
+                    {cell('Pesada em', fmtDate(pesagem?.completedAt || pesagem?.createdAt || op.createdAt))}
+                    {cell('Prioridade', op.priority || 'Normal', op.priority === 'Crítica' || op.priority === 'Alta' ? 'text-rose-300' : 'text-white')}
+                  </div>
+                  <div className={`rounded-lg border px-3 py-2 text-xs font-bold flex items-center gap-1.5 ${conf ? 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300' : 'bg-rose-950/30 border-rose-800/40 text-rose-300'}`}>
+                    <ClipboardCheck className="w-3.5 h-3.5" />
+                    {conf
+                      ? `Pesagem conferida por ${conf.conferidoNome || '—'} · ${new Date(conf.conferidoEm).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                      : 'Pesagem ainda não conferida'}
+                  </div>
+                  <div className="bg-[#121215] border border-[#27272a] rounded-lg px-3 py-2">
+                    <div className="text-[9px] uppercase font-bold text-[#71717a]">Observação</div>
+                    <div className={`text-xs mt-0.5 ${obs ? 'text-white' : 'text-[#71717a]'}`}>{obs || 'Sem observação'}</div>
+                  </div>
+                </div>
+                <DialogFooter className="pt-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setQueueDetail(null)}
+                    className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full"
+                  >
+                    Fechar
+                  </Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
