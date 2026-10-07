@@ -121,6 +121,12 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   const [pauseReason, setPauseReason] = useState('');
   const [pauseObs, setPauseObs] = useState('');
   const [isPauseSubmitting, setIsPauseSubmitting] = useState(false);
+  // Confirmação de cada etapa (evita clique errado no chão de fábrica)
+  const [confirmStep, setConfirmStep] = useState<{
+    title: string; message: string; osm: string; product: string;
+    confirmLabel: string; tone: string; run: () => any;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Modal de Finalização / Escolha de Turno
   const [finishingOp, setFinishingOp] = useState<ProductionOrder | null>(null);
@@ -835,6 +841,16 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     }
   };
 
+  const askStep = (op: ProductionOrder, title: string, message: string, confirmLabel: string, tone: string, run: () => any) => {
+    setConfirmStep({ title, message, osm: op.number, product: op.product, confirmLabel, tone, run });
+  };
+
+  const runConfirmedStep = async () => {
+    if (!confirmStep) return;
+    setConfirmBusy(true);
+    try { await confirmStep.run(); } finally { setConfirmBusy(false); setConfirmStep(null); }
+  };
+
   const handleUndoConferencia = async (conf: ManipConferencia) => {
     const res = await deleteManipConferencia(conf.id);
     if (!res.ok) showToast(`Não foi possível desfazer: ${res.error}`, 'error');
@@ -1063,13 +1079,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         <div className="flex flex-wrap items-stretch gap-2">
           {phase === 'aguardando_inicio' && (
             conf ? (
-              <Button onClick={() => handleStart(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Iniciar manipulação?', 'A manipulação desta OSM começa agora e o tempo passa a contar.', 'Iniciar', 'bg-cyan-600 hover:bg-cyan-500', () => handleStart(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
                 <span>Iniciar Manipulação</span>
               </Button>
             ) : (
               <>
-                <Button onClick={() => handleConferir(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`} title="Confirmar que esta pesagem foi conferida">
+                <Button onClick={() => askStep(op, 'Confirmar conferência?', 'Confirme que a pesagem desta OSM foi conferida.', 'Conferido', 'bg-violet-600 hover:bg-violet-500', () => handleConferir(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`} title="Confirmar que esta pesagem foi conferida">
                   {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ListChecks className="w-4 h-4" />}
                   <span>Conferido</span>
                 </Button>
@@ -1083,11 +1099,11 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 <Pause className="w-4 h-4" />
                 <span>Pausar</span>
               </Button>
-              <Button onClick={() => handleResfriamento(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-blue-600 hover:bg-blue-500 shadow-blue-950/40 ${btnBase}`} title="Produto precisa resfriar antes da análise">
+              <Button onClick={() => askStep(op, 'Iniciar resfriamento?', 'A manipulação será finalizada e o cronômetro do resfriamento começa a contar.', 'Iniciar resfriamento', 'bg-blue-600 hover:bg-blue-500', () => handleResfriamento(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-blue-600 hover:bg-blue-500 shadow-blue-950/40 ${btnBase}`} title="Produto precisa resfriar antes da análise">
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Snowflake className="w-4 h-4" />}
                 <span>Resfriamento</span>
               </Button>
-              <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Enviar para análise?', 'A manipulação será finalizada e a Amostra 01 vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
                 <span>Análise</span>
               </Button>
@@ -1103,7 +1119,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 </span>
                 <span className="font-mono text-lg font-black text-white tabular-nums" title="Tempo de resfriamento">{fmtClock(info.since)}</span>
               </div>
-              <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Encerrar resfriamento e enviar para análise?', 'O cronômetro do resfriamento para e a Amostra 01 vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
                 <span>Análise</span>
               </Button>
@@ -1111,14 +1127,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
 
           {(phase === 'pausada' || phase === 'drenagem_pausada') && (
-            <Button onClick={() => handleResume(op)} disabled={isBusy} className={`${phase === 'pausada' ? 'flex-1 basis-[7.5rem]' : 'px-3'} bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
+            <Button onClick={() => askStep(op, 'Retomar?', 'A OSM volta a contar como em produção.', 'Retomar', 'bg-cyan-600 hover:bg-cyan-500', () => handleResume(op))} disabled={isBusy} className={`${phase === 'pausada' ? 'flex-1 basis-[7.5rem]' : 'px-3'} bg-cyan-600 hover:bg-cyan-500 shadow-cyan-950/40 ${btnBase}`}>
               {isBusy ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
               <span>{phase === 'pausada' ? 'Retomar manipulação' : 'Retomar'}</span>
             </Button>
           )}
 
           {(phase === 'aguardando_amostragem' || phase === 'em_ajuste') && (
-            <Button onClick={() => handleCollectSample(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
+            <Button onClick={() => askStep(op, 'Enviar nova análise?', 'Uma nova amostra será enviada para o CQ.', 'Enviar amostra', 'bg-violet-600 hover:bg-violet-500', () => handleCollectSample(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
               {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
               <span>{phase === 'em_ajuste' ? 'Nova análise' : 'Análise'}</span>
             </Button>
@@ -1126,15 +1142,15 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
           {phase === 'aguardando_cq' && (
             <>
-              <Button onClick={() => handleCqRejected(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-rose-600 hover:bg-rose-500 shadow-rose-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Confirmar REPROVADO?', 'O CQ não aprovou a amostra. O reator entra em ajuste e depois precisa de nova análise.', 'Reprovado', 'bg-rose-600 hover:bg-rose-500', () => handleCqRejected(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-rose-600 hover:bg-rose-500 shadow-rose-950/40 ${btnBase}`}>
                 <ThumbsDown className="w-4 h-4" />
                 <span>Reprovado</span>
               </Button>
-              <Button onClick={() => handleCqApprovedWithCorrection(op)} disabled={isBusy} title="Aprovado, mas com correção" className={`flex-1 basis-[7.5rem] bg-lime-600 hover:bg-lime-500 shadow-lime-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Confirmar APROVADO COM CORREÇÃO?', 'Será necessário fazer a correção e enviar uma nova análise.', 'Aprovado c/ correção', 'bg-lime-600 hover:bg-lime-500', () => handleCqApprovedWithCorrection(op))} disabled={isBusy} title="Aprovado, mas com correção" className={`flex-1 basis-[7.5rem] bg-lime-600 hover:bg-lime-500 shadow-lime-950/40 ${btnBase}`}>
                 <Wrench className="w-4 h-4" />
                 <span>Aprovado c/ correção</span>
               </Button>
-              <Button onClick={() => handleCqApproved(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Confirmar APROVADO?', 'A OSM fica liberada para a drenagem.', 'Aprovado', 'bg-emerald-600 hover:bg-emerald-500', () => handleCqApproved(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40 ${btnBase}`}>
                 <ThumbsUp className="w-4 h-4" />
                 <span>Aprovado</span>
               </Button>
@@ -1144,7 +1160,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           {phase === 'em_correcao' && (
             <>
               <p className="w-full text-[11px] text-lime-200/80">Faça a correção e envie uma nova amostra para análise.</p>
-              <Button onClick={() => handleCollectSample(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Enviar nova análise?', 'Uma nova amostra será enviada para o CQ.', 'Enviar amostra', 'bg-violet-600 hover:bg-violet-500', () => handleCollectSample(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
                 <span>Nova análise</span>
               </Button>
@@ -1152,7 +1168,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
 
           {phase === 'aguardando_drenagem' && (
-            <Button onClick={() => handleStartDrain(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-teal-600 hover:bg-teal-500 shadow-teal-950/40 ${btnBase}`}>
+            <Button onClick={() => askStep(op, 'Iniciar drenagem?', 'A drenagem desta OSM começa agora.', 'Iniciar drenagem', 'bg-teal-600 hover:bg-teal-500', () => handleStartDrain(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-teal-600 hover:bg-teal-500 shadow-teal-950/40 ${btnBase}`}>
               {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Droplets className="w-4 h-4" />}
               <span>Iniciar drenagem</span>
             </Button>
@@ -1191,7 +1207,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           <span className={`text-[10px] font-mono ${late ? 'text-rose-300' : 'text-[#71717a]'}`}>
             {op.lote ? `Lote ${op.lote} · ` : ''}{op.scheduledDate ? new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : 'sem data'}{late ? ' · atrasada' : ''}
           </span>
-          <Button onClick={() => handleConferir(op)} disabled={actionBusyOpId === op.id} className="h-7 px-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold flex items-center gap-1">
+          <Button onClick={() => askStep(op, 'Confirmar conferência?', 'Confirme que a pesagem desta OSM foi conferida.', 'Conferido', 'bg-violet-600 hover:bg-violet-500', () => handleConferir(op))} disabled={actionBusyOpId === op.id} className="h-7 px-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold flex items-center gap-1">
             {actionBusyOpId === op.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ListChecks className="w-3.5 h-3.5" />}
             Conferido
           </Button>
@@ -1570,7 +1586,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                                 </div>
                               </div>
                               {canUndo && c && (
-                                <button type="button" onClick={() => handleUndoConferencia(c)} title="Desfazer conferência" className="h-6 w-6 rounded-md text-[#a1a1aa] hover:text-rose-300 hover:bg-rose-950/30 flex items-center justify-center shrink-0">
+                                <button type="button" onClick={() => setConfirmStep({ title: 'Desfazer conferência?', message: 'A OSM volta a ficar como não conferida e não poderá ser iniciada até ser conferida de novo.', osm: c.osmNumber, product: op.product, confirmLabel: 'Desfazer', tone: 'bg-rose-600 hover:bg-rose-500', run: () => handleUndoConferencia(c) })} title="Desfazer conferência" className="h-6 w-6 rounded-md text-[#a1a1aa] hover:text-rose-300 hover:bg-rose-950/30 flex items-center justify-center shrink-0">
                                   <Undo2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
@@ -1791,6 +1807,42 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             </Button>
             <Button onClick={handleEndShift} disabled={isShiftBusy} className="bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-wider">
               {isShiftBusy ? 'Encerrando...' : 'Encerrar Expediente'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: CONFIRMAR ETAPA */}
+      <Dialog open={!!confirmStep} onOpenChange={(open) => { if (!open && !confirmBusy) setConfirmStep(null); }}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-sm w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold text-white">{confirmStep?.title}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-1">
+            <div className="bg-[#121215] border border-[#27272a] rounded-xl px-3 py-2.5">
+              <div className="font-mono text-lg font-black text-white">{confirmStep?.osm}</div>
+              <div className="text-[11px] text-[#a1a1aa] uppercase leading-snug">{confirmStep?.product}</div>
+            </div>
+            <p className="text-xs text-[#d4d4d8]">{confirmStep?.message}</p>
+          </div>
+          <DialogFooter className="pt-2 gap-2 flex-col sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setConfirmStep(null)}
+              disabled={confirmBusy}
+              className="h-11 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={runConfirmedStep}
+              disabled={confirmBusy}
+              className={`h-11 rounded-xl text-white font-bold text-sm shadow-lg flex items-center justify-center gap-1.5 w-full sm:w-auto ${confirmStep?.tone || 'bg-cyan-600'}`}
+            >
+              {confirmBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              <span>{confirmStep?.confirmLabel}</span>
             </Button>
           </DialogFooter>
         </DialogContent>
