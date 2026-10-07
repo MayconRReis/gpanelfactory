@@ -1,0 +1,5853 @@
+import { createClient } from '@supabase/supabase-js';
+import {
+  supabase,
+  supabaseUrl,
+  supabaseAnonKey,
+  isRetryableError,
+  isFetchOrNetworkError,
+  isSupabaseRuntimeEnabled,
+} from '../lib/supabase';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, PauseReason, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, AccessRule, DashboardTab, WorkSession, LineHeadcount, LineChangeover, PesagemHistoryEntry, PesagemHistoryAction, DailyReportManual, StaffOccurrence, StaffOccurrenceType } from '../types';
+import { calculateProductionTime, getScheduledWindow } from '../lib/productionTime';
+
+/**
+ * Helper para calcular horas reais de pausa a partir de uma lista de eventos de produção.
+ */
+export function calculateTotalPauseHours(events: ProductionEvent[]): number {
+  if (!events || events.length === 0) return 0;
+  try {
+    const sorted = [...events].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+
+    const eventsByOp: Record<string, ProductionEvent[]> = {};
+    for (const ev of sorted) {
+      const key = ev.opId || 'global';
+      if (!eventsByOp[key]) eventsByOp[key] = [];
+      eventsByOp[key].push(ev);
+    }
+
+    let totalMs = 0;
+    for (const opId of Object.keys(eventsByOp)) {
+      const opEvents = eventsByOp[opId];
+      let pauseStartTime: number | null = null;
+
+      for (const ev of opEvents) {
+        const time = new Date(ev.createdAt).getTime();
+        if (isNaN(time)) continue;
+
+        if (ev.type === 'PAUSED') {
+          pauseStartTime = time;
+        } else if ((ev.type === 'RESUMED' || ev.type === 'FINISHED') && pauseStartTime !== null) {
+          const diff = time - pauseStartTime;
+          if (diff > 0) totalMs += diff;
+          pauseStartTime = null;
+        }
+      }
+
+      // Se a OP está atualmente em pausa (sem RESUMED ainda), contabiliza até agora
+      if (pauseStartTime !== null) {
+        const diff = Date.now() - pauseStartTime;
+        if (diff > 0) totalMs += diff;
+      }
+    }
+    return totalMs / (1000 * 60 * 60);
+  } catch (err) {
+    console.warn('Erro ao calcular horas de pausa:', err);
+    return 0;
+  }
+}
+
+/**
+ * Calcula os 3 componentes do OEE e o OEE final.
+ *
+ * Disponibilidade = tempo_real_produzindo / tempo_planejado_total
+ *   tempo_real_produzindo  = planned_hours - horas de pausa reais (calculateTotalPauseHours)
+ *   tempo_planejado_total  = soma de planned_hours de todas as OPs do período
+ *
+ * Performance = tempo esperado ÷ tempo produzido (horas planejadas da OP, proporcionais ao produzido, ÷ horas trabalhadas)
+ *
+ * Qualidade = (producedQuantity - rejectedQuantity) / producedQuantity
+ *
+ * OEE = Disponibilidade × Performance × Qualidade
+ *
+ * Retorna valores entre 0 e 1 (multiplique por 100 para exibir como %).
+ * Retorna null para cada componente quando não há dados suficientes.
+ */
+/** Detalhe da Performance por TEMPO (horas esperadas × horas produzidas). */
+export interface OEEPerformanceTime {
+  /** 'tempo' = horas planejadas das OPs; 'quantidade' = nenhuma OP do período tem horas planejadas (cálculo antigo). */
+  performanceBasis: 'tempo' | 'quantidade' | null;
+  /** Horas esperadas para o que foi produzido (horas planejadas proporcionais à quantidade feita). */
+  expectedHours: number;
+  /** Horas realmente trabalhadas nessas OPs (sem pausas, noites e intervalos). */
+  workedHours: number;
+  /** OPs que entraram no cálculo por tempo */
+  opsWithTime: number;
+  /** OPs do período sem "Horas planejadas" (ficam fora da Performance) */
+  opsWithoutTime: number;
+}
+export interface OEEResult extends OEEPerformanceTime {
+  disponibilidade: number | null;
+  performance: number | null;
+  qualidade: number | null;
+  oee: number | null;
+}
+const EMPTY_PERF_TIME: OEEPerformanceTime = { performanceBasis: null, expectedHours: 0, workedHours: 0, opsWithTime: 0, opsWithoutTime: 0 };
+
+export function calculateOEE(
+  ops: ProductionOrder[],
+  events: ProductionEvent[],
+  workSessions?: WorkSession[],
+  /** Todos os eventos (sem recorte de período) — para achar as conclusões
+   * PARCIAIS de cada OP, que podem ter acontecido em outro dia. */
+  allEventsForPartials?: ProductionEvent[],
+  /** Período ('AAAA-MM-DD') — sem ele, a Disponibilidade somava os expedientes
+   * de TODOS os dias contra o trabalho só do período (ex.: 12% em vez de 79%). */
+  dateRange?: { rangeStart?: string; rangeEnd?: string }
+): OEEResult {
+  try {
+    if (!ops || ops.length === 0) {
+      return { disponibilidade: null, performance: null, qualidade: null, oee: null, ...EMPTY_PERF_TIME };
+    }
+
+    // 1. Disponibilidade — SEMPRE prioriza o histórico real de eventos
+    // (reaproveita o mesmo cálculo de Tempo Trabalhado/Ocioso dos cards de
+    // Índice de Ociosidade, lib/productionTime.ts, incluindo pausas
+    // explícitas E os gaps reais entre OPs consecutivas), e só cai para a
+    // estimativa por "horas planejadas" quando NÃO existe nenhum evento
+    // STARTED/FINISHED pra essas OPs no período.
+    //
+    // Antes, a ordem era invertida: bastava 1 única OP do período ter
+    // `plannedHours` preenchido (ex.: uma OP criada manualmente, no meio de
+    // centenas de OPs importadas do histórico) pra descartar TODO o cálculo
+    // real por eventos e usar só aquela OP isolada — e como
+    // `calculateTotalPauseHours` só soma pausas explícitas (PAUSED), isso
+    // quase sempre dava ~100% de Disponibilidade pro mês inteiro, mascarando
+    // a ociosidade real já calculada corretamente pelas outras OPs.
+    let disponibilidade: number | null = null;
+    const opIds = new Set(ops.map(o => o.id));
+    const opEvents = events ? events.filter(e => e.opId && opIds.has(e.opId)) : [];
+
+    if (opEvents.length > 0) {
+      // Com os expedientes, a Disponibilidade usa a mesma apuração dos cards
+      // (sem madrugada, sem sobreposição, intervalo de até 1h tolerado).
+      const lineIdsInOps = Array.from(new Set(ops.map(o => o.lineId).filter(Boolean))) as string[];
+      const timeMetrics = calculateProductionTime(
+        opEvents,
+        ops,
+        lineIdsInOps.map(id => ({ id, name: id, status: 'idle', currentOpId: null } as ProductionLine)),
+        {
+          ...(workSessions ? { workSessions } : {}),
+          ...(dateRange?.rangeStart ? { rangeStart: dateRange.rangeStart } : {}),
+          ...(dateRange?.rangeEnd ? { rangeEnd: dateRange.rangeEnd } : {}),
+        }
+      );
+      if (timeMetrics.totalMs > 0) {
+        disponibilidade = Math.max(0, Math.min(1, timeMetrics.workingMs / timeMetrics.totalMs));
+      }
+    }
+
+    if (disponibilidade === null) {
+      const opsWithPlannedHours = ops.filter(op => op.plannedHours != null && op.plannedHours > 0);
+      if (opsWithPlannedHours.length > 0) {
+        const tempoPlanejadoTotal = opsWithPlannedHours.reduce(
+          (sum, op) => sum + (op.plannedHours || 0),
+          0
+        );
+
+        if (tempoPlanejadoTotal > 0) {
+          const relevantOpIds = new Set(opsWithPlannedHours.map(op => op.id));
+          const relevantEvents = opEvents.filter(e => e.opId && relevantOpIds.has(e.opId));
+          const pauseHours = calculateTotalPauseHours(relevantEvents.length > 0 ? relevantEvents : opEvents);
+
+          const tempoRealProduzindo = Math.max(0, tempoPlanejadoTotal - pauseHours);
+          disponibilidade = Math.max(0, Math.min(1, tempoRealProduzindo / tempoPlanejadoTotal));
+        }
+      }
+    }
+
+    // 2. Performance por TEMPO = tempo esperado ÷ tempo produzido.
+    // Cada OP tem as "Horas planejadas" (tempo esperado para a quantidade
+    // planejada). O esperado é proporcional ao que já foi feito
+    // (horas planejadas × produzido ÷ quantidade da OP) e o produzido é o
+    // tempo realmente trabalhado na OP (sem pausas, noites e intervalos).
+    // Entram as OPs concluídas e as em produção/pausadas que já produziram.
+    // Máximo de 100%. OP sem "Horas planejadas" fica de fora; se nenhuma OP
+    // do período tiver, cai no cálculo antigo por quantidade.
+    const partialQtyByOp = new Map<string, number>();
+    for (const ev of allEventsForPartials || events || []) {
+      if (!ev?.opId || !isPartialFinishEvent(ev)) continue;
+      const q = Number(ev.quantity) || 0;
+      if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
+    }
+    const perfCandidates = ops.filter(op =>
+      !op.isPartialRecord && (op.plannedQuantity || 0) > 0 &&
+      (op.status === 'completed' || ((op.status === 'in_progress' || op.status === 'paused') && (op.producedQuantity || 0) > 0))
+    );
+    const timedOps = perfCandidates.filter(op => (Number(op.plannedHours) || 0) > 0);
+    let performance: number | null = null;
+    let perfTime: OEEPerformanceTime = { ...EMPTY_PERF_TIME, opsWithoutTime: perfCandidates.length - timedOps.length };
+
+    if (timedOps.length > 0) {
+      const timedIds = new Set(timedOps.map(o => String(o.id)));
+      const timedEvents = (allEventsForPartials || events || []).filter(e => e?.opId && timedIds.has(String(e.opId)));
+      const timedLineIds = Array.from(new Set(timedOps.map(o => o.lineId).filter(Boolean))) as string[];
+      const workedByOp = new Map<string, number>();
+      if (timedEvents.length > 0) {
+        const res = calculateProductionTime(
+          timedEvents,
+          timedOps,
+          timedLineIds.map(id => ({ id, name: id, status: 'idle', currentOpId: null } as ProductionLine)),
+          workSessions ? { workSessions } : {}
+        );
+        for (const it of res.intervals) {
+          if (it.type !== 'WORKING' || !it.opId) continue;
+          workedByOp.set(String(it.opId), (workedByOp.get(String(it.opId)) || 0) + it.durationMs);
+        }
+      }
+      let expectedMs = 0;
+      let workedMs = 0;
+      let counted = 0;
+      for (const op of timedOps) {
+        const worked = workedByOp.get(String(op.id)) || 0;
+        if (worked <= 0) continue; // sem apontamentos de tempo (ex.: histórico importado)
+        const partial = partialQtyByOp.get(String(op.id)) || 0;
+        const opQty = (op.plannedQuantity || 0) + partial;
+        const produced = Math.max(0, (op.producedQuantity || 0) + partial);
+        if (opQty <= 0 || produced <= 0) continue;
+        expectedMs += (Number(op.plannedHours) || 0) * 3_600_000 * (produced / opQty);
+        workedMs += worked;
+        counted += 1;
+      }
+      perfTime = {
+        performanceBasis: counted > 0 ? 'tempo' : null,
+        expectedHours: expectedMs / 3_600_000,
+        workedHours: workedMs / 3_600_000,
+        opsWithTime: counted,
+        opsWithoutTime: perfCandidates.length - counted,
+      };
+      if (workedMs > 0) performance = Math.max(0, Math.min(1, expectedMs / workedMs));
+    }
+
+    if (performance === null && timedOps.length === 0) {
+      // Nenhuma OP com "Horas planejadas": cálculo antigo (produzido ÷ planejado das concluídas)
+      const doneOps = ops.filter(op => op.status === 'completed' && !op.isPartialRecord && op.plannedQuantity > 0);
+      let totalPlanned = 0;
+      let totalProduced = 0;
+      for (const op of doneOps) {
+        const partial = partialQtyByOp.get(String(op.id)) || 0;
+        const expected = (op.plannedQuantity || 0) + partial;
+        const produced = Math.max(0, (op.producedQuantity || 0) + partial);
+        totalPlanned += expected;
+        totalProduced += Math.min(produced, expected);
+      }
+      if (totalPlanned > 0) {
+        performance = Math.max(0, Math.min(1, totalProduced / totalPlanned));
+        perfTime = { ...perfTime, performanceBasis: 'quantidade' };
+      }
+    }
+
+    // 3. Qualidade = (producedQuantity - rejectedQuantity) / producedQuantity
+    const opsWithProduction = ops.filter(op => (op.producedQuantity || 0) > 0);
+    let qualidade: number | null = null;
+
+    if (opsWithProduction.length > 0) {
+      const totalProduced = opsWithProduction.reduce((sum, op) => sum + (op.producedQuantity || 0), 0);
+      const totalRejected = opsWithProduction.reduce((sum, op) => sum + (op.rejectedQuantity || 0), 0);
+
+      if (totalProduced > 0) {
+        const goodQuantity = Math.max(0, totalProduced - totalRejected);
+        qualidade = Math.max(0, Math.min(1, goodQuantity / totalProduced));
+      }
+    }
+
+    // OEE = Disponibilidade × Performance × Qualidade
+    let oee: number | null = null;
+    if (disponibilidade !== null && performance !== null && qualidade !== null) {
+      oee = disponibilidade * performance * qualidade;
+    }
+
+    return { disponibilidade, performance, qualidade, oee, ...perfTime };
+  } catch (err) {
+    console.warn('Erro ao calcular OEE:', err);
+    return { disponibilidade: null, performance: null, qualidade: null, oee: null, ...EMPTY_PERF_TIME };
+  }
+}
+
+/**
+ * Converte uma data/timestamp em 'YYYY-MM-DD' no fuso LOCAL (Brasil).
+ * - 'YYYY-MM-DD' puro (scheduledDate) volta como está — `new Date('2026-09-28')`
+ *   seria meia-noite UTC = 21h do dia 27 no Brasil, jogando a OP pro dia anterior.
+ * - Timestamp ISO (completedAt/createdAt, gravados em UTC) é convertido pro dia
+ *   local — antes o dashboard fazia `split('T')[0]`, que pega o dia em UTC:
+ *   toda OP fechada depois das 21h caía no dia seguinte e sumia do "Hoje".
+ */
+export function toLocalDateStr(value?: string | null): string {
+  if (!value) return '';
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw.split('T')[0];
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Data de referência de uma OP pros dashboards: OP concluída conta no dia em
+ * que foi FECHADA (completedAt); sem isso, no dia programado; por último, no
+ * dia em que foi criada. Sempre no fuso local.
+ */
+export function getOpReferenceDateStr(op: ProductionOrder): string {
+  return toLocalDateStr(op.completedAt || op.scheduledDate || op.createdAt);
+}
+
+// ---------------- STATUS DO GRANEL (Separado → Manipulando → Manipulado) ----------------
+// O campo "granel" da OP de Envase é o número da OSM da Pesagem. O status sai
+// dos registros que já existem dessa OSM — nada é digitado à parte:
+//   - Manipulado:  a OSM de Manipulação com esse número foi finalizada;
+//   - Manipulando: está em processo ou pausada num reator;
+//   - Separado:    a Pesagem registrou a OSM (e ela ainda não foi finalizada na Manipulação);
+//   - Não separado: nenhuma OSM com esse número foi encontrada.
+export type GranelStatus = 'manipulado' | 'manipulando' | 'separado' | 'nao_separado';
+
+export function getGranelStatus(granel: string | undefined | null, ops: ProductionOrder[]): GranelStatus | null {
+  const key = String(granel || '').trim().toLowerCase();
+  if (!key) return null;
+  const sameNumber = ops.filter(o => String(o.number || '').trim().toLowerCase() === key && !o.isPartialRecord);
+  const manip = sameNumber.filter(o => o.setor === 'Manipulação');
+  if (manip.some(o => o.status === 'completed')) return 'manipulado';
+  if (manip.some(o => o.status === 'in_progress' || o.status === 'paused')) return 'manipulando';
+  if (sameNumber.some(o => o.setor === 'Pesagem' || o.tipoDocumento === 'OSM') || manip.length > 0) return 'separado';
+  return 'nao_separado';
+}
+
+
+// ---------------- RETRABALHO (envasada, aguardando material) ----------------
+// OP envasada e encaixotada que não pode ser finalizada porque falta algum
+// material (ex.: divisória). O líder conclui o ENVASE com a quantidade real
+// ("Aguardar retrabalho"): a produção conta no dia do envase e a OP volta pro
+// estoque; quando o material chega, a OP é iniciada numa linha só para o
+// retrabalho — o tempo conta normalmente, mas a quantidade NÃO soma de novo.
+//
+// Tudo sai dos eventos FINISHED (sem coluna nova no banco):
+//   "Aguardando retrabalho: <o que falta> | ..."  → envase concluído, aguardando
+//   "Retrabalho concluído | ..."                  → OP finalizada de vez
+
+const REWORK_MARKER_RE = /^aguardando retrabalho/i;
+const REWORK_DONE_RE = /^retrabalho conclu/i;
+
+export function isReworkMarkerEvent(ev?: ProductionEvent | null): boolean {
+  return !!ev && ev.type === 'FINISHED' && REWORK_MARKER_RE.test(String(ev.observation || '').trim());
+}
+export function isReworkDoneEvent(ev?: ProductionEvent | null): boolean {
+  return !!ev && ev.type === 'FINISHED' && REWORK_DONE_RE.test(String(ev.observation || '').trim());
+}
+
+export interface ReworkInfo {
+  /** O que está faltando (texto do líder) */
+  reason: string;
+  /** Quantidade envasada que aguarda retrabalho */
+  quantity: number;
+  /** Quando o envase foi concluído */
+  since: string;
+  /** Retrabalho já concluído (OP finalizada de vez) */
+  done: boolean;
+}
+
+/** OPs com retrabalho (aguardando, em retrabalho ou já concluído), por id. */
+export function getReworkInfoByOp(events: ProductionEvent[]): Map<string, ReworkInfo> {
+  const out = new Map<string, ReworkInfo>();
+  const sorted = [...(events || [])]
+    .filter(e => e?.opId && e.type === 'FINISHED')
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  for (const ev of sorted) {
+    const key = String(ev.opId);
+    if (isReworkMarkerEvent(ev)) {
+      const text = String(ev.observation || '').trim();
+      const m = text.match(/^aguardando retrabalho:\s*(.*?)\s*(\||$)/i);
+      out.set(key, {
+        reason: (m?.[1] || '').trim() || 'Material pendente',
+        quantity: Number(ev.quantity) || 0,
+        since: ev.createdAt,
+        done: false,
+      });
+    } else if (isReworkDoneEvent(ev)) {
+      const cur = out.get(key);
+      if (cur) out.set(key, { ...cur, done: true });
+    }
+  }
+  return out;
+}
+
+/** A OP está aguardando retrabalho ou em retrabalho (ainda não finalizada)? */
+export function isOpInRework(opId: string, events: ProductionEvent[]): boolean {
+  const info = getReworkInfoByOp((events || []).filter(e => String(e.opId) === String(opId))).get(String(opId));
+  return !!info && !info.done;
+}
+
+// ---------------- CONCLUSÕES PARCIAIS ----------------
+// Numa conclusão Parcial (sem Sleev) a OP volta pro estoque com o saldo como
+// novo planejado e produzido ZERADO — a quantidade envasada até ali só fica
+// registrada no evento FINISHED daquela conclusão. Sem as funções abaixo,
+// essa produção sumia de todas as métricas do dia.
+//
+// A marca da parcial é o texto que o próprio finishOP grava na observação
+// ("Envase parcial (...)"), o que também recupera as parciais antigas.
+
+export function isPartialFinishEvent(ev: ProductionEvent): boolean {
+  return ev?.type === 'FINISHED' && /^envase parcial/i.test(String(ev.observation || '').trim());
+}
+
+/**
+ * Transforma cada conclusão parcial num "registro de produção" (uma OP
+ * virtual, status 'completed', com a quantidade daquela parcial e a data/hora
+ * em que ela aconteceu) pra entrar nas SOMAS de produção e nos gráficos.
+ * `isPartialRecord: true` — NÃO conta como OP finalizada, e nunca deve ser
+ * gravado no banco.
+ */
+export function buildPartialProductionRecords(
+  ops: ProductionOrder[],
+  events: ProductionEvent[]
+): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const opById = new Map(ops.map(op => [String(op.id), op]));
+  const records: ProductionOrder[] = [];
+  for (const ev of events) {
+    if (!isPartialFinishEvent(ev)) continue;
+    const qty = Number(ev.quantity || 0);
+    if (!ev.opId || !(qty > 0)) continue;
+    const op = opById.get(String(ev.opId));
+    if (!op) continue; // OP excluída: não inventa produção sem saber setor/produto
+    records.push({
+      ...op,
+      id: `partial-${ev.id}`,
+      status: 'completed',
+      plannedQuantity: qty,
+      producedQuantity: qty,
+      rejectedQuantity: 0,
+      lineId: ev.lineId || op.lineId,
+      leaderId: ev.leaderId || op.leaderId,
+      completedAt: ev.createdAt,
+      createdAt: ev.createdAt,
+      scheduledDate: undefined,
+      finishedShift: undefined,
+      isSleeve: false,
+      isPartialRecord: true,
+    });
+  }
+  return records;
+}
+
+/** Linha do Sleev (acabamento) — métrica separada do Envase. */
+export function isSleeveLineId(lineId?: string | null): boolean {
+  return !!lineId && /sle+v/i.test(String(lineId));
+}
+
+/**
+ * ENVASE de OPs que seguiram para o Sleev: ao concluir o envase com "Sleev",
+ * a OP volta pro estoque zerada e só fica o evento FINISHED com a quantidade
+ * envasada. Para o Envase contar essa produção (sem somar o Sleev), cada um
+ * desses eventos vira um registro virtual no dia/linha do envase — igual às
+ * conclusões parciais. Nunca é gravado no banco.
+ */
+export function buildSleeveHandoffRecords(ops: ProductionOrder[], events: ProductionEvent[]): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const opById = new Map(ops.map(op => [String(op.id), op]));
+  const out: ProductionOrder[] = [];
+  for (const ev of events) {
+    if (ev?.type !== 'FINISHED' || !ev.opId) continue;
+    if (!/acabamento no sleev/i.test(String(ev.observation || ''))) continue;
+    if (isSleeveLineId(ev.lineId)) continue;
+    const qty = Number(ev.quantity || 0);
+    if (!(qty > 0)) continue;
+    const op = opById.get(String(ev.opId));
+    if (!op) continue;
+    out.push({
+      ...op,
+      id: `sleeve-handoff-${ev.id}`,
+      status: 'completed',
+      plannedQuantity: qty,
+      producedQuantity: qty,
+      rejectedQuantity: 0,
+      lineId: ev.lineId || null,
+      leaderId: ev.leaderId || op.leaderId,
+      completedAt: ev.createdAt,
+      createdAt: ev.createdAt,
+      scheduledDate: undefined,
+      finishedShift: undefined,
+      isSleeve: false,
+      isPartialRecord: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * OPs que estão no estoque por causa de uma conclusão parcial: ainda não
+ * finalizadas e cuja ÚLTIMA conclusão registrada foi parcial. Quando a OP é
+ * finalizada de vez, sai da lista sozinha.
+ */
+export function getPartialOpsInStock(
+  ops: ProductionOrder[],
+  events: ProductionEvent[]
+): ProductionOrder[] {
+  if (!ops?.length || !events?.length) return [];
+  const lastFinishedByOp = new Map<string, ProductionEvent>();
+  for (const ev of events) {
+    if (ev?.type !== 'FINISHED' || !ev.opId) continue;
+    const key = String(ev.opId);
+    const prev = lastFinishedByOp.get(key);
+    if (!prev || new Date(ev.createdAt).getTime() > new Date(prev.createdAt).getTime()) {
+      lastFinishedByOp.set(key, ev);
+    }
+  }
+  return ops.filter(op => {
+    if (op.status === 'completed' || op.isPartialRecord) return false;
+    const last = lastFinishedByOp.get(String(op.id));
+    return !!last && isPartialFinishEvent(last);
+  });
+}
+
+/**
+ * Produção REAL por linha e por dia, reconstruída dos eventos de cada OP:
+ * - QUANTITY_REPORTED soma o que foi apontado (é incremento);
+ * - PAUSED/FINISHED trazem o total acumulado da OP naquele momento — a
+ *   diferença pro que já tinha sido apontado entra no dia do evento;
+ * - depois de um FINISHED o acumulado zera (conclusão parcial / Sleev
+ *   recomeçam a contagem).
+ * Cada quantidade entra na linha e no dia (local) do evento que a registrou.
+ * Nada é estimado: dia sem evento = 0.
+ */
+export function computeProductionByLineAndDay(
+  events: ProductionEvent[],
+  ops: ProductionOrder[] = []
+): Record<string, Record<string, number>> {
+  const result: Record<string, Record<string, number>> = {};
+  if (!events?.length) return result;
+  const opById = new Map(ops.map(o => [String(o.id), o]));
+  const byOp = new Map<string, ProductionEvent[]>();
+  for (const ev of events) {
+    if (!ev?.opId || !ev.createdAt) continue;
+    if (ev.type !== 'QUANTITY_REPORTED' && ev.type !== 'PAUSED' && ev.type !== 'FINISHED') continue;
+    const list = byOp.get(String(ev.opId)) || [];
+    list.push(ev);
+    byOp.set(String(ev.opId), list);
+  }
+  const credit = (lineId: string | undefined, iso: string, qty: number) => {
+    if (!lineId || !qty) return;
+    const day = toLocalDateStr(iso);
+    if (!day) return;
+    const lineMap = result[lineId] || (result[lineId] = {});
+    lineMap[day] = (lineMap[day] || 0) + qty;
+  };
+  for (const [opId, list] of byOp.entries()) {
+    list.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const op = opById.get(opId);
+    let cumulative = 0;
+    // Depois do "Aguardando retrabalho" a quantidade já foi contada no dia
+    // do envase — o retrabalho só gasta tempo, não soma produção de novo.
+    let reworkPhase = false;
+    for (const ev of list) {
+      if (reworkPhase) continue;
+      const lineId = ev.lineId || op?.lineId || undefined;
+      const q = ev.quantity !== undefined && ev.quantity !== null && !isNaN(Number(ev.quantity)) ? Number(ev.quantity) : undefined;
+      if (ev.type === 'QUANTITY_REPORTED') {
+        if (q && q > 0) {
+          credit(lineId, ev.createdAt, q);
+          cumulative += q;
+        }
+      } else if (ev.type === 'PAUSED') {
+        // total informado na pausa (pode corrigir o apontado pra cima ou pra baixo)
+        if (q !== undefined && q !== cumulative) {
+          credit(lineId, ev.createdAt, q - cumulative);
+          cumulative = q;
+        }
+      } else if (ev.type === 'FINISHED') {
+        if (q !== undefined && q !== cumulative) {
+          credit(lineId, ev.createdAt, q - cumulative);
+        }
+        cumulative = 0;
+        if (isReworkMarkerEvent(ev)) reworkPhase = true;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Agrupa producedQuantity por dia e por setor (para o gráfico de barras diário).
+ * Retorna um array de objetos com: { day: number, setor: string, quantity: number }
+ * ordenado por dia crescente, filtrado pelo mês e ano fornecidos.
+ */
+export function groupProductionByDayAndSetor(
+  ops: ProductionOrder[],
+  month: number,
+  year: number
+): Array<{ day: number; setor: string; quantity: number }> {
+  if (!ops || ops.length === 0) return [];
+  try {
+    const targetMonth1to12 = month >= 1 && month <= 12 ? month : (month + 1);
+    const map = new Map<string, { day: number; setor: string; quantity: number }>();
+
+    for (const op of ops) {
+      if (!op || (op.producedQuantity == null)) continue;
+
+      // Dia em que a OP foi FECHADA (completedAt) tem prioridade sobre o dia
+      // programado — uma OP programada pra ontem e fechada hoje conta hoje.
+      let opDate: Date | null = null;
+      const refParts = getOpReferenceDateStr(op).split('-');
+      if (refParts.length === 3) {
+        const y = parseInt(refParts[0], 10);
+        const m = parseInt(refParts[1], 10);
+        const d = parseInt(refParts[2], 10);
+        if (y === year && m === targetMonth1to12) {
+          opDate = new Date(y, m - 1, d);
+        }
+      }
+
+      if (!opDate) continue;
+
+      const day = opDate.getDate();
+      const setor = op.setor || 'Geral';
+      const key = `${day}-${setor}`;
+
+      const existing = map.get(key);
+      if (existing) {
+        existing.quantity += Number(op.producedQuantity || 0);
+      } else {
+        map.set(key, { day, setor, quantity: Number(op.producedQuantity || 0) });
+      }
+    }
+
+    return Array.from(map.values()).sort((a, b) => a.day - b.day || a.setor.localeCompare(b.setor));
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por dia e setor:', err);
+    return [];
+  }
+}
+
+/**
+ * Agrupa producedQuantity por HORA (0–23) de um dia específico — usado pelo
+ * gráfico do Dashboard quando o filtro de período é "Dia". Usa `completedAt`
+ * (o momento real em que a OP foi finalizada) como referência de hora, com
+ * fallback pra `createdAt` quando a OP ainda não tem `completedAt`. Como
+ * `ops`/`production_orders` não têm limite de linhas (getAllOPs pagina tudo),
+ * isso é confiável mesmo em dias de muita atividade — diferente de tentar
+ * montar essa mesma visão a partir de `events`, que só traz os 50 mais
+ * recentes de toda a fábrica (getRecentEvents).
+ */
+export function groupProductionByHour(
+  ops: ProductionOrder[],
+  dateStr: string
+): Array<{ hour: number; label: string; quantity: number }> {
+  const result = Array.from({ length: 24 }, (_, h) => ({
+    hour: h,
+    label: `${String(h).padStart(2, '0')}h`,
+    quantity: 0,
+  }));
+
+  if (!ops || ops.length === 0 || !dateStr) return result;
+
+  try {
+    for (const op of ops) {
+      if (!op || !op.producedQuantity) continue;
+
+      const tsStr = op.completedAt || op.createdAt;
+      if (!tsStr) continue;
+
+      const d = new Date(tsStr);
+      if (isNaN(d.getTime())) continue;
+
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      if (`${yyyy}-${mm}-${dd}` !== dateStr) continue;
+
+      const hour = d.getHours();
+      result[hour].quantity += Number(op.producedQuantity || 0);
+    }
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por hora:', err);
+  }
+
+  return result;
+}
+
+/**
+ * Agrupa producedQuantity por mês (para o gráfico de barras mensal).
+ * Retorna um array de 12 posições (jan=0 … dez=11) com a quantidade produzida.
+ * Filtra pelo ano fornecido.
+ */
+export function groupProductionByMonth(
+  ops: ProductionOrder[],
+  year: number
+): Array<{ month: number; label: string; quantity: number }> {
+  const monthLabels = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const result = monthLabels.map((label, idx) => ({
+    month: idx,
+    label,
+    quantity: 0,
+  }));
+
+  if (!ops || ops.length === 0) return result;
+
+  try {
+    for (const op of ops) {
+      if (!op || !op.producedQuantity) continue;
+
+      let opYear: number | null = null;
+      let opMonth0: number | null = null;
+
+      // Mesmo critério do gráfico diário: mês em que a OP foi FECHADA primeiro.
+      const refParts = getOpReferenceDateStr(op).split('-');
+      if (refParts.length >= 2) {
+        const y = parseInt(refParts[0], 10);
+        const m0 = parseInt(refParts[1], 10) - 1;
+        if (!isNaN(y) && !isNaN(m0)) {
+          opYear = y;
+          opMonth0 = m0;
+        }
+      }
+
+      if (opYear === year && opMonth0 !== null && opMonth0 >= 0 && opMonth0 < 12) {
+        result[opMonth0].quantity += Number(op.producedQuantity || 0);
+      }
+    }
+  } catch (err) {
+    console.warn('Erro ao agrupar produção por mês:', err);
+  }
+
+  return result;
+}
+
+/**
+ * Gera uma senha temporária segura para o primeiro acesso do líder.
+ * Nunca use uma senha fixa/hardcoded — cada usuário recebe uma senha única.
+ * Formato: 3 letras maiúsculas + 3 números + 2 caracteres especiais (ex: "XKP472#!")
+ */
+export function generateTemporaryPassword(): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // sem I e O para evitar confusão visual
+  const digits = '0123456789';
+  const special = '!@#$%&*';
+
+  const rand = (charset: string) =>
+    charset[crypto.getRandomValues(new Uint32Array(1))[0] % charset.length];
+
+  const parts = [
+    rand(upper), rand(upper), rand(upper),
+    rand(digits), rand(digits), rand(digits),
+    rand(special), rand(special),
+  ];
+
+  // Embaralha para não ter padrão previsível
+  for (let i = parts.length - 1; i > 0; i--) {
+    const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
+    [parts[i], parts[j]] = [parts[j], parts[i]];
+  }
+
+  return parts.join('');
+}
+
+/** @deprecated Use generateTemporaryPassword() — senha fixa removida por segurança. */
+export const DEFAULT_LEADER_PASSWORD = generateTemporaryPassword();
+
+/**
+ * Gera um e-mail corporativo padronizado a partir do nome completo do líder
+ * Ex: "Carlos Alberto da Silva" -> "carlos.silva@fabrica.com"
+ */
+export function generateLeaderEmail(name: string, domain = 'fabrica.com'): string {
+  if (!name || !name.trim()) return '';
+  const clean = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // remove acentos
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (clean.length === 0) return '';
+  if (clean.length === 1) return `${clean[0]}@${domain}`;
+  return `${clean[0]}.${clean[clean.length - 1]}@${domain}`;
+}
+
+// Limpeza definitiva de chaves legadas de cache local para sincronização 100% online
+if (typeof window !== 'undefined' && window.localStorage) {
+  try {
+    const legacyKeys = [
+      'SIG_PROD_DELETED_OPS_V6',
+      'SIG_PROD_OPS_RESET_TIME_V6',
+      'SIG_PROD_OPS_STORAGE_V5',
+      'SIG_PROD_DELETED_OPS_V5',
+      'SIG_PROD_LINES_STORAGE_V5',
+      'SIG_PROD_EVENTS_STORAGE_V5',
+      'SIG_PROD_ROTATIONS_STORAGE_V5',
+      'SIG_PROD_PAUSE_REASONS_STORAGE_V5',
+      'SIG_PROD_PROFILES_STORAGE_V5',
+      'SIG_PROD_MONTHLY_GOALS_V5',
+      'SIG_PROD_OPS_STORAGE_V4',
+      'SIG_PROD_DELETED_OPS_V4',
+      'SIG_PROD_EVENTS_STORAGE_V4',
+      'SIG_PROD_OPS_STORAGE',
+      'SIG_PROD_EVENTS_STORAGE',
+      'SIG_PROD_LAST_SYNC',
+      'gpanel_monthly_goal',
+    ];
+    legacyKeys.forEach(k => window.localStorage.removeItem(k));
+  } catch {}
+}
+
+// Configuração oficial de linhas de produção: Envase 1, Envase 2 e Sleev (sem o prefixo 'Linha')
+export const normalizeLineName = (id: string, name?: string | null): string => {
+  const cleanId = String(id || '').toLowerCase().trim();
+  const cleanName = String(name || '').toLowerCase().trim();
+
+  // Envase 1
+  if (
+    cleanId === 'line-1' ||
+    cleanName === 'linha 01 - envase' ||
+    cleanName === 'linha 1 - envase' ||
+    cleanName === 'linha 1' ||
+    cleanName === 'linha 01' ||
+    cleanName === 'envase 1' ||
+    cleanName === 'envase 01' ||
+    (cleanName.includes('envase') && (cleanName.includes('1') || cleanName.includes('01')))
+  ) {
+    return 'Envase 1';
+  }
+
+  // Envase 2
+  if (
+    cleanId === 'line-2' ||
+    cleanName === 'linha 02 - envase' ||
+    cleanName === 'linha 2 - envase' ||
+    cleanName === 'linha 2' ||
+    cleanName === 'linha 02' ||
+    cleanName === 'envase 2' ||
+    cleanName === 'envase 02' ||
+    (cleanName.includes('envase') && (cleanName.includes('2') || cleanName.includes('02')))
+  ) {
+    return 'Envase 2';
+  }
+
+  // Sleev
+  if (
+    cleanId === 'line-sleeve' ||
+    cleanId === 'line-sleev' ||
+    cleanName === 'linha sleeve' ||
+    cleanName === 'linha sleev' ||
+    cleanName === 'sleeve' ||
+    cleanName === 'sleev' ||
+    cleanName.includes('sleeve') ||
+    cleanName.includes('sleev')
+  ) {
+    return 'Sleev';
+  }
+
+  // Se qualquer outra linha começar com "Linha " ou "Linha - "
+  if (name && /^linha\s*[-–—]?\s*/i.test(name.trim())) {
+    const stripped = name.trim().replace(/^linha\s*[-–—]?\s*/i, '');
+    if (stripped.length > 0) {
+      return stripped.charAt(0).toUpperCase() + stripped.slice(1);
+    }
+  }
+
+  return name || id;
+};
+
+const DEFAULT_LINES: ProductionLine[] = [
+  { id: 'line-1', name: 'Envase 1', status: 'idle', currentOpId: null },
+  { id: 'line-2', name: 'Envase 2', status: 'idle', currentOpId: null },
+  { id: 'line-sleeve', name: 'Sleev', status: 'idle', currentOpId: null },
+];
+
+// Default initial fallback OPs (Vazio por padrão para novas atribuições e importações)
+const DEFAULT_OPS: ProductionOrder[] = [];
+
+// Default pause reasons
+export const DEFAULT_PAUSE_REASONS: PauseReason[] = [
+  { id: 'pr-intervalo', name: 'Intervalo' },
+  { id: 'pr-cafe', name: 'Café' },
+  { id: 'pr-embalagens', name: 'Falta de embalagens' },
+  { id: 'pr-insumos', name: 'Falta de insumos' },
+  { id: 'pr-redatar', name: 'Redatar frascos' },
+  { id: 'pr-orientacao', name: 'Aguardando orientação' },
+  { id: 'pr-laboratorio', name: 'Aguardando laboratório' },
+  { id: 'pr-operacional', name: 'Problema operacional' },
+  { id: 'pr-manutencao', name: 'Manutenção' },
+  { id: 'pr-limpeza', name: 'Limpeza' },
+  { id: 'pr-outro', name: 'Outro' },
+];
+
+// Default recent events (Vazio por padrão)
+const DEFAULT_EVENTS: ProductionEvent[] = [];
+
+// Helper para filtrar dados mock legados
+const isMockOp = (op: ProductionOrder | any) => {
+  if (!op) return true;
+  const id = String(op.id || '').trim();
+  const num = String(op.number || op.op_number || '').trim();
+  const prod = String(op.product || op.product_name || '').trim();
+  
+  const mockExactIds = ['op-1', 'op-2', 'op-3', 'op-4', 'op-5'];
+  const mockExactNumbers = ['40231', '40232', '40233', '40234', '40235'];
+  
+  return (
+    mockExactIds.includes(id) ||
+    mockExactNumbers.includes(num) ||
+    prod === 'Shampoo Hidratante X 500ml' ||
+    prod === 'Condicionador Revitalizante 300ml' ||
+    prod === 'Sleeve Térmico Lote Especial 250ml' ||
+    prod === 'Kit Presente Natalino Supreme'
+  );
+};
+
+const isMockEvent = (e: ProductionEvent | any) => {
+  if (!e) return true;
+  const id = String(e.id || '').trim();
+  const num = String(e.opNumber || e.op_number || '').trim();
+  const mockExactIds = ['ev-1', 'ev-2', 'ev-3'];
+  const mockExactNumbers = ['40231', '40232', '40233', '40234', '40235'];
+  return mockExactIds.includes(id) || mockExactNumbers.includes(num);
+};
+
+// Estado volátil em memória para feedback instantâneo de UI
+let inMemoryLines: ProductionLine[] = [...DEFAULT_LINES];
+let inMemoryOps: ProductionOrder[] = [];
+let inMemoryEvents: ProductionEvent[] = [];
+let inMemoryRotations: Record<string, string> = {};
+let inMemoryProfiles: UserProfile[] = [];
+
+// ============================================================================
+// MODO TREINAMENTO (SIMULAÇÃO) — ver src/pages/TrainingSimulator.tsx
+// ----------------------------------------------------------------------------
+// Ativado exclusivamente pela tela de Treinamento do Coordenador Geral. Com
+// `trainingModeActive` ligado, as funções abaixo (leitura E escrita de OPs/
+// linhas/eventos/rotação) desviam para os arrays `training*` abaixo — SEM
+// tocar em `inMemoryOps`/`inMemoryLines`/`inMemoryEvents`/`inMemoryRotations`
+// (o cache real da fábrica) e SEM nenhuma chamada ao Supabase.
+//
+// Isso permite reusar as telas de produção de verdade (PesagemScreen,
+// ManipulacaoScreen, LeaderScreen) IDÊNTICAS durante o treinamento — mesmo
+// componente, mesmo visual, mesmos botões — só trocando de onde os dados
+// vêm, e garante que nenhum clique durante um treinamento (por mais errado
+// que seja de propósito) grava, altera ou apaga qualquer OP, linha ou
+// evento real da fábrica.
+// ============================================================================
+let trainingModeActive = false;
+let trainingOps: ProductionOrder[] = [];
+let trainingLines: ProductionLine[] = [];
+let trainingEvents: ProductionEvent[] = [];
+
+export function isTrainingModeActive(): boolean {
+  return trainingModeActive;
+}
+
+/**
+ * Liga (com `seed`) ou desliga o Modo Treinamento. Chamado só pela
+ * TrainingSimulator ao montar/desmontar ou trocar de área — nunca pelo
+ * restante do app.
+ */
+export function setTrainingMode(active: boolean, seed?: { ops: ProductionOrder[]; lines: ProductionLine[] }): void {
+  trainingModeActive = active;
+  if (active) {
+    trainingOps = seed?.ops ? seed.ops.map(op => ({ ...op })) : [];
+    trainingLines = seed?.lines ? seed.lines.map(l => ({ ...l })) : [];
+    trainingEvents = [];
+  } else {
+    trainingOps = [];
+    trainingLines = [];
+    trainingEvents = [];
+  }
+  resetTrainingPesagemHistory();
+}
+
+// O banco de dados Supabase é a ÚNICA fonte de verdade para OPs.
+// Nenhuma lista de OPs excluídas é salva ou mantida localmente no localStorage.
+if (typeof window !== 'undefined' && window.localStorage) {
+  try {
+    window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V6');
+    window.localStorage.removeItem('SIG_PROD_OPS_RESET_TIME_V6');
+  } catch {}
+}
+
+const SLEEVE_OPS_KEY = 'gpanel_sleeve_op_ids';
+
+export function getSleeveOpIds(): Set<string> {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const raw = window.localStorage.getItem(SLEEVE_OPS_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        return new Set(Array.isArray(arr) ? arr : []);
+      }
+    } catch {}
+  }
+  return new Set();
+}
+
+export function markOpAsSleeve(opId: string, isSleeve: boolean) {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const set = getSleeveOpIds();
+      if (isSleeve) {
+        set.add(opId);
+      } else {
+        set.delete(opId);
+      }
+      window.localStorage.setItem(SLEEVE_OPS_KEY, JSON.stringify(Array.from(set)));
+    } catch {}
+  }
+}
+
+export function notifyStateChange() {
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('sig_data_updated'));
+    } catch {}
+  }
+}
+
+// Helpers de notificação reativa de estado
+function persistOps() {
+  notifyStateChange();
+}
+
+function persistLines() {
+  notifyStateChange();
+}
+
+function persistEvents() {
+  notifyStateChange();
+}
+
+function persistRotations() {
+  notifyStateChange();
+}
+
+export function persistProfiles() {
+  notifyStateChange();
+}
+
+// ---------------- PROFILES & LEADERS ----------------
+export const getProfile = async (uid: string): Promise<UserProfile | null> => {
+  const foundLocal = inMemoryProfiles.find(p => p.uid === uid || p.email === uid);
+
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', uid)
+      .maybeSingle();
+
+    if (data && !error) {
+      const isCoord = data.role === 'coordinator' || data.role === 'coordenador' || (data.cargo && /coordenador|^diretor/i.test(String(data.cargo).trim()));
+      let isFirstAccess = false;
+      if (data.must_change_password === true || data.status === 'first_access') {
+        isFirstAccess = true;
+      } else if (data.must_change_password === false || data.status === 'active') {
+        isFirstAccess = false;
+      } else {
+        isFirstAccess = foundLocal?.mustChangePassword === true || foundLocal?.status === 'first_access';
+      }
+
+      const profile: UserProfile = {
+        uid: data.id,
+        email: data.email,
+        name: data.name || data.email?.split('@')[0] || 'Usuário',
+        role: isCoord ? 'coordinator' : 'leader',
+        cargo: data.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
+        area: data.area || undefined,
+        rule: data.rule || (/^diretor/i.test(String(data.cargo || '').trim()) ? 'diretor' : isCoord ? 'admin' : data.area === 'Pesagem' ? 'pesagem' : data.area === 'Manipulação' ? 'manipulacao' : 'envase'),
+        allowedScreens: data.allowed_screens || undefined,
+        status: isFirstAccess ? 'first_access' : (data.status || 'active'),
+        mustChangePassword: isFirstAccess,
+        defaultPassword: data.default_password || undefined,
+        createdAt: data.created_at || new Date().toISOString(),
+      };
+      
+      const existingIdx = inMemoryProfiles.findIndex(p => p.uid === profile.uid || (profile.email && p.email?.toLowerCase() === profile.email.toLowerCase()));
+      if (existingIdx !== -1) {
+        inMemoryProfiles[existingIdx] = profile;
+      } else {
+        inMemoryProfiles.push(profile);
+      }
+      persistProfiles();
+
+      return profile;
+    }
+  } catch (error) {
+    console.warn('Consulta de perfil Supabase:', error);
+  }
+
+  return foundLocal || null;
+};
+
+export const getAllUsers = async (): Promise<UserProfile[]> => {
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (data && data.length > 0 && !error) {
+      const remoteUsers: UserProfile[] = data.map((d: any) => {
+        const isCoord = d.role === 'coordinator' || d.role === 'coordenador' || (d.cargo && /coordenador|^diretor/i.test(String(d.cargo).trim()));
+        const localMatch = inMemoryProfiles.find(p => p.uid === d.id || (d.email && p.email?.toLowerCase() === d.email.toLowerCase()));
+        
+        let isFirstAccess = false;
+        if (d.must_change_password === true || d.status === 'first_access') {
+          isFirstAccess = true;
+        } else if (d.must_change_password === false || d.status === 'active') {
+          isFirstAccess = false;
+        } else {
+          isFirstAccess = localMatch?.mustChangePassword === true || localMatch?.status === 'first_access';
+        }
+
+        return {
+          uid: String(d.id || d.uid || `usr-${d.email}`),
+          email: d.email || '',
+          name: d.name || d.email?.split('@')[0] || 'Colaborador',
+          role: isCoord ? 'coordinator' : 'leader',
+          cargo: d.cargo || (isCoord ? 'Coordenador Geral' : 'Líder de Produção'),
+          area: d.area || localMatch?.area || undefined,
+          rule: d.rule || (/^diretor/i.test(String(d.cargo || '').trim()) ? 'diretor' : localMatch?.rule) || (isCoord ? 'admin' : (d.area || localMatch?.area) === 'Pesagem' ? 'pesagem' : (d.area || localMatch?.area) === 'Manipulação' ? 'manipulacao' : 'envase'),
+          allowedScreens: d.allowed_screens || localMatch?.allowedScreens || undefined,
+          status: isFirstAccess ? 'first_access' : ((d.status as 'active' | 'inactive' | 'pending' | 'first_access') || 'active'),
+          mustChangePassword: isFirstAccess,
+          defaultPassword: d.default_password || localMatch?.defaultPassword || undefined,
+          createdAt: d.created_at || localMatch?.createdAt || new Date().toISOString(),
+        };
+      });
+
+      inMemoryProfiles = remoteUsers;
+      persistProfiles();
+      return inMemoryProfiles;
+    }
+  } catch (err) {
+    console.warn('Busca de todos usuários no Supabase:', err);
+  }
+
+  return inMemoryProfiles;
+};
+
+export const getLeaders = async (): Promise<UserProfile[]> => {
+  if (trainingModeActive) return [];
+  try {
+    const allUsers = await getAllUsers();
+    // Retorna todos os usuários cujo perfil não seja coordenador (isto é, líderes cadastrados)
+    const leaders = allUsers.filter(u => u.role !== 'coordinator');
+    return leaders;
+  } catch (err) {
+    console.warn('Busca de líderes:', err);
+    return inMemoryProfiles.filter(u => u.role !== 'coordinator');
+  }
+};
+
+export const updateUserRole = async (userId: string, newRole: 'coordinator' | 'leader', newCargo?: string): Promise<boolean> => {
+  try {
+    // 1. Update in-memory immediately
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.role = newRole;
+      target.cargo = newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
+      persistProfiles();
+    }
+
+    // 2. Update Supabase
+    let { error } = await supabase
+      .from('profiles')
+      .update({ role: newRole, cargo: newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção') })
+      .eq('id', userId);
+
+    if (error) {
+      const res = await supabase
+        .from('profiles')
+        .update({ role: newRole, cargo: newCargo || (newRole === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção') })
+        .eq('email', userId);
+      error = res.error;
+    }
+
+    if (error) {
+      console.error('Erro ao atualizar cargo de usuário no Supabase:', error.message);
+    }
+    return !error;
+  } catch (err) {
+    console.error('Erro ao atualizar cargo de usuário:', err);
+    return false;
+  }
+};
+
+/** Atualiza só o CARGO (título exibido) do colaborador — não muda o acesso. */
+export const updateUserCargo = async (userId: string, newCargo: string): Promise<{ ok: boolean; error?: string }> => {
+  const cargo = String(newCargo || '').trim();
+  if (!cargo) return { ok: false, error: 'Informe o cargo.' };
+  try {
+    let res: any = await supabase.from('profiles').update({ cargo }).eq('id', userId).select('id');
+    if (res.error || !res.data || res.data.length === 0) {
+      res = await supabase.from('profiles').update({ cargo }).eq('email', userId).select('id');
+    }
+    if (res.error) return { ok: false, error: res.error.message };
+    if (!res.data || res.data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.cargo = cargo;
+      persistProfiles();
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+export const updateUserArea = async (
+  userId: string,
+  newArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação',
+  newCargo?: string
+): Promise<boolean> => {
+  try {
+    // 1. Atualizar em memória imediatamente
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.area = newArea;
+      if (newCargo) {
+        target.cargo = newCargo;
+      }
+      persistProfiles();
+    }
+
+    // 2. Atualizar no Supabase
+    const payload: any = { area: newArea };
+    if (newCargo) {
+      payload.cargo = newCargo;
+    }
+
+    let { error } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', userId);
+
+    if (error) {
+      const res = await supabase
+        .from('profiles')
+        .update(payload)
+        .eq('email', userId);
+      error = res.error;
+    }
+
+    if (error) {
+      console.error('Erro ao atualizar área de usuário no Supabase:', error.message);
+    }
+    return !error;
+  } catch (err) {
+    console.error('Erro ao atualizar área de usuário:', err);
+    return false;
+  }
+};
+
+export const updateUserRule = async (
+  userId: string,
+  newRule: AccessRule,
+  allowedScreens?: DashboardTab[]
+): Promise<boolean> => {
+  try {
+    const isCoord = newRule === 'admin' || newRule === 'diretor';
+    const targetArea: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação' | undefined = 
+      newRule === 'pesagem' ? 'Pesagem' 
+      : newRule === 'manipulacao' ? 'Manipulação' 
+      : newRule === 'envase' ? 'Envase' 
+      : isCoord ? 'Coordenação' : undefined;
+
+    // ADM (acesso total) não troca o cargo: o cargo é só o título da pessoa
+    const targetCargo = newRule === 'diretor' ? 'Diretor Industrial'
+      : newRule === 'admin' ? undefined
+      : newRule === 'pesagem' ? 'Líder de Pesagem'
+      : newRule === 'manipulacao' ? 'Líder de Manipulação'
+      : newRule === 'envase' ? 'Líder de Envase'
+      : undefined;
+
+    // 1. Atualizar em memória imediatamente
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.rule = newRule;
+      target.allowedScreens = allowedScreens;
+      target.role = isCoord ? 'coordinator' : 'leader';
+      if (targetArea) target.area = targetArea;
+      if (targetCargo) target.cargo = targetCargo;
+      persistProfiles();
+    }
+
+    // 2. Atualizar no Supabase
+    const payload: any = {
+      role: isCoord ? 'coordinator' : 'leader',
+      rule: newRule,
+      allowed_screens: allowedScreens || null,
+      updated_at: new Date().toISOString(),
+    };
+    if (targetArea) payload.area = targetArea;
+    if (targetCargo) payload.cargo = targetCargo;
+
+    let { error } = await supabase.from('profiles').update(payload).eq('id', userId);
+    if (error) {
+      const res = await supabase.from('profiles').update(payload).eq('email', userId);
+      error = res.error;
+    }
+
+    // Se falhar por colunas inexistentes, tenta salvar payload base seguro
+    if (error) {
+      const safePayload: any = {
+        role: isCoord ? 'coordinator' : 'leader',
+        updated_at: new Date().toISOString(),
+      };
+      if (targetArea) safePayload.area = targetArea;
+      if (targetCargo) safePayload.cargo = targetCargo;
+
+      const safeRes = await supabase.from('profiles').update(safePayload).eq('id', userId);
+      error = safeRes.error;
+    }
+
+    if (error) {
+      console.error('Erro ao atualizar rule do usuário no Supabase:', error.message);
+    }
+    return !error;
+  } catch (err) {
+    console.error('Erro ao atualizar rule do usuário:', err);
+    return false;
+  }
+};
+
+export const updateUserStatus = async (userId: string, newStatus: 'active' | 'inactive' | 'pending' | 'first_access'): Promise<boolean> => {
+  try {
+    const isFirstAccess = newStatus === 'first_access';
+    // 1. Update in-memory immediately
+    const target = inMemoryProfiles.find(u => u.uid === userId || (u.email && u.email.toLowerCase() === userId.toLowerCase()));
+    if (target) {
+      target.status = newStatus;
+      target.mustChangePassword = isFirstAccess;
+      if (!isFirstAccess) {
+        delete target.defaultPassword;
+      }
+      persistProfiles();
+    }
+
+    // 2. Update Supabase
+    let { error } = await supabase
+      .from('profiles')
+      .update({
+        status: newStatus,
+        must_change_password: isFirstAccess,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', userId);
+
+    if (error) {
+      const res = await supabase
+        .from('profiles')
+        .update({
+          status: newStatus,
+          must_change_password: isFirstAccess,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('email', userId);
+      error = res.error;
+    }
+
+    if (error) {
+      console.error('Erro ao alterar status de usuário no Supabase:', error.message);
+    }
+    return !error;
+  } catch (err) {
+    console.error('Erro ao alterar status de usuário:', err);
+    return false;
+  }
+};
+
+export interface PreAuthorizeResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+  isOfflineFallback?: boolean;
+  uid?: string;
+}
+
+export const preAuthorizeUser = async (data: {
+  email: string;
+  name: string;
+  role: 'coordinator' | 'leader';
+  cargo?: string;
+  area?: 'Envase' | 'Pesagem' | 'Manipulação' | 'Coordenação';
+  lineId?: string;
+  mustChangePassword?: boolean;
+  defaultPassword?: string;
+}): Promise<PreAuthorizeResult> => {
+  try {
+    const email = data.email.trim().toLowerCase();
+    const name = data.name.trim();
+    const role = data.role;
+    const cargo = data.cargo || (role === 'coordinator' ? 'Coordenador Geral' : 'Líder de Produção');
+    const area = data.area || (role === 'coordinator' ? 'Coordenação' : undefined);
+    const isFirstAccess = data.mustChangePassword !== false;
+    const defaultPassword = data.defaultPassword || generateTemporaryPassword();
+
+    if (!isSupabaseRuntimeEnabled || !supabaseUrl || !supabaseAnonKey) {
+      return {
+        success: false,
+        error: 'Supabase não está configurado. Conecte ao banco online para criar colaboradores.',
+      };
+    }
+
+    // PASSO 1: Criar usuário no Supabase Auth PRIMEIRO (via ephemeralClient)
+    let realUserId: string | undefined;
+    let isSupabaseAuthCreated = false;
+    let rateLimitExceeded = false;
+    let authErrorMessage: string | undefined;
+
+    try {
+      const ephemeralClient = createClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      });
+
+      const signUpResult = await ephemeralClient.auth.signUp({
+        email,
+        password: defaultPassword,
+        options: {
+          data: {
+            name,
+            role,
+            cargo,
+            area: area || null,
+            must_change_password: isFirstAccess,
+            status: isFirstAccess ? 'first_access' : 'active',
+          },
+        },
+      });
+
+      const errorMsg = (signUpResult.error?.message || '').toLowerCase();
+
+      if (errorMsg.includes('rate limit') || errorMsg.includes('over_email_send_rate_limit')) {
+        rateLimitExceeded = true;
+        authErrorMessage = 'Limite de e-mails do Supabase atingido. Para permitir cadastros ilimitados sem confirmação por e-mail, acesse o painel do Supabase > Authentication > Providers > Email e desative "Confirm email".';
+        console.warn('[GPanel] Rate limit de envio de e-mail no Supabase Auth:', signUpResult.error);
+      } else if (
+        errorMsg.includes('already registered') ||
+        errorMsg.includes('user_already_exists')
+      ) {
+        // Usuário já existe no Auth: buscar ID existente em profiles
+        const { data: existing } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('email', email)
+          .maybeSingle();
+
+        if (existing?.id) {
+          realUserId = existing.id;
+          isSupabaseAuthCreated = true;
+        }
+      } else if (signUpResult.data?.user?.id) {
+        realUserId = signUpResult.data.user.id;
+        isSupabaseAuthCreated = true;
+      } else if (signUpResult.error) {
+        console.warn('[GPanel] Erro no Auth signUp:', signUpResult.error);
+        authErrorMessage = signUpResult.error.message;
+      }
+    } catch (authErr: any) {
+      console.warn('[GPanel] Exceção no cliente temporário do Auth:', authErr);
+      authErrorMessage = authErr?.message;
+    }
+
+    // Se falhou no Auth (ex: rate limit de e-mail), cria UUID local provisório
+    const isLocalFallbackId = !realUserId;
+    const finalUserId = realUserId || ((typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `usr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
+
+    // PASSO 2: Montar userObj
+    const userObj: UserProfile = {
+      uid: finalUserId,
+      email,
+      name,
+      role,
+      cargo,
+      area: area || undefined,
+      status: isFirstAccess ? 'first_access' : 'active',
+      mustChangePassword: isFirstAccess,
+      defaultPassword: isFirstAccess ? defaultPassword : undefined,
+      createdAt: new Date().toISOString(),
+    };
+    if (isLocalFallbackId) {
+      (userObj as any).pendingSupabaseSync = true;
+    }
+
+    // PASSO 3: Salvar em inMemoryProfiles imediatamente
+    const existingLocalIdx = inMemoryProfiles.findIndex(u => u.email?.toLowerCase() === email || u.uid === finalUserId);
+
+    if (existingLocalIdx !== -1) {
+      inMemoryProfiles[existingLocalIdx] = {
+        ...userObj,
+        createdAt: inMemoryProfiles[existingLocalIdx].createdAt || userObj.createdAt,
+      };
+    } else {
+      inMemoryProfiles.unshift(userObj);
+    }
+    persistProfiles();
+
+    // PASSO 4: INSERT/UPSERT em profiles se o ID for real do Supabase Auth
+    let databaseSaved = false;
+    if (isSupabaseAuthCreated && realUserId) {
+      try {
+        const fullPayload: any = {
+          id: realUserId,
+          email,
+          name,
+          role,
+          cargo,
+          area: area || null,
+          status: isFirstAccess ? 'first_access' : 'active',
+          must_change_password: isFirstAccess,
+          default_password: isFirstAccess ? defaultPassword : null,
+          created_at: new Date().toISOString(),
+        };
+
+        let { error: upsertErr } = await supabase.from('profiles').upsert(fullPayload, { onConflict: 'id' });
+
+        // Fallback resiliente: se a tabela profiles ainda não tem a coluna 'area' ou 'default_password'
+        if (upsertErr && (
+          upsertErr.code === 'PGRST204' ||
+          upsertErr.message?.includes('area') ||
+          upsertErr.message?.includes('default_password')
+        )) {
+          console.warn('[GPanel] profiles.upsert falhou por colunas opcionais, tentando payload base:', upsertErr.message);
+          const basePayload: any = {
+            id: realUserId,
+            email,
+            name,
+            role,
+            cargo,
+            status: isFirstAccess ? 'first_access' : 'active',
+            must_change_password: isFirstAccess,
+            created_at: new Date().toISOString(),
+          };
+          const retryRes = await supabase.from('profiles').upsert(basePayload, { onConflict: 'id' });
+          upsertErr = retryRes.error;
+        }
+
+        if (!upsertErr) {
+          databaseSaved = true;
+          // Limpa flag de pendência
+          const stored = inMemoryProfiles.find(u => u.uid === realUserId || u.email?.toLowerCase() === email);
+          if (stored) {
+            delete (stored as any).pendingSupabaseSync;
+            persistProfiles();
+          }
+        } else {
+          console.warn('[GPanel] Erro ao gravar perfil em profiles no Supabase (RLS ou schema):', upsertErr);
+        }
+      } catch (dbErr: any) {
+        console.warn('[GPanel] Falha ao sincronizar perfil com profiles no Supabase:', dbErr);
+      }
+    }
+
+    // PASSO 5: Alocar linha se lineId foi fornecido
+    if (data.lineId) {
+      try {
+        await saveLeaderRotation(finalUserId, data.lineId, email, name);
+      } catch (rotErr) {
+        console.warn('Erro ao alocar rotação inicial do líder:', rotErr);
+      }
+    }
+
+    if (rateLimitExceeded) {
+      return {
+        success: false,
+        error: 'rate_limit',
+        isOfflineFallback: true,
+        uid: finalUserId,
+        message: authErrorMessage || 'Limite de e-mails do Supabase atingido. O líder foi salvo localmente.',
+      };
+    }
+
+    if (!databaseSaved && isLocalFallbackId) {
+      return {
+        success: true,
+        isOfflineFallback: true,
+        uid: finalUserId,
+        message: authErrorMessage
+          ? `Líder salvo localmente (${authErrorMessage}).`
+          : 'Líder salvo localmente (pendente envio ao Supabase).',
+      };
+    }
+
+    return {
+      success: true,
+      isOfflineFallback: false,
+      uid: finalUserId,
+      message: 'Líder registrado com sucesso no Supabase!',
+    };
+  } catch (err: any) {
+    if (isRetryableError(err) || isFetchOrNetworkError(err)) {
+      console.warn('[GPanel] Falha de rede durante pré-autorização:', err);
+    } else {
+      console.error('Erro ao pré-autorizar usuário:', err);
+    }
+    return {
+      success: false,
+      error: err?.message || 'Erro inesperado',
+      message: 'Não foi possível cadastrar o colaborador.',
+    };
+  }
+};
+
+/**
+ * Sincroniza colaboradores salvos apenas localmente para o Supabase
+ */
+export const syncPendingLeadersToSupabase = async (): Promise<{
+  total: number;
+  synced: number;
+  failed: number;
+  errors: string[];
+}> => {
+  const pending = inMemoryProfiles.filter(p => 
+    p.role === 'leader' && (
+      (p as any).pendingSupabaseSync === true ||
+      p.uid.startsWith('usr-')
+    )
+  );
+
+  let synced = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const leader of pending) {
+    try {
+      const res = await preAuthorizeUser({
+        name: leader.name,
+        email: leader.email,
+        role: leader.role,
+        cargo: leader.cargo,
+        area: leader.area,
+        mustChangePassword: leader.mustChangePassword,
+        defaultPassword: leader.defaultPassword,
+      });
+
+      if (res.success && !res.isOfflineFallback) {
+        synced++;
+      } else {
+        failed++;
+        if (res.message) errors.push(`${leader.name} (${leader.email}): ${res.message}`);
+      }
+    } catch (e: any) {
+      failed++;
+      errors.push(`${leader.name} (${leader.email}): ${e?.message || 'Falha de conexão'}`);
+    }
+  }
+
+  return { total: pending.length, synced, failed, errors };
+};
+
+/**
+ * Atualiza a senha no primeiro acesso e remove a flag de primeiro acesso
+ */
+export const completeFirstAccessPasswordChange = async (
+  uid: string,
+  newPassword: string
+): Promise<{ success: boolean; message?: string }> => {
+  try {
+    // 1. Atualizar em memória imediatamente
+    const target = inMemoryProfiles.find(u => u.uid === uid || (u.email && u.email.toLowerCase() === uid.toLowerCase()));
+    if (target) {
+      target.mustChangePassword = false;
+      target.status = 'active';
+      delete target.defaultPassword;
+      persistProfiles();
+    }
+
+    // 2. Atualizar senha no Supabase Auth
+    try {
+      const { error: authErr } = await supabase.auth.updateUser({
+        password: newPassword,
+        data: {
+          must_change_password: false,
+          status: 'active'
+        }
+      });
+      if (authErr) {
+        console.warn('Aviso ao atualizar senha no Supabase Auth:', authErr);
+      }
+    } catch (authE) {
+      console.warn('Exceção ao atualizar senha no Supabase Auth:', authE);
+    }
+
+    // 3. Atualizar status na tabela profiles do Supabase
+    try {
+      let { error: updateErr } = await supabase
+        .from('profiles')
+        .update({
+          default_password: null,
+          status: 'active',
+          must_change_password: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', uid);
+
+      if (updateErr && target?.email) {
+        await supabase
+          .from('profiles')
+          .update({
+            default_password: null,
+            status: 'active',
+            must_change_password: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('email', target.email);
+      }
+    } catch (dbErr) {
+      console.warn('Aviso ao atualizar status no profiles Supabase:', dbErr);
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Erro ao concluir troca de senha do primeiro acesso:', err);
+    return { success: false, message: err?.message || 'Falha ao gravar nova senha.' };
+  }
+};
+
+/**
+ * Redefine a senha de um líder para uma nova senha temporária gerada automaticamente.
+ */
+export const resetLeaderPassword = async (
+  leaderId: string,
+  leaderEmail: string
+): Promise<{ success: boolean; newPassword?: string; error?: string }> => {
+  try {
+    const newPassword = generateTemporaryPassword();
+    const targetEmail = (leaderEmail || leaderId).trim().toLowerCase();
+
+    // 1. Atualizar inMemoryProfiles imediatamente
+    const target = inMemoryProfiles.find(u => 
+      u.uid === leaderId || 
+      (u.email && u.email.toLowerCase() === targetEmail)
+    );
+
+    if (target) {
+      target.mustChangePassword = true;
+      target.status = 'first_access';
+      target.defaultPassword = newPassword;
+      persistProfiles();
+    }
+
+    // 2. Atualizar tabela profiles no Supabase
+    try {
+      let { error: updateErr } = await supabase
+        .from('profiles')
+        .update({
+          default_password: newPassword,
+          must_change_password: true,
+          status: 'first_access',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', leaderId);
+
+      if (updateErr && targetEmail) {
+        await supabase
+          .from('profiles')
+          .update({
+            default_password: newPassword,
+            must_change_password: true,
+            status: 'first_access',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('email', targetEmail);
+      }
+    } catch (dbErr) {
+      console.warn('Aviso ao sincronizar redefinição no Supabase profiles:', dbErr);
+    }
+
+    return { success: true, newPassword };
+  } catch (err: any) {
+    console.error('Erro ao redefinir senha do líder:', err);
+    return { success: false, error: err?.message || 'Falha ao redefinir senha do líder.' };
+  }
+};
+
+export const deleteUserProfile = async (userId: string, userEmail?: string): Promise<boolean> => {
+  try {
+    const targetEmail = (userEmail || userId).toLowerCase();
+
+    // 1. Remove from inMemoryProfiles
+    inMemoryProfiles = inMemoryProfiles.filter(u => 
+      u.uid !== userId && 
+      (!u.email || u.email.toLowerCase() !== targetEmail)
+    );
+    persistProfiles();
+
+    // Remove from inMemoryRotations
+    delete inMemoryRotations[userId];
+    if (userEmail) delete inMemoryRotations[userEmail];
+    if (targetEmail) delete inMemoryRotations[targetEmail];
+    persistRotations();
+
+    // 2. Remove from Supabase profiles and rotations
+    try {
+      await supabase.from('rotations').delete().eq('leader_id', userId);
+    } catch {}
+
+    let deleteFailed = false;
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', userId);
+
+      if (error || targetEmail) {
+        const resByEmail = await supabase.from('profiles').delete().eq('email', targetEmail);
+        // Só consideramos falha se AMBAS as tentativas (por id e por email) erraram —
+        // a segunda é feita sempre como reforço, mesmo quando a primeira já deu certo.
+        deleteFailed = Boolean(error) && Boolean(resByEmail.error);
+      }
+    } catch (e) {
+      console.warn('Erro ao excluir no Supabase:', e);
+      deleteFailed = true;
+    }
+
+    if (deleteFailed) {
+      console.error(`Falha ao excluir perfil ${userId} no Supabase.`);
+    }
+    return !deleteFailed;
+  } catch (err) {
+    console.error('Erro ao remover perfil:', err);
+    return false;
+  }
+};
+
+// ---------------- PRODUCTION LINES ----------------
+export const getLines = async (): Promise<ProductionLine[]> => {
+  if (trainingModeActive) return trainingLines.map(l => ({ ...l }));
+  try {
+    let { data, error } = await supabase.from('production_lines').select('*').order('name', { ascending: true });
+    if (error || !data || data.length === 0) {
+      const res = await supabase.from('lines').select('*').order('name', { ascending: true });
+      data = res.data;
+      error = res.error;
+    }
+
+    if (data && data.length > 0 && !error) {
+      const mapped: ProductionLine[] = data.map((d: any) => {
+        const normName = normalizeLineName(String(d.id), d.name);
+        // Sincroniza atualização do nome no Supabase se ainda tiver o formato antigo com 'Linha'
+        if (d.name && d.name !== normName) {
+          try {
+            supabase.from('production_lines').update({ name: normName }).eq('id', d.id).then();
+            supabase.from('lines').update({ name: normName }).eq('id', d.id).then();
+          } catch {}
+        }
+
+        return {
+          id: String(d.id),
+          name: normName,
+          status: (d.status || 'idle') as 'active' | 'idle' | 'paused',
+          currentOpId: d.current_op_id ? String(d.current_op_id) : (d.currentOpId ? String(d.currentOpId) : null),
+        };
+      });
+
+      const existingMap = new Map(inMemoryLines.map(l => [l.id, l]));
+      mapped.forEach(remoteLine => {
+        const local = existingMap.get(remoteLine.id);
+        existingMap.set(remoteLine.id, {
+          name: remoteLine.name || normalizeLineName(remoteLine.id, local?.name),
+          id: remoteLine.id,
+          status: remoteLine.status,
+          currentOpId: remoteLine.currentOpId,
+        });
+      });
+
+      inMemoryLines = Array.from(existingMap.values());
+    }
+  } catch (err) {
+    console.warn('Usando linhas de produção em cache local:', err);
+  }
+
+  // Sanitize line status if currentOpId is a mock or non-existent OP, and ensure normalized names
+  const opIds = new Set(inMemoryOps.map(o => o.id));
+  inMemoryLines = inMemoryLines.map(line => {
+    const normName = normalizeLineName(line.id, line.name);
+    if (line.currentOpId && (!opIds.has(line.currentOpId) || isMockOp({ id: line.currentOpId }))) {
+      return { ...line, name: normName, currentOpId: null, status: 'idle' };
+    }
+    return { ...line, name: normName };
+  });
+
+  persistLines();
+  return inMemoryLines;
+};
+
+export const createLine = async (name: string): Promise<ProductionLine> => {
+  const newLine: ProductionLine = {
+    id: `line-${Date.now()}`,
+    name,
+    status: 'idle',
+    currentOpId: null,
+  };
+
+  inMemoryLines.push(newLine);
+  persistLines();
+
+  try {
+    await Promise.any([
+      supabase.from('production_lines').insert({ id: newLine.id, name: newLine.name, status: 'idle' }),
+      supabase.from('lines').insert({ id: newLine.id, name: newLine.name, status: 'idle' }),
+    ]);
+  } catch (err) {
+    console.warn('Persistência de nova linha no Supabase:', err);
+  }
+
+  return newLine;
+};
+
+// ---------------- PRODUCTION ORDERS (OPS) ----------------
+
+/**
+ * Executa um insert/update que leva `completed_at` e, se a tabela ainda não
+ * tiver essa coluna (sql/add_completed_at.sql ainda não rodado), repete a
+ * gravação SEM ela — pra nunca perder o status/quantidade por causa disso.
+ *
+ * Por que isso importa: o getAllOPs lê de `production_orders`, e antes o
+ * completed_at nunca era gravado lá. Resultado: toda OP fechada voltava do
+ * banco sem data de conclusão, e o dashboard caía no dia PROGRAMADO (ou no dia
+ * de criação) — uma OP programada pra ontem e fechada hoje não aparecia no Hoje.
+ */
+async function runWithCompletedAtFallback<T extends { error: any }>(
+  run: (payload: any) => PromiseLike<T>,
+  payload: any
+): Promise<T> {
+  const res = await run(payload);
+  if (
+    res?.error &&
+    payload &&
+    Object.prototype.hasOwnProperty.call(payload, 'completed_at') &&
+    /completed_at/i.test(String(res.error.message || ''))
+  ) {
+    const { completed_at: _omit, ...rest } = payload;
+    return await run(rest);
+  }
+  return res;
+}
+
+/**
+ * Deriva o tipo de documento a partir do setor.
+ * Todos os setores agora utilizam a nomenclatura padrão OP (Ordem de Produção).
+ */
+export function getTipoDocumento(
+  _setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral'
+): 'OP' {
+  return 'OP';
+}
+
+// Busca TODAS as linhas de uma tabela, paginando com .range() em vez de um
+// único select() sem limite — o Supabase/PostgREST aplica um teto de linhas
+// por requisição (Max Rows do projeto, geralmente 1000), e sem isso qualquer
+// tabela que passe desse teto tem linhas cortadas silenciosamente (sem erro).
+// Ordena por `sequence` + `id` (desempate determinístico) porque muitas OPs
+// importadas do histórico compartilham o mesmo valor de `sequence` — sem um
+// desempate único, a paginação por .range() pode pular ou repetir linhas
+// empatadas entre uma página e outra.
+async function fetchAllRows(table: 'production_orders' | 'ops'): Promise<{ data: any[] | null; error: any }> {
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('*')
+      .order('sequence', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) {
+      return { data: allRows.length > 0 ? allRows : null, error };
+    }
+    if (!data || data.length === 0) break;
+    allRows.push(...data);
+    if (data.length < PAGE_SIZE) break; // última página
+    offset += PAGE_SIZE;
+  }
+  return { data: allRows, error: null };
+}
+
+export const getAllOPs = async (): Promise<ProductionOrder[]> => {
+  if (trainingModeActive) return trainingOps.map(op => ({ ...op }));
+  try {
+    let { data, error } = await fetchAllRows('production_orders');
+    if (error || !data || data.length === 0) {
+      const res = await fetchAllRows('ops');
+      data = res.data;
+      error = res.error;
+    }
+
+    if (data && data.length > 0 && !error) {
+      const sleeveIds = getSleeveOpIds();
+      const remoteOps: ProductionOrder[] = data
+        .map((d: any) => ({
+          id: String(d.id),
+          number: String(d.number || d.op_number || ''),
+          product: d.product || d.product_name || 'Produto',
+          lote: d.lote || d.batch || d.numero_lote || '',
+          plannedQuantity: Number(d.planned_quantity || d.plannedQuantity || 0),
+          producedQuantity: Number(d.produced_quantity || d.producedQuantity || 0),
+          granel: d.granel || d.bulk || d.lote_granel || d.cod_granel || '',
+          priority: (d.priority || 'Normal') as any,
+          status: (d.status || 'pending') as any,
+          lineId: d.line_id ? String(d.line_id) : (d.lineId ? String(d.lineId) : null),
+          leaderId: d.leader_id ? String(d.leader_id) : (d.leaderId ? String(d.leaderId) : null),
+          packageAvailability: Number(d.package_availability || d.packageAvailability || 0),
+          sequence: Number(d.sequence || 1),
+          scheduledDate: d.scheduled_date || d.scheduledDate || undefined,
+          scheduledEndDate: d.scheduled_end_date || d.scheduledEndDate || undefined,
+          scheduledDays: d.scheduled_days != null ? Number(d.scheduled_days) : (d.scheduledDays != null ? Number(d.scheduledDays) : undefined),
+          scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
+          setor: d.setor || undefined,
+          unidade: d.unidade || undefined,
+          rejectedQuantity: Number(d.rejected_quantity || d.rejectedQuantity || 0),
+          plannedHours: d.planned_hours != null ? Number(d.planned_hours) : (d.plannedHours != null ? Number(d.plannedHours) : undefined),
+          tipoDocumento: d.tipo_documento || 'OP',
+          industria: d.industria || undefined,
+          finishedShift: d.finished_shift || undefined,
+          isSleeve: sleeveIds.has(String(d.id)) || Boolean(d.is_sleeve || d.isSleeve),
+          createdAt: d.created_at || d.createdAt || new Date().toISOString(),
+          // Antes este mapeamento nunca lia completed_at — fazia a trava de
+          // segurança em calculateProductionTime() (que fecha o intervalo de
+          // uma OP concluída no horário real de término) nunca funcionar,
+          // mesmo quando o banco tinha o valor certo.
+          completedAt: d.completed_at || d.completedAt || undefined,
+        }))
+        .filter((op) => {
+          if (isMockOp(op)) return false;
+          return true;
+        });
+
+      inMemoryOps = remoteOps;
+      persistOps();
+      return inMemoryOps;
+    }
+  } catch (err) {
+    console.warn('Erro ao consultar OPs no Supabase:', err);
+  }
+
+  persistOps();
+  return inMemoryOps;
+};
+
+export const getOPById = async (opId: string): Promise<ProductionOrder | null> => {
+  const foundLocal = inMemoryOps.find(o => o.id === opId);
+
+  try {
+    let { data, error } = await supabase.from('production_orders').select('*').eq('id', opId).maybeSingle();
+    if (error || !data) {
+      const res = await supabase.from('ops').select('*').eq('id', opId).maybeSingle();
+      data = res.data;
+      error = res.error;
+    }
+
+    if (data && !error) {
+      const d: any = data;
+      return {
+        id: String(d.id),
+        number: String(d.number || d.op_number || ''),
+        product: d.product || d.product_name || 'Produto',
+        lote: d.lote || d.batch || d.numero_lote || '',
+        plannedQuantity: Number(d.planned_quantity || d.plannedQuantity || 0),
+        producedQuantity: Number(d.produced_quantity || d.producedQuantity || 0),
+        granel: d.granel || d.bulk || d.lote_granel || d.cod_granel || '',
+        priority: (d.priority || 'Normal') as any,
+        status: (d.status || 'pending') as any,
+        lineId: d.line_id ? String(d.line_id) : (d.lineId ? String(d.lineId) : null),
+        leaderId: d.leader_id ? String(d.leader_id) : (d.leaderId ? String(d.leaderId) : null),
+        packageAvailability: Number(d.package_availability || d.packageAvailability || 0),
+        sequence: Number(d.sequence || 1),
+        scheduledDate: d.scheduled_date || d.scheduledDate || undefined,
+        scheduledShift: d.scheduled_shift || d.scheduledShift || undefined,
+        setor: d.setor || undefined,
+        unidade: d.unidade || undefined,
+        rejectedQuantity: Number(d.rejected_quantity || d.rejectedQuantity || 0),
+        plannedHours: d.planned_hours != null ? Number(d.planned_hours) : (d.plannedHours != null ? Number(d.plannedHours) : undefined),
+        tipoDocumento: d.tipo_documento || 'OP',
+        finishedShift: d.finished_shift || undefined,
+        createdAt: d.created_at || d.createdAt || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    console.warn('Consulta getOPById no Supabase:', err);
+  }
+
+  return foundLocal || null;
+};
+
+export const createOP = async (newOpData: {
+  number: string;
+  product: string;
+  lote?: string;
+  plannedQuantity: number;
+  granel?: string;
+  priority: 'Crítica' | 'Alta' | 'Normal' | 'Baixa';
+  lineId: string | null;
+  packageAvailability?: number;
+  sequence?: number;
+  scheduledDate?: string;
+  scheduledShift?: string;
+  setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+  unidade?: 'Un' | 'Kg' | 'Qtd';
+  rejectedQuantity?: number;
+  plannedHours?: number;
+  tipoDocumento?: 'OP' | 'OSM';
+  industria?: 'Ybera' | 'Carvalho' | 'Macpaul' | string;
+  producedQuantity?: number;
+  status?: 'pending' | 'in_progress' | 'paused' | 'completed';
+  leaderId?: string;
+}, options: { reuseExisting?: boolean; verify?: boolean } = {}): Promise<ProductionOrder> => {
+  const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
+
+  if (trainingModeActive) {
+    const trainingOp: ProductionOrder = {
+      id: `sim-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      number: newOpData.number.trim(),
+      product: newOpData.product.trim(),
+      lote: (newOpData.lote || '').trim(),
+      plannedQuantity: Number(newOpData.plannedQuantity) || 0,
+      producedQuantity: Number(newOpData.producedQuantity ?? 0),
+      granel: (newOpData.granel || '').trim(),
+      priority: newOpData.priority || 'Normal',
+      status: newOpData.status || 'pending',
+      lineId: newOpData.lineId || null,
+      leaderId: newOpData.leaderId || null,
+      packageAvailability: Number(newOpData.packageAvailability || 0),
+      sequence: Number(newOpData.sequence || (trainingOps.length + 1)),
+      scheduledDate: newOpData.scheduledDate,
+      scheduledShift: newOpData.scheduledShift,
+      setor: newOpData.setor,
+      unidade: newOpData.unidade,
+      rejectedQuantity: Number(newOpData.rejectedQuantity || 0),
+      plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
+      tipoDocumento: tipoDoc,
+      industria: newOpData.industria || undefined,
+      completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
+      createdAt: new Date().toISOString(),
+    };
+    trainingOps = [trainingOp, ...trainingOps];
+    return trainingOp;
+  }
+
+  const trimmedNumber = newOpData.number.trim();
+  const targetSetor = newOpData.setor || null;
+  const isSameKey = (o: ProductionOrder) =>
+    (o.number || '').trim().toLowerCase() === trimmedNumber.toLowerCase() &&
+    (o.setor || null) === targetSetor;
+
+  // Já existe uma OP com o mesmo número + setor (regra UNIQUE(number, setor) do banco)?
+  // - Materialização da Manipulação (reuseExisting): reaproveita a linha existente
+  //   SEM sobrescrever produção/status — só acompanha a programação do Cronograma.
+  // - Qualquer outro caso (cadastro manual, Pesagem, saldo de parcial): é outra OP
+  //   de verdade com o mesmo número — avisa em vez de sobrescrever.
+  const existingLocal = inMemoryOps.find(isSameKey);
+  if (existingLocal) {
+    if (options.reuseExisting) return adoptExistingOp(existingLocal.id, newOpData);
+    throw new DuplicateOpError(trimmedNumber, targetSetor, fmtCreated(existingLocal.createdAt));
+  }
+
+  // TRAVA contra cadastro em dobro por duas pessoas ao mesmo tempo: a tela de
+  // cada um pode estar desatualizada, então confere NO BANCO antes de gravar
+  // (número sem espaços/maiúsculas e Envase = Geral = sem setor).
+  if (!options.reuseExisting) {
+    const family = setorFamily(targetSetor);
+    const inDb = (await findOpsByNumber(trimmedNumber)).filter(o => setorFamily(o.setor) === family);
+    if (inDb.length > 0) {
+      throw new DuplicateOpError(trimmedNumber, inDb[0].setor || targetSetor, fmtCreated(inDb[0].createdAt) || 'acabou de ser cadastrada por outra pessoa');
+    }
+  }
+
+  const newOp: ProductionOrder = {
+    id: `prod-op-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    number: trimmedNumber,
+    product: newOpData.product.trim(),
+    lote: (newOpData.lote || '').trim(),
+    plannedQuantity: Number(newOpData.plannedQuantity) || 0,
+    producedQuantity: Number(newOpData.producedQuantity ?? 0),
+    granel: (newOpData.granel || '').trim(),
+    priority: newOpData.priority || 'Normal',
+    status: newOpData.status || 'pending',
+    lineId: newOpData.lineId || null,
+    leaderId: newOpData.leaderId || null,
+    packageAvailability: Number(newOpData.packageAvailability || 0),
+    sequence: Number(newOpData.sequence || (inMemoryOps.length + 1)),
+    scheduledDate: newOpData.scheduledDate,
+    scheduledShift: newOpData.scheduledShift,
+    setor: newOpData.setor,
+    unidade: newOpData.unidade,
+    rejectedQuantity: Number(newOpData.rejectedQuantity || 0),
+    plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
+    tipoDocumento: tipoDoc,
+    industria: newOpData.industria || undefined,
+    completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
+    createdAt: new Date().toISOString(),
+  };
+
+  const opsPayload: any = {
+    id: newOp.id,
+    number: newOp.number,
+    product: newOp.product,
+    lote: newOp.lote,
+    planned_quantity: newOp.plannedQuantity,
+    produced_quantity: newOp.producedQuantity,
+    granel: newOp.granel,
+    priority: newOp.priority,
+    status: newOp.status,
+    leader_id: newOp.leaderId || null,
+    line_id: newOp.lineId,
+    package_availability: newOp.packageAvailability,
+    sequence: newOp.sequence,
+    scheduled_date: newOp.scheduledDate,
+    scheduled_shift: newOp.scheduledShift,
+    setor: newOp.setor || null,
+    unidade: newOp.unidade || null,
+    rejected_quantity: newOp.rejectedQuantity || 0,
+    planned_hours: newOp.plannedHours ?? null,
+    tipo_documento: newOp.tipoDocumento || 'OP',
+    industria: newOp.industria || null,
+    created_at: newOp.createdAt,
+  };
+  if (newOp.completedAt) opsPayload.completed_at = newOp.completedAt;
+
+  // Com `verify`: se NENHUMA das duas tabelas aceitou a OP, lança erro em vez
+  // de deixá-la só no cache local do aparelho.
+  let insertErrors = 0;
+  let lastInsertError = '';
+
+  // 1. production_orders (tabela que o app lê) — grava ANTES de mostrar na tela,
+  // pra não exibir uma OP que o banco recusou.
+  try {
+    const resProductionOrders = await runWithCompletedAtFallback(
+      (payload) => supabase.from('production_orders').insert(payload),
+      opsPayload
+    );
+    if (resProductionOrders.error) {
+      if (isDuplicateKeyError(resProductionOrders.error)) {
+        // Existe no banco mas não estava na memória (ex.: escondida pela lista
+        // de excluídas depois de uma exclusão que o banco recusou).
+        const existing = await findOpIdByNumberAndSetor(trimmedNumber, targetSetor);
+        if (options.reuseExisting && existing) return adoptExistingOp(existing.id, newOpData, existing.status);
+        throw new DuplicateOpError(trimmedNumber, targetSetor);
+      }
+      insertErrors++;
+      lastInsertError = resProductionOrders.error.message;
+      console.error(`[createOP] Falha ao gravar em production_orders (OP ${newOp.id}):`, resProductionOrders.error.message);
+    }
+  } catch (err) {
+    if (err instanceof DuplicateOpError) throw err;
+    insertErrors++;
+    lastInsertError = String((err as any)?.message || err);
+    console.error(`[createOP] Erro inesperado ao gravar em production_orders (OP ${newOp.id}):`, err);
+  }
+
+  // Com `verify`: a tabela principal (production_orders) é a que o app lê.
+  // Se ELA recusou, a OP não pode ser dada como criada — antes, bastava a
+  // cópia em `ops` aceitar para a tela dizer "registrada com sucesso" e a OP
+  // sumir no próximo carregamento.
+  if (options.verify && insertErrors > 0) {
+    throw new Error(`O banco não gravou a OP ${trimmedNumber} (${lastInsertError}). Nada foi registrado.`);
+  }
+
+  // 2. Memória/cache local
+  inMemoryOps = [newOp, ...inMemoryOps];
+  persistOps();
+
+  // 3. Espelho em `ops`
+  try {
+    const resOps = await runWithCompletedAtFallback(
+      (payload) => supabase.from('ops').insert(payload),
+      opsPayload
+    );
+    if (resOps.error) {
+      insertErrors++;
+      lastInsertError = resOps.error.message;
+      console.error(`[createOP] Falha ao gravar em ops (OP ${newOp.id}):`, resOps.error.message);
+    }
+  } catch (err) {
+    insertErrors++;
+    lastInsertError = String((err as any)?.message || err);
+    console.error(`[createOP] Erro inesperado ao gravar em ops (OP ${newOp.id}):`, err);
+  }
+
+  if (options.verify && insertErrors >= 2) {
+    inMemoryOps = inMemoryOps.filter(op => op.id !== newOp.id);
+    persistOps();
+    throw new Error(`O banco não gravou a OP ${trimmedNumber} (${lastInsertError}). Nada foi registrado.`);
+  }
+
+  return newOp;
+};
+
+/**
+ * Busca NO BANCO (não no cache da tela) as OPs/OSMs com este número, em
+ * qualquer setor. Usado para barrar o registro de uma OSM repetida antes de
+ * gravar — com a mensagem dizendo quando e onde ela já existe.
+ */
+export const findOpsByNumber = async (
+  number: string
+): Promise<Array<{ id: string; setor: string | null; status: string; createdAt: string | null; lineId: string | null }>> => {
+  const clean = String(number || '').trim().replace(/\s+/g, ' ');
+  if (!clean) return [];
+  if (trainingModeActive) {
+    return trainingOps
+      .filter(o => o.number.trim().toLowerCase() === clean.toLowerCase())
+      .map(o => ({ id: o.id, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null, lineId: o.lineId }));
+  }
+  const fromCache = () => inMemoryOps
+    .filter(o => (o.number || '').trim().toLowerCase() === clean.toLowerCase())
+    .map(o => ({ id: o.id, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null, lineId: o.lineId }));
+  try {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('id, setor, status, created_at, line_id, number')
+      .ilike('number', clean);
+    if (error) return fromCache();
+    return (data || [])
+      .filter((r: any) => String(r.number || '').trim().toLowerCase() === clean.toLowerCase())
+      .map((r: any) => ({ id: String(r.id), setor: r.setor || null, status: String(r.status || ''), createdAt: r.created_at || null, lineId: r.line_id ? String(r.line_id) : null }));
+  } catch {
+    return fromCache();
+  }
+};
+
+/** Igual a findOpsByNumber, mas pelo LOTE (um lote é uma batelada só). */
+export const findOpsByLote = async (
+  lote: string
+): Promise<Array<{ id: string; number: string; setor: string | null; status: string; createdAt: string | null }>> => {
+  const clean = String(lote || '').trim();
+  if (!clean) return [];
+  const same = (v: any) => String(v || '').trim().toLowerCase() === clean.toLowerCase();
+  const fromCache = () => (trainingModeActive ? trainingOps : inMemoryOps)
+    .filter(o => same(o.lote))
+    .map(o => ({ id: o.id, number: o.number, setor: o.setor || null, status: o.status, createdAt: o.createdAt || null }));
+  if (trainingModeActive) return fromCache();
+  try {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('id, number, setor, status, created_at, lote')
+      .ilike('lote', clean);
+    if (error) return fromCache();
+    return (data || [])
+      .filter((r: any) => same(r.lote))
+      .map((r: any) => ({ id: String(r.id), number: String(r.number || ''), setor: r.setor || null, status: String(r.status || ''), createdAt: r.created_at || null }));
+  } catch {
+    return fromCache();
+  }
+};
+
+/** Já existe uma OP com esse número nesse setor (regra UNIQUE(number, setor)). */
+export class DuplicateOpError extends Error {
+  readonly isDuplicateOp = true;
+  constructor(number: string, setor: string | null, detail?: string) {
+    super(`Já existe uma OP ${number}${setor ? ` no setor ${setor}` : ''}${detail ? ` (${detail})` : ''}. Nada foi alterado.`);
+    this.name = 'DuplicateOpError';
+  }
+}
+
+/** Número da OP normalizado para comparação: sem espaços extras, maiúsculo. */
+export function normalizeOpNumber(n?: string | null): string {
+  return String(n || '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+/** Envase, Geral e sem setor contam como o MESMO estoque de OPs de envase. */
+function setorFamily(setor?: string | null): string {
+  const s = String(setor || '').trim();
+  return !s || s === 'Envase' || s === 'Geral' ? 'ENVASE' : s.toUpperCase();
+}
+const fmtCreated = (iso?: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : `cadastrada em ${d.toLocaleDateString('pt-BR')} às ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+};
+
+function isDuplicateKeyError(error: any): boolean {
+  return error?.code === '23505' || /duplicate key/i.test(String(error?.message || ''));
+}
+
+async function findOpIdByNumberAndSetor(number: string, setor: string | null): Promise<{ id: string; status: string } | null> {
+  try {
+    let query = supabase.from('production_orders').select('id, status').eq('number', number);
+    query = setor ? query.eq('setor', setor) : query.is('setor', null);
+    const { data } = await query.limit(1);
+    return data && data[0]?.id ? { id: String(data[0].id), status: String(data[0].status || '') } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reaproveita uma OP que já existe (mesmo número + setor) em vez de criar outra.
+ * NÃO mexe em status, quantidades, datas de conclusão nem em nada que já
+ * aconteceu — só tira da lista de excluídas deste navegador e acompanha a
+ * programação atual (reator/linha, ordem na fila e dia) se ela ainda não saiu da fila.
+ */
+async function adoptExistingOp(
+  opId: string,
+  data: { lineId: string | null; sequence?: number; scheduledDate?: string },
+  dbStatus?: string
+): Promise<ProductionOrder> {
+  const local = inMemoryOps.find(o => o.id === opId);
+  const currentStatus = local?.status || dbStatus;
+  const stillQueued = currentStatus === 'pending';
+  if (stillQueued) {
+    const updates: Partial<ProductionOrder> = { lineId: data.lineId };
+    if (data.sequence !== undefined) updates.sequence = data.sequence;
+    if (data.scheduledDate) updates.scheduledDate = data.scheduledDate;
+    await updateOP(opId, updates);
+  }
+  return inMemoryOps.find(o => o.id === opId) || ({ ...(local || {}), id: opId } as ProductionOrder);
+}
+
+
+export const importOPsBatch = async (
+  items: Array<{
+    number: string;
+    product: string;
+    lote?: string;
+    plannedQuantity: number;
+    granel?: string;
+    priority?: 'Crítica' | 'Alta' | 'Normal' | 'Baixa';
+    status?: 'pending' | 'in_progress' | 'paused' | 'completed';
+    lineId?: string | null;
+    packageAvailability?: number;
+    scheduledDate?: string;
+    scheduledShift?: string;
+    setor?: 'Pesagem' | 'Manipulação' | 'Envase' | 'Geral';
+    unidade?: 'Un' | 'Kg' | 'Qtd';
+    rejectedQuantity?: number;
+    plannedHours?: number;
+    tipoDocumento?: 'OP' | 'OSM';
+    finishedShift?: 'Manhã' | 'Tarde';
+  }>
+): Promise<{ successCount: number; imported: ProductionOrder[]; skipped: string[] }> => {
+  const newCreated: ProductionOrder[] = [];
+  const startSeq = inMemoryOps.length + 1;
+
+  // TRAVA de duplicidade na importação: ignora as OPs que já existem NO BANCO
+  // (mesmo número no mesmo setor — Envase/Geral/sem setor contam juntos) ou
+  // que aparecem repetidas na própria planilha.
+  const skipped: string[] = [];
+  const existingKeys = new Set<string>();
+  for (const o of inMemoryOps) existingKeys.add(`${normalizeOpNumber(o.number)}|${setorFamily(o.setor)}`);
+  if (!trainingModeActive) {
+    try {
+      const nums = Array.from(new Set(items.map(it => String(it.number || '').trim()).filter(Boolean)));
+      for (let k = 0; k < nums.length; k += 200) {
+        const { data } = await supabase.from('production_orders').select('number, setor').in('number', nums.slice(k, k + 200));
+        for (const r of data || []) existingKeys.add(`${normalizeOpNumber((r as any).number)}|${setorFamily((r as any).setor)}`);
+      }
+    } catch { /* sem conexão: fica só a checagem local e a regra do banco */ }
+  }
+  const batchKeys = new Set<string>();
+  const filteredItems = items.filter(it => {
+    const key = `${normalizeOpNumber(it.number)}|${setorFamily(it.setor)}`;
+    if (existingKeys.has(key) || batchKeys.has(key)) {
+      skipped.push(String(it.number || '').trim());
+      return false;
+    }
+    batchKeys.add(key);
+    return true;
+  });
+  items = filteredItems;
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const tipoDoc = it.tipoDocumento || getTipoDocumento(it.setor);
+    const op: ProductionOrder = {
+      id: `prod-op-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`,
+      number: it.number.trim(),
+      product: it.product.trim(),
+      lote: (it.lote || '').trim(),
+      plannedQuantity: Number(it.plannedQuantity) || 0,
+      producedQuantity: 0,
+      granel: (it.granel || '').trim(),
+      priority: it.priority || 'Normal',
+      status: it.status || 'pending',
+      lineId: it.lineId || null,
+      leaderId: null,
+      packageAvailability: Number(it.packageAvailability || 0),
+      sequence: startSeq + i,
+      scheduledDate: it.scheduledDate,
+      scheduledShift: it.scheduledShift,
+      setor: it.setor,
+      unidade: it.unidade,
+      rejectedQuantity: Number(it.rejectedQuantity || 0),
+      plannedHours: it.plannedHours != null ? Number(it.plannedHours) : undefined,
+      tipoDocumento: tipoDoc,
+      finishedShift: it.finishedShift,
+      createdAt: new Date().toISOString(),
+    };
+    newCreated.push(op);
+  }
+
+  inMemoryOps = [...newCreated, ...inMemoryOps];
+  persistOps();
+
+  // 2. Synchronize with Supabase — grava nas duas tabelas sequencialmente,
+  // com log de erro por tabela (mesmo motivo do createOP: não usar
+  // Promise.allSettled/fallback silencioso aqui, senão `ops` fica para trás).
+  const payloads = newCreated.map((op) => ({
+    id: op.id,
+    number: op.number,
+    product: op.product,
+    lote: op.lote,
+    planned_quantity: op.plannedQuantity,
+    produced_quantity: 0,
+    granel: op.granel,
+    priority: op.priority,
+    status: op.status,
+    line_id: op.lineId,
+    package_availability: op.packageAvailability,
+    sequence: op.sequence,
+    scheduled_date: op.scheduledDate,
+    scheduled_shift: op.scheduledShift,
+    setor: op.setor || null,
+    unidade: op.unidade || null,
+    rejected_quantity: op.rejectedQuantity || 0,
+    planned_hours: op.plannedHours ?? null,
+    tipo_documento: op.tipoDocumento || 'OP',
+    finished_shift: op.finishedShift || null,
+    created_at: op.createdAt,
+  }));
+
+  try {
+    const resProductionOrders = await supabase.from('production_orders').insert(payloads);
+    if (resProductionOrders.error) {
+      console.error('[importOPsBatch] Falha ao gravar em production_orders:', resProductionOrders.error.message);
+    }
+  } catch (err) {
+    console.error('[importOPsBatch] Erro inesperado ao gravar em production_orders:', err);
+  }
+
+  try {
+    const resOps = await supabase.from('ops').insert(payloads);
+    if (resOps.error) {
+      console.error('[importOPsBatch] Falha ao gravar em ops:', resOps.error.message);
+    }
+  } catch (err) {
+    console.error('[importOPsBatch] Erro inesperado ao gravar em ops:', err);
+  }
+
+  return {
+    successCount: newCreated.length,
+    imported: newCreated,
+    skipped,
+  };
+};
+
+export const updateOP = async (
+  opId: string,
+  updates: Partial<ProductionOrder>,
+  options: { verify?: boolean } = {}
+) => {
+  if (updates.status === 'completed' && updates.completedAt === undefined) {
+    updates.completedAt = new Date().toISOString();
+  }
+
+  if (trainingModeActive) {
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, ...updates } : op);
+    return;
+  }
+
+  // 1. Update in memory and localStorage immediately
+  const previousInMemoryOp = inMemoryOps.find(op => op.id === opId);
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, ...updates } : op);
+  persistOps();
+
+  // 2. Update Supabase — payload "completo" para production_orders e um
+  // payload restrito para ops (mesma distinção já feita em createOP:
+  // scheduled_end_date/scheduled_days/completed_at não existem em `ops`,
+  // só foram adicionadas manualmente em `production_orders`). Antes este
+  // payload era único e idêntico para as duas tabelas — qualquer updateOP
+  // que incluísse scheduledEndDate/scheduledDays (como ao vincular uma OP a
+  // uma linha) derrubava o PATCH em `ops` com 400 (coluna inexistente).
+  const fullPayload: any = {};
+  if (updates.number !== undefined) fullPayload.number = updates.number;
+  if (updates.product !== undefined) fullPayload.product = updates.product;
+  if (updates.lote !== undefined) fullPayload.lote = updates.lote;
+  if (updates.plannedQuantity !== undefined) fullPayload.planned_quantity = updates.plannedQuantity;
+  if (updates.producedQuantity !== undefined) fullPayload.produced_quantity = updates.producedQuantity;
+  if (updates.granel !== undefined) fullPayload.granel = updates.granel;
+  if (updates.priority !== undefined) fullPayload.priority = updates.priority;
+  if (updates.status !== undefined) fullPayload.status = updates.status;
+  if (updates.lineId !== undefined) fullPayload.line_id = updates.lineId;
+  if (updates.leaderId !== undefined) fullPayload.leader_id = updates.leaderId;
+  if (updates.packageAvailability !== undefined) fullPayload.package_availability = updates.packageAvailability;
+  if (updates.sequence !== undefined) fullPayload.sequence = updates.sequence;
+  if (updates.scheduledDate !== undefined) fullPayload.scheduled_date = updates.scheduledDate;
+  if (updates.scheduledEndDate !== undefined) fullPayload.scheduled_end_date = updates.scheduledEndDate;
+  if (updates.scheduledDays !== undefined) fullPayload.scheduled_days = updates.scheduledDays;
+  if (updates.scheduledShift !== undefined) fullPayload.scheduled_shift = updates.scheduledShift;
+  if (updates.setor !== undefined) fullPayload.setor = updates.setor;
+  if (updates.unidade !== undefined) fullPayload.unidade = updates.unidade;
+  if (updates.rejectedQuantity !== undefined) fullPayload.rejected_quantity = updates.rejectedQuantity;
+  if (updates.plannedHours !== undefined) fullPayload.planned_hours = updates.plannedHours;
+  if (updates.tipoDocumento !== undefined) fullPayload.tipo_documento = updates.tipoDocumento;
+  if (updates.industria !== undefined) fullPayload.industria = updates.industria;
+  if (updates.completedAt !== undefined) fullPayload.completed_at = updates.completedAt;
+  if (updates.finishedShift !== undefined) fullPayload.finished_shift = updates.finishedShift;
+
+  // Payload restrito às colunas confirmadas em `ops` — sem
+  // scheduled_end_date, scheduled_days e completed_at.
+  // `production_orders` foi confirmado em produção como espelhando exatamente
+  // as mesmas colunas de `ops` (o erro "Could not find the 'scheduled_days'
+  // column of 'production_orders'" provou isso) — por isso as DUAS tabelas
+  // recebem o mesmo payload restrito, e não mais o fullPayload.
+  const opsPayload: any = { ...fullPayload };
+  delete opsPayload.scheduled_end_date;
+  delete opsPayload.scheduled_days;
+  // completed_at agora vai pras duas tabelas (com fallback se a coluna não existir).
+
+  // Com `verify`, confere se o banco realmente gravou (RLS sem permissão
+  // não dá erro — só não altera nenhuma linha) e lança erro se nenhuma das
+  // duas tabelas foi alterada.
+  let savedSomewhere = false;
+  let lastError = '';
+
+  try {
+    const resProductionOrders: any = await runWithCompletedAtFallback(
+      (payload) => options.verify
+        ? supabase.from('production_orders').update(payload).eq('id', opId).select('id')
+        : supabase.from('production_orders').update(payload).eq('id', opId),
+      opsPayload
+    );
+    if (resProductionOrders.error) {
+      lastError = resProductionOrders.error.message;
+      console.error(`[updateOP] Falha ao atualizar production_orders (OP ${opId}):`, resProductionOrders.error.message);
+    } else if (options.verify && Array.isArray(resProductionOrders.data) && resProductionOrders.data.length > 0) {
+      savedSomewhere = true;
+    }
+  } catch (err) {
+    lastError = String((err as any)?.message || err);
+    console.error(`[updateOP] Erro inesperado ao atualizar production_orders (OP ${opId}):`, err);
+  }
+
+  try {
+    const resOps: any = await runWithCompletedAtFallback(
+      (payload) => options.verify
+        ? supabase.from('ops').update(payload).eq('id', opId).select('id')
+        : supabase.from('ops').update(payload).eq('id', opId),
+      opsPayload
+    );
+    if (resOps.error) {
+      lastError = resOps.error.message;
+      console.error(`[updateOP] Falha ao atualizar ops (OP ${opId}):`, resOps.error.message);
+    } else if (options.verify && Array.isArray(resOps.data) && resOps.data.length > 0) {
+      savedSomewhere = true;
+    }
+  } catch (err) {
+    lastError = String((err as any)?.message || err);
+    console.error(`[updateOP] Erro inesperado ao atualizar ops (OP ${opId}):`, err);
+  }
+
+  if (options.verify && !savedSomewhere) {
+    if (previousInMemoryOp) {
+      inMemoryOps = inMemoryOps.map(op => op.id === opId ? previousInMemoryOp : op);
+      persistOps();
+    }
+    throw new Error(`O banco não salvou a alteração da OP${lastError ? ` (${lastError})` : ' (sem permissão)'}. Nada foi alterado.`);
+  }
+};
+
+/**
+ * Busca as metas mensais do banco para o ano atual.
+ * Retorna array de MonthlyGoal ou array vazio em caso de erro.
+ */
+export const getMonthlyGoals = async (year: number): Promise<MonthlyGoal[]> => {
+  if (trainingModeActive) return [];
+  try {
+    const { data, error } = await supabase
+      .from('monthly_goals')
+      .select('*')
+      .eq('year', year)
+      .order('month', { ascending: true });
+
+    if (data && !error && data.length > 0) {
+      const mapped: MonthlyGoal[] = data.map((d: any) => ({
+        id: String(d.id),
+        lineId: String(d.line_id),
+        year: Number(d.year),
+        month: Number(d.month),
+        goalQuantity: Number(d.goal_quantity || 0),
+        setor: d.setor || undefined,
+        createdAt: d.created_at || new Date().toISOString(),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+
+      return mapped;
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas mensais no Supabase:', err);
+  }
+
+  return [];
+};
+
+/**
+ * Salva ou atualiza uma meta mensal.
+ * Usa upsert com onConflict: 'line_id, year, month, setor'.
+ */
+export const saveMonthlyGoal = async (
+  goal: Omit<MonthlyGoal, 'id' | 'createdAt' | 'updatedAt'>
+): Promise<boolean> => {
+  try {
+    const payload: any = {
+      line_id: goal.lineId,
+      year: goal.year,
+      month: goal.month,
+      goal_quantity: goal.goalQuantity,
+      setor: goal.setor || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('monthly_goals')
+      .upsert(payload, { onConflict: 'line_id, year, month, setor' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta mensal no Supabase:', error);
+    }
+
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta mensal:', err);
+    return false;
+  }
+};
+
+/**
+ * Busca as metas diárias fixas por linha (independe de mês/ano — fica fixa
+ * até ser atualizada manualmente).
+ */
+export const getLineDailyGoals = async (): Promise<LineDailyGoal[]> => {
+  try {
+    const { data, error } = await supabase.from('line_daily_goals').select('*');
+    if (data && !error) {
+      return data.map((d: any) => ({
+        lineId: String(d.line_id),
+        goalQuantity: Number(d.goal_quantity || 0),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas diárias por linha no Supabase:', err);
+  }
+  return [];
+};
+
+/**
+ * Salva (upsert) a meta diária fixa de uma linha. Fica fixa até que essa
+ * função seja chamada novamente para a mesma linha.
+ */
+export const saveLineDailyGoal = async (lineId: string, goalQuantity: number): Promise<boolean> => {
+  try {
+    const payload = {
+      line_id: lineId,
+      goal_quantity: goalQuantity,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('line_daily_goals')
+      .upsert(payload, { onConflict: 'line_id' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta diária da linha no Supabase:', error);
+      return false;
+    }
+
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta diária da linha:', err);
+    return false;
+  }
+};
+
+/**
+ * Busca a meta mensal ÚNICA da fábrica (não por linha) para um mês/ano.
+ * Retorna null se ainda não houver meta cadastrada (o app deve decidir o
+ * valor padrão de exibição nesse caso).
+ */
+export const getFactoryMonthlyGoal = async (year: number, month: number): Promise<number | null> => {
+  try {
+    const { data, error } = await supabase
+      .from('factory_monthly_goal')
+      .select('*')
+      .eq('year', year)
+      .eq('month', month)
+      .maybeSingle();
+
+    if (data && !error) {
+      return Number(data.goal_quantity || 0);
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar meta mensal da fábrica no Supabase:', err);
+  }
+  return null;
+};
+
+/**
+ * Busca as metas mensais ÚNICAS da fábrica para TODOS os meses de um ano
+ * (uma linha por mês em que alguém já salvou uma meta — meses sem meta
+ * cadastrada simplesmente não aparecem no array). Usado pelo gráfico
+ * "Produção Mensal" do Dashboard para mostrar a meta certa de cada mês, em
+ * vez de repetir a meta do mês atual pro ano inteiro.
+ */
+export const getFactoryMonthlyGoals = async (year: number): Promise<FactoryMonthlyGoal[]> => {
+  try {
+    const { data, error } = await supabase
+      .from('factory_monthly_goal')
+      .select('*')
+      .eq('year', year)
+      .order('month', { ascending: true });
+
+    if (data && !error) {
+      return data.map((d: any) => ({
+        year: Number(d.year),
+        month: Number(d.month),
+        goalQuantity: Number(d.goal_quantity || 0),
+        updatedAt: d.updated_at || new Date().toISOString(),
+      }));
+    }
+  } catch (err) {
+    console.warn('Erro ao buscar metas mensais da fábrica no Supabase:', err);
+  }
+  return [];
+};
+
+/**
+ * Salva (upsert) a meta mensal única da fábrica para um mês/ano. Fica fixa
+ * até ser atualizada novamente.
+ */
+export const saveFactoryMonthlyGoal = async (
+  year: number,
+  month: number,
+  goalQuantity: number
+): Promise<boolean> => {
+  try {
+    const payload = {
+      year,
+      month,
+      goal_quantity: goalQuantity,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from('factory_monthly_goal')
+      .upsert(payload, { onConflict: 'year, month' });
+
+    if (error) {
+      console.warn('Erro ao persistir meta mensal da fábrica no Supabase:', error);
+      return false;
+    }
+
+    notifyStateChange();
+    return true;
+  } catch (err) {
+    console.error('Erro ao salvar meta mensal da fábrica:', err);
+    return false;
+  }
+};
+
+export const deleteOP = async (opId: string) => {
+  if (trainingModeActive) {
+    trainingOps = trainingOps.filter(op => op.id !== opId);
+    return;
+  }
+
+  // 1. Exclui PRIMEIRO no banco e confere se de fato saiu. Antes a OP era
+  // escondida neste navegador (lista de excluídas) antes de saber se o banco
+  // aceitou — quando o banco recusava (permissão), a OP continuava lá, sumia
+  // só da tela e depois dava "duplicate key" ao tentar recriá-la.
+  // Obs.: quando a permissão (RLS) barra um DELETE o Supabase NÃO devolve erro,
+  // só apaga 0 linhas — por isso o `.select('id')` pra contar o que saiu.
+  // production_orders primeiro; o espelho em `ops` só é apagado depois que
+  // a principal saiu. Antes as duas eram apagadas juntas: se o banco
+  // recusava a principal, a OP sumia só de `ops` e ficava pela metade.
+  const resPO = await supabase.from('production_orders').delete().eq('id', opId).select('id');
+  const removedFromPO = (resPO.data || []).length > 0;
+  if (!removedFromPO) {
+    // Nada apagado: ou a OP não existia em production_orders, ou o banco recusou.
+    const { data: stillThere } = await supabase.from('production_orders').select('id').eq('id', opId).limit(1);
+    if (resPO.error || (stillThere && stillThere.length > 0)) {
+      const reason = resPO.error?.message || 'sem permissão para excluir esta OP';
+      console.error(`[deleteOP] Banco não excluiu a OP ${opId}:`, reason);
+      throw new Error(`O banco não excluiu a OP (${reason}). Ela continua no sistema.`);
+    }
+  }
+  const resOps = await supabase.from('ops').delete().eq('id', opId).select('id');
+  if (resOps.error) {
+    console.warn(`[deleteOP] Falha ao excluir espelho em ops (OP ${opId}):`, resOps.error.message);
+  }
+
+  // 2. Remove da memória local para atualização imediata da tela
+  inMemoryOps = inMemoryOps.filter(op => op.id !== opId);
+  persistOps();
+};
+
+export const getActiveOP = async (lineId: string): Promise<ProductionOrder | null> => {
+  try {
+    const ops = await getAllOPs();
+    const active = ops.find(o => o.lineId === lineId && (o.status === 'in_progress' || o.status === 'paused'));
+    if (active) return active;
+
+    const pending = ops
+      .filter(o => o.lineId === lineId && o.status === 'pending')
+      .sort((a, b) => a.sequence - b.sequence);
+    
+    if (pending.length > 0) return pending[0];
+  } catch (err) {
+    console.warn('Erro ao buscar OP ativa:', err);
+  }
+  return null;
+};
+
+// ---------------- ROTATIONS & ASSIGNMENTS ----------------
+export const getLeaderRotation = async (
+  leaderId: string,
+  leaderEmail?: string,
+  leaderName?: string
+): Promise<string | null> => {
+  const cleanEmail = (leaderEmail || '').trim().toLowerCase();
+  const cleanName = (leaderName || '').trim().toLowerCase();
+
+  const matchingProfile = inMemoryProfiles.find(p =>
+    (leaderId && p.uid === leaderId) ||
+    (cleanEmail && p.email && p.email.toLowerCase() === cleanEmail) ||
+    (cleanName && p.name && p.name.toLowerCase() === cleanName)
+  );
+
+  // Supabase é sempre a fonte primária — o coordenador pode ter trocado a linha
+  // em outro dispositivo e o cache local estaria desatualizado.
+  try {
+    const canonicalId = matchingProfile?.uid || leaderId;
+    const candidateIds = Array.from(new Set([
+      canonicalId,
+      leaderId,
+      cleanEmail || null,
+      matchingProfile?.email?.toLowerCase() || null,
+    ].filter(Boolean))) as string[];
+
+    for (const cId of candidateIds) {
+      let { data, error } = await supabase
+        .from('weekly_rotations')
+        .select('line_id')
+        .eq('leader_id', cId)
+        .maybeSingle();
+
+      if (!data || error) {
+        const res = await supabase
+          .from('rotations')
+          .select('line_id')
+          .eq('leader_id', cId)
+          .maybeSingle();
+        data = res.data;
+      }
+
+      if (data?.line_id) {
+        const resolvedLine = String(data.line_id);
+        inMemoryRotations[canonicalId] = resolvedLine;
+        if (cleanEmail) inMemoryRotations[cleanEmail] = resolvedLine;
+        persistRotations();
+        return resolvedLine;
+      }
+    }
+  } catch (err) {
+    console.warn('Consulta de rotação no Supabase:', err);
+  }
+
+  // Fallback: memória e depois perfil
+  if (leaderId && inMemoryRotations[leaderId]) return inMemoryRotations[leaderId];
+  if (cleanEmail && inMemoryRotations[cleanEmail]) return inMemoryRotations[cleanEmail];
+  if (matchingProfile?.uid && inMemoryRotations[matchingProfile.uid]) return inMemoryRotations[matchingProfile.uid];
+  if ((matchingProfile as any)?.lineId) return (matchingProfile as any).lineId;
+
+  // Último recurso: OP ativa associada ao líder
+  const foundOp = inMemoryOps.find(o =>
+    (leaderId && o.leaderId === leaderId) ||
+    (cleanEmail && o.leaderId && o.leaderId.toLowerCase() === cleanEmail) ||
+    (matchingProfile?.uid && o.leaderId === matchingProfile.uid)
+  );
+  return foundOp?.lineId || null;
+};
+
+export const getAllRotations = async (): Promise<Record<string, string>> => {
+  try {
+    let { data, error } = await supabase.from('weekly_rotations').select('leader_id, line_id');
+    if (error || !data || data.length === 0) {
+      const res = await supabase.from('rotations').select('leader_id, line_id');
+      data = res.data;
+      error = res.error;
+    }
+
+    if (data && data.length > 0 && !error) {
+      const map: Record<string, string> = { ...inMemoryRotations };
+      data.forEach((r: any) => {
+        if (r.leader_id && r.line_id) {
+          map[String(r.leader_id)] = String(r.line_id);
+          map[String(r.leader_id).toLowerCase()] = String(r.line_id);
+        }
+      });
+      inMemoryRotations = map;
+      persistRotations();
+      return map;
+    }
+  } catch (err) {
+    console.warn('Busca de todas rotações no Supabase:', err);
+  }
+  return inMemoryRotations;
+};
+
+export const saveLeaderRotation = async (
+  leaderId: string, 
+  lineId: string,
+  leaderEmail?: string,
+  leaderName?: string
+): Promise<void> => {
+  // Em treinamento, a troca de linha do líder é puramente visual dentro da
+  // simulação (gerenciada pela própria TrainingSimulator) — nunca deve
+  // gravar no indicador real "quem está em qual linha agora" do coordenador.
+  if (trainingModeActive) return;
+
+  inMemoryRotations[leaderId] = lineId;
+  if (leaderEmail) {
+    inMemoryRotations[leaderEmail] = lineId;
+    inMemoryRotations[leaderEmail.toLowerCase()] = lineId;
+  }
+
+  // Update in profiles if found
+  const targetProf = inMemoryProfiles.find(p => 
+    p.uid === leaderId || 
+    (leaderEmail && p.email?.toLowerCase() === leaderEmail.toLowerCase()) ||
+    (leaderName && p.name?.toLowerCase() === leaderName.toLowerCase())
+  );
+
+  if (targetProf) {
+    (targetProf as any).lineId = lineId;
+    if (targetProf.uid) inMemoryRotations[targetProf.uid] = lineId;
+    if (targetProf.email) {
+      inMemoryRotations[targetProf.email] = lineId;
+      inMemoryRotations[targetProf.email.toLowerCase()] = lineId;
+    }
+    persistProfiles();
+  }
+
+  persistRotations();
+
+  // Notify listeners via storage event or custom event for multi-tab / real-time sync
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('sig_rotations_updated', { 
+      detail: { leaderId, lineId, leaderEmail: leaderEmail || targetProf?.email } 
+    }));
+    window.dispatchEvent(new CustomEvent('sig_data_updated'));
+  }
+
+  try {
+    const canonicalId = targetProf?.uid || leaderId;
+
+    const payload = {
+      leader_id: canonicalId,
+      line_id: lineId,
+      updated_at: new Date().toISOString(),
+    };
+
+    // IMPORTANTE:
+    // 1. `rotations` é a tabela física principal no Supabase.
+    // 2. `weekly_rotations` é uma VIEW (SELECT * FROM rotations) criada para compatibilidade.
+    //    No PostgreSQL, VIEWs NUNCA suportam `onConflict`, gerando o erro:
+    //    "there is no unique or exclusion constraint matching the ON CONFLICT specification".
+    // 3. Se a tabela física `rotations` não possuir constraint UNIQUE em `leader_id`,
+    //    o upsert com onConflict também falha com esse mesmo erro.
+    //
+    // Solução robusta:
+    // A. Tenta upsert na tabela física `rotations`. Se falhar por falta de constraint UNIQUE,
+    //    faz fallback seguro (SELECT -> UPDATE ou INSERT), sem quebrar a aplicação.
+    // B. Como `weekly_rotations` é uma VIEW sobre `rotations`, salvar em `rotations` já atualiza
+    //    `weekly_rotations` automaticamente. Só tentamos `weekly_rotations` se `rotations` falhar.
+    const saveToTable = async (tableName: 'rotations' | 'weekly_rotations'): Promise<boolean> => {
+      // Tenta upsert direto se for a tabela física 'rotations'
+      if (tableName === 'rotations') {
+        try {
+          const res = await supabase.from(tableName).upsert(payload, { onConflict: 'leader_id' });
+          if (!res.error) return true;
+
+          const isMissingConstraint =
+            res.error.message?.includes('no unique or exclusion constraint') ||
+            (res.error as any).code === '42P10';
+
+          if (!isMissingConstraint) {
+            console.error(`[saveLeaderRotation] Falha ao gravar em ${tableName} (líder ${canonicalId}):`, res.error.message);
+            return false;
+          }
+        } catch (err) {
+          console.error(`[saveLeaderRotation] Erro ao tentar upsert em ${tableName}:`, err);
+        }
+      }
+
+      // Fallback seguro: SELECT -> UPDATE se existir, ou INSERT se não existir
+      // (Não depende de constraint UNIQUE no PostgreSQL, funciona em VIEWs e tabelas normais)
+      try {
+        const { data: existing, error: selErr } = await supabase
+          .from(tableName)
+          .select('id, leader_id')
+          .eq('leader_id', canonicalId)
+          .limit(1);
+
+        if (!selErr && existing && existing.length > 0) {
+          const updateRes = await supabase
+            .from(tableName)
+            .update({ line_id: lineId, updated_at: payload.updated_at })
+            .eq('leader_id', canonicalId);
+          if (!updateRes.error) return true;
+          console.error(`[saveLeaderRotation] Falha no update em ${tableName} (líder ${canonicalId}):`, updateRes.error.message);
+        } else {
+          const insertRes = await supabase
+            .from(tableName)
+            .insert(payload);
+          if (!insertRes.error) return true;
+          console.error(`[saveLeaderRotation] Falha no insert em ${tableName} (líder ${canonicalId}):`, insertRes.error.message);
+        }
+      } catch (innerErr) {
+        console.error(`[saveLeaderRotation] Erro inesperado no fallback de ${tableName}:`, innerErr);
+      }
+      return false;
+    };
+
+    // Grava primeiro na tabela física 'rotations'
+    const savedInRotations = await saveToTable('rotations');
+
+    // Se não salvou em 'rotations' (ex.: tabela não existe no banco legado), tenta em 'weekly_rotations'
+    if (!savedInRotations) {
+      await saveToTable('weekly_rotations');
+    }
+
+    if (canonicalId !== leaderId && leaderId.includes('@')) {
+      await Promise.allSettled([
+        supabase.from('weekly_rotations').delete().eq('leader_id', leaderId),
+        supabase.from('rotations').delete().eq('leader_id', leaderId),
+        supabase.from('weekly_rotations').delete().eq('leader_id', leaderId.toLowerCase()),
+        supabase.from('rotations').delete().eq('leader_id', leaderId.toLowerCase()),
+      ]);
+    }
+  } catch (err) {
+    console.warn('Salvar escala de líder no Supabase:', err);
+  }
+};
+
+// ---------------- PAUSE REASONS & EVENTS ----------------
+export const getPauseReasons = async (): Promise<PauseReason[]> => {
+  // Lista FIXA de motivos do Envase (definida pela coordenação). A tabela
+  // pause_reasons do Supabase não é mais consultada, para que todas as telas
+  // mostrem exatamente as mesmas opções, na mesma ordem.
+  return DEFAULT_PAUSE_REASONS;
+};
+
+// Helper para verificar se uma string é um UUID válido do PostgreSQL
+export const isUUID = (str?: string | null): boolean =>
+  Boolean(str && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(str).trim()));
+
+/**
+ * Atualiza o status da linha de produção de forma resiliente tanto na tabela `lines`
+ * (que aceita ids em texto como 'line-1') quanto em `production_lines` (com id do tipo UUID).
+ */
+export const updateLineStatusRemote = async (
+  lineId: string,
+  status: 'active' | 'idle' | 'paused',
+  currentOpId: string | null = null
+) => {
+  try {
+    // 1. Tabela `lines` aceita id em texto simples ("line-1", "line-2", "line-sleeve")
+    await supabase.from('lines').update({ status, current_op_id: currentOpId }).eq('id', lineId);
+  } catch (err) {
+    console.warn(`[updateLineStatusRemote] Falha em lines (${lineId}):`, err);
+  }
+
+  try {
+    // 2. Tabela `production_lines` possui coluna id tipada como UUID.
+    if (isUUID(lineId)) {
+      await supabase.from('production_lines').update({ status, current_op_id: currentOpId }).eq('id', lineId);
+    }
+  } catch (err) {
+    console.warn(`[updateLineStatusRemote] Falha em production_lines (${lineId}):`, err);
+  }
+};
+
+/**
+ * Grava eventos de produção de forma 100% segura e compatível com as duas tabelas:
+ * - `events`: schema real usa colunas `quantity_reported`, `pause_reason_name`, `comments` e line_id em texto.
+ * - `production_events`: schema real usa `quantity`, `reason`, `observation`, e line_id tipado como UUID.
+ */
+export const recordEventRemote = async (eventData: {
+  opId: string;
+  lineId: string;
+  leaderId?: string | null;
+  type: string;
+  quantity?: number;
+  reason?: string;
+  observation?: string;
+  createdAt: string;
+}) => {
+  const { opId, lineId, leaderId, type, quantity, reason, observation, createdAt } = eventData;
+
+  // 1. Tabela `events`
+  try {
+    const eventsPayload: any = {
+      op_id: opId,
+      line_id: lineId, // em events, line_id aceita text ("line-1", "line-2", etc.)
+      type,
+      created_at: createdAt,
+    };
+    if (leaderId && isUUID(leaderId)) {
+      eventsPayload.leader_id = leaderId;
+    }
+    if (quantity !== undefined && quantity !== null && !isNaN(quantity)) {
+      eventsPayload.quantity_reported = quantity; // Coluna correta em events é quantity_reported, NÃO quantity
+    }
+    if (reason) {
+      eventsPayload.pause_reason_name = reason;
+    }
+    if (observation) {
+      eventsPayload.comments = observation;
+    }
+
+    const resEvents = await supabase.from('events').insert(eventsPayload);
+    if (resEvents.error) {
+      console.warn(`[recordEventRemote] Aviso ao gravar em events (OP ${opId}):`, resEvents.error.message);
+      notifyDbWriteFailure(`Registrar evento ${type}`, resEvents.error.message);
+    }
+  } catch (err) {
+    console.warn(`[recordEventRemote] Erro ao gravar em events (OP ${opId}):`, err);
+  }
+
+  // 2. Tabela `production_events`
+  try {
+    const prodEventsPayload: any = {
+      op_id: opId,
+      type,
+      created_at: createdAt,
+    };
+    // CRÍTICO: line_id em `production_events` é do tipo UUID. Não passar "line-1" para evitar erro 22P02 "invalid input syntax for type uuid".
+    if (lineId && isUUID(lineId)) {
+      prodEventsPayload.line_id = lineId;
+    }
+    if (leaderId && isUUID(leaderId)) {
+      prodEventsPayload.leader_id = leaderId;
+    }
+    if (quantity !== undefined && quantity !== null && !isNaN(quantity)) {
+      prodEventsPayload.quantity = quantity;
+    }
+    if (reason) {
+      prodEventsPayload.reason = reason;
+    }
+    if (observation) {
+      prodEventsPayload.observation = observation;
+    }
+
+    const resProdEvents = await supabase.from('production_events').insert(prodEventsPayload);
+    if (resProdEvents.error) {
+      console.warn(`[recordEventRemote] Aviso ao gravar em production_events (OP ${opId}):`, resProdEvents.error.message);
+    }
+  } catch (err) {
+    console.warn(`[recordEventRemote] Erro ao gravar em production_events (OP ${opId}):`, err);
+  }
+};
+
+// Busca TODOS os eventos (paginado, sem limite) — antes este fetch tinha um
+// `.limit(50)` fixo, aplicado sobre a fábrica INTEIRA (todas as linhas juntas,
+// não por linha/dia). Na prática isso significava que, fora do "agora
+// imediato", o Dashboard só enxergava os ~50 eventos mais recentes de toda a
+// fábrica — nenhum evento STARTED/FINISHED de dias ou meses anteriores nunca
+// chegava ao cálculo de Ociosidade/Disponibilidade (nem ao OEE), fazendo esses
+// indicadores aparecerem zerados/em branco para qualquer período que não
+// fosse o instante atual. A paginação abaixo usa o mesmo padrão já validado
+// em `fetchAllRows` (loop de 1000 em 1000), ordenando por `created_at` e,
+// como desempate, por `id` (evita perder/duplicar linhas quando há vários
+// eventos importados com o mesmo timestamp).
+async function fetchAllEventRows(table: 'production_events' | 'events'): Promise<{ data: any[] | null; error: any }> {
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select('*')
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) {
+      return { data: allRows.length > 0 ? allRows : null, error };
+    }
+    if (!data || data.length === 0) break;
+    allRows.push(...data);
+    if (data.length < PAGE_SIZE) break; // última página
+    offset += PAGE_SIZE;
+  }
+  return { data: allRows, error: null };
+}
+
+export const getRecentEvents = async (): Promise<ProductionEvent[]> => {
+  if (trainingModeActive) return trainingEvents.map(e => ({ ...e }));
+  try {
+    // IMPORTANTE: `recordEventRemote` grava todo evento AO VIVO em duas
+    // tabelas (`events` e `production_events` — dual-write, igual ops/
+    // production_orders), mas a importação histórica só gravou em `events`.
+    // Buscar só uma tabela e "cair" pra outra apenas se a primeira vier
+    // TOTALMENTE vazia (como era antes) nunca funcionava de verdade: como
+    // `production_events` sempre tem registros do uso ao vivo, ela nunca
+    // fica vazia, então os eventos STARTED/FINISHED da importação histórica
+    // (só em `events`) nunca chegavam a ser lidos — e sem eles, toda OP
+    // concluída caía no fallback "OP inteira = 100% trabalhada, 0% ocioso"
+    // do calculateProductionTime. Por isso agora buscamos as DUAS tabelas e
+    // unimos os resultados (por id), em vez de tratar uma como fallback da
+    // outra.
+    const [prodEventsRes, eventsRes] = await Promise.all([
+      fetchAllEventRows('production_events'),
+      fetchAllEventRows('events'),
+    ]);
+
+    // Cada evento AO VIVO é gravado nas duas tabelas (recordEventRemote), cada
+    // uma com o seu próprio id — unir só por id duplicava todo evento do uso
+    // real (2x STARTED, 2x FINISHED...), bagunçando tempo trabalhado/ocioso
+    // do dia. Agora a chave é (OP + tipo + instante): as duas cópias saem do
+    // mesmo createdAt. `events` entra primeiro porque guarda o line_id em texto
+    // ("line-1", "reator-1"), que `production_events` (line_id UUID) descarta.
+    const byId = new Map<string, any>();
+    const eventKey = (row: any) => {
+      const t = row?.created_at ? new Date(row.created_at).getTime() : NaN;
+      if (row?.op_id == null || !row?.type || isNaN(t)) return `id:${String(row?.id)}`;
+      return `${String(row.op_id)}|${String(row.type)}|${t}`;
+    };
+    for (const row of eventsRes.data || []) {
+      if (row && row.id != null) {
+        const key = eventKey(row);
+        if (!byId.has(key)) byId.set(key, row);
+      }
+    }
+    for (const row of prodEventsRes.data || []) {
+      if (row && row.id != null) {
+        const key = eventKey(row);
+        if (!byId.has(key)) byId.set(key, row);
+      }
+    }
+
+    const data = byId.size > 0 ? Array.from(byId.values()) : null;
+    const error = (prodEventsRes.error && eventsRes.error) ? (prodEventsRes.error || eventsRes.error) : null;
+
+    if (data && data.length > 0 && !error) {
+      const mapped: ProductionEvent[] = data
+        .map((e: any) => ({
+          id: String(e.id),
+          opId: e.op_id ? String(e.op_id) : undefined,
+          lineId: e.line_id ? String(e.line_id) : undefined,
+          leaderId: e.leader_id ? String(e.leader_id) : undefined,
+          opNumber: e.op_number || e.op_id || 'OP',
+          lineName: e.line_name || e.line_id || 'Linha',
+          leaderName: e.leader_name || 'Líder',
+          type: e.type,
+          quantity: e.quantity !== undefined && e.quantity !== null
+            ? Number(e.quantity)
+            : (e.quantity_reported !== undefined && e.quantity_reported !== null ? Number(e.quantity_reported) : undefined),
+          reason: e.reason || e.pause_reason_name,
+          observation: e.observation || e.comments,
+          createdAt: e.created_at || new Date().toISOString(),
+        }))
+        .filter(e => !isMockEvent(e))
+        // fetchAllEventRows pagina em ordem crescente (exigido pelo .range());
+        // devolve mais recente primeiro, como este fetch sempre devolveu.
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      inMemoryEvents = mapped;
+      persistEvents();
+      return mapped;
+    }
+  } catch (err) {
+    console.warn('Busca de eventos no Supabase:', err);
+  }
+  return inMemoryEvents;
+};
+
+// ---------------- EXPEDIENTE (work_sessions) ----------------
+// Controle de início/fim de expediente por linha. Tabela criada por
+// sql/add_work_sessions.sql. Enquanto a tabela não existir, as funções só
+// registram um aviso e o dashboard continua funcionando sem expediente.
+
+let trainingWorkSessions: WorkSession[] = [];
+
+const mapWorkSessionRow = (r: any): WorkSession => ({
+  id: String(r.id),
+  lineId: String(r.line_id),
+  startedAt: r.started_at,
+  endedAt: r.ended_at || null,
+  startedBy: r.started_by || null,
+  endedBy: r.ended_by || null,
+});
+
+/** Expedientes iniciados nos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getWorkSessions = async (sinceDays = 400): Promise<WorkSession[]> => {
+  if (trainingModeActive) return trainingWorkSessions.map(s => ({ ...s }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('work_sessions')
+        .select('*')
+        .gte('started_at', since)
+        .order('started_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getWorkSessions] Não foi possível ler work_sessions (rodou sql/add_work_sessions.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map(mapWorkSessionRow);
+  } catch (err) {
+    console.warn('[getWorkSessions] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Abre o expediente nas linhas informadas (ignora as que já estão abertas). */
+export const startWorkSession = async (lineIds: string[], userId?: string | null): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    const open = new Set(trainingWorkSessions.filter(s => !s.endedAt).map(s => s.lineId));
+    lineIds.filter(id => !open.has(id)).forEach(lineId => {
+      trainingWorkSessions.push({ id: `sim-ws-${Date.now()}-${lineId}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, endedBy: null });
+    });
+    return { error: null };
+  }
+  try {
+    const { data: openRows, error: readError } = await supabase
+      .from('work_sessions')
+      .select('line_id')
+      .in('line_id', lineIds)
+      .is('ended_at', null);
+    if (readError) return { error: readError.message };
+    const alreadyOpen = new Set((openRows || []).map((r: any) => String(r.line_id)));
+    const toOpen = lineIds.filter(id => !alreadyOpen.has(id));
+    if (toOpen.length === 0) return { error: null };
+    const { error } = await supabase
+      .from('work_sessions')
+      .insert(toOpen.map(line_id => ({ line_id, started_at: nowIso, started_by: userId || null })));
+    return { error: error ? error.message : null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/**
+ * Encerra o expediente aberto nas linhas informadas. Com `autoStartIso`
+ * (expediente automático das 7h, que não tem registro no banco), as linhas
+ * sem expediente aberto ganham um registro já encerrado: autoStartIso → agora.
+ */
+export const endWorkSession = async (
+  lineIds: string[],
+  userId?: string | null,
+  options: { autoStartIso?: string | null } = {}
+): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  const autoStart = options.autoStartIso && new Date(options.autoStartIso).getTime() < Date.now() ? options.autoStartIso : null;
+  if (trainingModeActive) {
+    const openIds = new Set(trainingWorkSessions.filter(s => !s.endedAt && lineIds.includes(s.lineId)).map(s => s.lineId));
+    trainingWorkSessions = trainingWorkSessions.map(s =>
+      !s.endedAt && lineIds.includes(s.lineId) ? { ...s, endedAt: nowIso, endedBy: userId || null } : s
+    );
+    if (autoStart) {
+      lineIds.filter(id => !openIds.has(id)).forEach(lineId => {
+        trainingWorkSessions.push({ id: `sim-ws-${Date.now()}-${lineId}`, lineId, startedAt: autoStart, endedAt: nowIso, startedBy: null, endedBy: userId || null });
+      });
+    }
+    return { error: null };
+  }
+  try {
+    const { data: closed, error } = await supabase
+      .from('work_sessions')
+      .update({ ended_at: nowIso, ended_by: userId || null })
+      .in('line_id', lineIds)
+      .is('ended_at', null)
+      .select('line_id');
+    if (error) return { error: error.message };
+    if (autoStart) {
+      const closedIds = new Set((closed || []).map((r: any) => String(r.line_id)));
+      const toInsert = lineIds.filter(id => !closedIds.has(id));
+      if (toInsert.length > 0) {
+        const { error: insError } = await supabase
+          .from('work_sessions')
+          .insert(toInsert.map(line_id => ({ line_id, started_at: autoStart, ended_at: nowIso, started_by: null, ended_by: userId || null })));
+        if (insError) return { error: insError.message };
+      }
+    }
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/**
+ * Encerra sozinho o expediente que ficou aberto depois do fim da jornada
+ * (17h / 16h na sexta) quando NÃO há OP em produção na linha — ninguém
+ * precisa lembrar de clicar em "Encerrar Expediente" quando todo mundo vai
+ * embora. O expediente só continua aberto se uma OP ainda está rodando.
+ * Fecha no fim da jornada, ou no último registro da linha se a produção
+ * passou do horário (hora extra). Retorna quantos foram encerrados.
+ */
+export const autoCloseStaleWorkSessions = async (
+  sessions: WorkSession[],
+  ops: ProductionOrder[],
+  events: ProductionEvent[],
+  nowMs: number = Date.now()
+): Promise<number> => {
+  const dayOf = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+  const todayKey = dayOf(nowMs);
+  let closed = 0;
+  for (const ws of sessions) {
+    if (ws.endedAt) continue;
+    const startMs = new Date(ws.startedAt).getTime();
+    if (isNaN(startMs)) continue;
+    // OP em produção na linha: o expediente continua aberto
+    if (ops.some(o => o.lineId === ws.lineId && o.status === 'in_progress')) continue;
+    const sched = getScheduledWindow(startMs, ws.lineId);
+    const startedInsideJornada = !!sched && startMs < sched[1];
+    const pastDay = dayOf(startMs) !== todayKey;
+    // Hoje: só depois do fim da jornada. Expediente aberto depois do horário
+    // (hora extra) hoje fica aberto até o líder encerrar.
+    if (!pastDay && !(startedInsideJornada && nowMs >= (sched as [number, number])[1])) continue;
+    // Último registro da linha no mesmo dia, depois do início do expediente
+    const lastActivity = (events || [])
+      .filter(e => e.lineId === ws.lineId && dayOf(new Date(e.createdAt).getTime()) === dayOf(startMs))
+      .map(e => new Date(e.createdAt).getTime())
+      .filter(t => !isNaN(t) && t > startMs)
+      .reduce((m, t) => Math.max(m, t), startMs);
+    let endMs = startedInsideJornada ? Math.max((sched as [number, number])[1], lastActivity) : lastActivity;
+    endMs = Math.min(endMs, nowMs);
+    if (!(endMs > startMs)) endMs = startMs + 60 * 1000;
+    const endIso = new Date(endMs).toISOString();
+    if (trainingModeActive) {
+      trainingWorkSessions = trainingWorkSessions.map(s => (s.id === ws.id && !s.endedAt ? { ...s, endedAt: endIso, endedBy: null } : s));
+      closed++;
+      continue;
+    }
+    try {
+      const { data, error } = await supabase
+        .from('work_sessions')
+        .update({ ended_at: endIso, ended_by: null })
+        .eq('id', ws.id)
+        .is('ended_at', null)
+        .select('id');
+      if (error) { console.warn('[autoCloseStaleWorkSessions]', error.message); continue; }
+      if (data && data.length > 0) closed++;
+    } catch (err) {
+      console.warn('[autoCloseStaleWorkSessions] Erro inesperado:', err);
+    }
+  }
+  return closed;
+};
+
+/** Expediente aberto (sem ended_at) de uma linha, se houver. */
+export function getOpenWorkSession(sessions: WorkSession[], lineId: string): WorkSession | null {
+  const open = sessions.filter(s => s.lineId === lineId && !s.endedAt);
+  if (open.length === 0) return null;
+  return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
+}
+
+// ---------------- EQUIPE POR LINHA (line_headcounts) ----------------
+// Colaboradores presentes e faltas de cada linha. O líder informa ao iniciar o
+// expediente e pode corrigir durante o dia — cada correção é um registro novo
+// com horário, e o valor que vale é sempre o mais recente.
+
+let trainingHeadcounts: LineHeadcount[] = [];
+
+/** Registros de equipe dos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getLineHeadcounts = async (sinceDays = 400): Promise<LineHeadcount[]> => {
+  if (trainingModeActive) return trainingHeadcounts.map(h => ({ ...h }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('line_headcounts')
+        .select('*')
+        .gte('recorded_at', since)
+        .order('recorded_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getLineHeadcounts] Não foi possível ler line_headcounts (rodou sql/add_line_headcounts.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map((r: any) => ({
+      id: String(r.id),
+      lineId: String(r.line_id),
+      present: Number(r.present) || 0,
+      absent: Number(r.absent) || 0,
+      recordedAt: r.recorded_at,
+      recordedBy: r.recorded_by || null,
+    }));
+  } catch (err) {
+    console.warn('[getLineHeadcounts] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Grava a equipe atual da linha (presentes e faltas). */
+export const recordLineHeadcount = async (
+  lineId: string,
+  present: number,
+  absent: number,
+  userId?: string | null
+): Promise<{ error: string | null }> => {
+  const p = Math.max(0, Math.floor(Number(present) || 0));
+  const a = Math.max(0, Math.floor(Number(absent) || 0));
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingHeadcounts.push({ id: `sim-hc-${Date.now()}`, lineId, present: p, absent: a, recordedAt: nowIso, recordedBy: userId || null });
+    return { error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('line_headcounts')
+      .insert({ line_id: lineId, present: p, absent: a, recorded_at: nowIso, recorded_by: userId || null })
+      .select('id');
+    if (error) return { error: error.message };
+    if (!data || data.length === 0) return { error: 'o banco não gravou (sem permissão)' };
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Equipe vigente de uma linha num dia (último registro do dia), ou null se não informada. */
+export function getHeadcountForLineDay(list: LineHeadcount[], lineId: string, dayStr: string): LineHeadcount | null {
+  let latest: LineHeadcount | null = null;
+  for (const h of list) {
+    if (h.lineId !== lineId || toLocalDateStr(h.recordedAt) !== dayStr) continue;
+    if (!latest || new Date(h.recordedAt).getTime() >= new Date(latest.recordedAt).getTime()) latest = h;
+  }
+  return latest;
+}
+
+/**
+ * Horas-pessoa trabalhadas numa linha: cada trecho de trabalho vale o número
+ * de colaboradores presentes naquele horário (o primeiro registro do dia vale
+ * desde o início do dia; cada correção vale a partir do horário em que foi
+ * feita). Dia sem equipe informada não entra (retorna os ms sem equipe à parte).
+ */
+export function computePersonHours(
+  workingRanges: Array<[number, number]>,
+  headcounts: LineHeadcount[],
+  lineId: string
+): { personMs: number; workingMsWithTeam: number; workingMsWithoutTeam: number } {
+  const recs = headcounts
+    .filter(h => h.lineId === lineId)
+    .map(h => ({ t: new Date(h.recordedAt).getTime(), present: h.present, day: toLocalDateStr(h.recordedAt) }))
+    .filter(r => !isNaN(r.t))
+    .sort((a, b) => a.t - b.t);
+  let personMs = 0;
+  let withTeam = 0;
+  let withoutTeam = 0;
+  for (const [start, end] of workingRanges) {
+    let cursor = start;
+    while (cursor < end) {
+      const day = toLocalDateStr(new Date(cursor).toISOString());
+      const d = new Date(cursor);
+      const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
+      const sliceEnd = Math.min(end, dayEnd);
+      const dayRecs = recs.filter(r => r.day === day);
+      if (dayRecs.length === 0) {
+        withoutTeam += sliceEnd - cursor;
+      } else {
+        // Trechos do dia por registro: [início do dia ou registro, próximo registro)
+        for (let i = 0; i < dayRecs.length; i++) {
+          const segStart = i === 0 ? -Infinity : dayRecs[i].t;
+          const segEnd = i + 1 < dayRecs.length ? dayRecs[i + 1].t : Infinity;
+          const a = Math.max(cursor, segStart);
+          const b = Math.min(sliceEnd, segEnd);
+          if (b > a) {
+            personMs += (b - a) * dayRecs[i].present;
+            withTeam += b - a;
+          }
+        }
+      }
+      cursor = sliceEnd;
+    }
+  }
+  return { personMs, workingMsWithTeam: withTeam, workingMsWithoutTeam: withoutTeam };
+}
+
+// ---------------- TROCA DE PRODUTO (line_changeovers) ----------------
+// Tempo entre terminar uma OP e começar a próxima, trocando o produto da
+// linha. Aberta pelo botão "Iniciar troca"; fecha ao iniciar a próxima OP,
+// ao encerrar a troca ou ao encerrar o expediente.
+
+let trainingChangeovers: LineChangeover[] = [];
+
+const mapChangeoverRow = (r: any): LineChangeover => ({
+  id: String(r.id),
+  lineId: String(r.line_id),
+  startedAt: r.started_at,
+  endedAt: r.ended_at || null,
+  startedBy: r.started_by || null,
+  endedBy: r.ended_by || null,
+  previousOpId: r.previous_op_id || null,
+  nextOpId: r.next_op_id || null,
+  setupType: r.setup_type === 'same' || r.setup_type === 'different' ? r.setup_type : null,
+});
+
+/** Trocas iniciadas nos últimos `sinceDays` dias (padrão: ~13 meses). */
+export const getChangeovers = async (sinceDays = 400): Promise<LineChangeover[]> => {
+  if (trainingModeActive) return trainingChangeovers.map(c => ({ ...c }));
+  try {
+    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('line_changeovers')
+        .select('*')
+        .gte('started_at', since)
+        .order('started_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getChangeovers] Não foi possível ler line_changeovers (rodou sql/add_line_changeovers.sql?):', error.message);
+        return [];
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return rows.map(mapChangeoverRow);
+  } catch (err) {
+    console.warn('[getChangeovers] Erro inesperado:', err);
+    return [];
+  }
+};
+
+/** Troca aberta (sem ended_at) de uma linha, se houver. */
+export function getOpenChangeover(list: LineChangeover[], lineId: string): LineChangeover | null {
+  const open = list.filter(c => c.lineId === lineId && !c.endedAt);
+  if (open.length === 0) return null;
+  return open.reduce((a, b) => (new Date(a.startedAt).getTime() > new Date(b.startedAt).getTime() ? a : b));
+}
+
+/**
+ * Abre o SETUP (troca de produto) na linha — não abre outro se já houver um
+ * aberto. `setupType`: 'same' = mesmo tipo de produto, 'different' = produto
+ * diferente (escolhido pelo líder).
+ */
+export const startChangeover = async (
+  lineId: string,
+  userId?: string | null,
+  previousOpId?: string | null,
+  setupType?: 'same' | 'different' | null
+): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    if (!trainingChangeovers.some(c => c.lineId === lineId && !c.endedAt)) {
+      trainingChangeovers.push({ id: `sim-co-${Date.now()}`, lineId, startedAt: nowIso, endedAt: null, startedBy: userId || null, previousOpId: previousOpId || null, setupType: setupType || null });
+    }
+    return { error: null };
+  }
+  try {
+    const { data: openRows, error: readError } = await supabase
+      .from('line_changeovers').select('id').eq('line_id', lineId).is('ended_at', null).limit(1);
+    if (readError) return { error: readError.message };
+    if (openRows && openRows.length > 0) return { error: null };
+    const { data, error } = await supabase
+      .from('line_changeovers')
+      .insert({ line_id: lineId, started_at: nowIso, started_by: userId || null, previous_op_id: previousOpId || null, ...(setupType ? { setup_type: setupType } : {}) })
+      .select('id');
+    if (error) {
+      if (/setup_type/i.test(error.message || '')) return { error: 'falta a coluna do tipo de setup no banco (rode sql/add_setup_type.sql)' };
+      return { error: error.message };
+    }
+    if (!data || data.length === 0) return { error: 'o banco não gravou (sem permissão)' };
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Fecha a troca aberta da linha (ao iniciar a próxima OP, encerrar a troca ou o expediente). */
+export const endChangeover = async (
+  lineId: string,
+  userId?: string | null,
+  nextOpId?: string | null
+): Promise<{ error: string | null }> => {
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingChangeovers = trainingChangeovers.map(c =>
+      c.lineId === lineId && !c.endedAt ? { ...c, endedAt: nowIso, endedBy: userId || null, nextOpId: nextOpId || null } : c
+    );
+    return { error: null };
+  }
+  try {
+    const { error } = await supabase
+      .from('line_changeovers')
+      .update({ ended_at: nowIso, ended_by: userId || null, next_op_id: nextOpId || null })
+      .eq('line_id', lineId)
+      .is('ended_at', null);
+    return { error: error ? error.message : null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+// ---------------- OP ACTIONS ----------------
+// ---------------- GRAVAÇÃO CONFERIDA + AVISO DE FALHA ----------------
+// Uma regra de segurança (RLS) do Supabase que não permite a alteração NÃO
+// dá erro: simplesmente não altera nenhuma linha. Por isso as ações do chão
+// de fábrica conferem quantas linhas o banco alterou e, se nenhuma, avisam
+// na tela (evento 'gpanel:db-write-error', exibido pelo DbWriteErrorNotice).
+
+export interface DbWriteFailure {
+  context: string;
+  message: string;
+  opNumber?: string;
+  at: string;
+}
+
+const DB_WRITE_ERROR_EVENT = 'gpanel:db-write-error';
+
+export function notifyDbWriteFailure(context: string, message: string, opNumber?: string): void {
+  console.error(`[${context}] Não gravou no banco${opNumber ? ` (OP ${opNumber})` : ''}:`, message);
+  if (typeof window === 'undefined') return;
+  const detail: DbWriteFailure = { context, message, opNumber, at: new Date().toISOString() };
+  window.dispatchEvent(new CustomEvent(DB_WRITE_ERROR_EVENT, { detail }));
+}
+
+export function onDbWriteFailure(cb: (f: DbWriteFailure) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (e: Event) => cb((e as CustomEvent<DbWriteFailure>).detail);
+  window.addEventListener(DB_WRITE_ERROR_EVENT, handler);
+  return () => window.removeEventListener(DB_WRITE_ERROR_EVENT, handler);
+}
+
+export interface OpConflict {
+  context: string;
+  opNumber?: string;
+  currentStatus: string;
+  byName?: string;
+  atIso?: string;
+}
+
+const OP_CONFLICT_EVENT = 'gpanel:op-conflict';
+
+export function onOpConflict(cb: (c: OpConflict) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (e: Event) => cb((e as CustomEvent<OpConflict>).detail);
+  window.addEventListener(OP_CONFLICT_EVENT, handler);
+  return () => window.removeEventListener(OP_CONFLICT_EVENT, handler);
+}
+
+type OpWriteResult = { ok: boolean; error: string; conflict?: { currentStatus: string } };
+
+/** Quem fez a última ação na OP (para o aviso de conflito). */
+async function lastActionOnOp(opId: string): Promise<{ byName?: string; atIso?: string }> {
+  try {
+    const { data } = await supabase
+      .from('events')
+      .select('leader_id, created_at')
+      .eq('op_id', opId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const row: any = data && data[0];
+    if (!row) return {};
+    let byName: string | undefined;
+    if (row.leader_id) {
+      const local = inMemoryProfiles.find(p => p.uid === String(row.leader_id));
+      if (local) byName = local.name;
+      else {
+        const { data: prof } = await supabase.from('profiles').select('name').eq('id', row.leader_id).limit(1);
+        byName = (prof && (prof[0] as any)?.name) || undefined;
+      }
+    }
+    return { byName, atIso: row.created_at };
+  } catch {
+    return {};
+  }
+}
+
+/** Avisa na tela: falha de gravação (vermelho) ou conflito com outro líder (âmbar). */
+async function reportOpWriteProblem(context: string, res: OpWriteResult, opId: string, opNumber?: string) {
+  if (res.conflict) {
+    const who = await lastActionOnOp(opId);
+    console.warn(`[${context}] OP ${opNumber || opId} já estava "${res.conflict.currentStatus}" — ação ignorada`);
+    if (typeof window !== 'undefined') {
+      const detail: OpConflict = { context, opNumber, currentStatus: res.conflict.currentStatus, ...who };
+      window.dispatchEvent(new CustomEvent(OP_CONFLICT_EVENT, { detail }));
+    }
+    return;
+  }
+  notifyDbWriteFailure(context, res.error, opNumber);
+}
+
+/**
+ * Atualiza a OP nas duas tabelas e diz se o banco alterou de fato alguma linha.
+ * `expectStatus`: só altera se a OP ainda estiver num desses status NO BANCO
+ * (ex.: pausar só se estiver "em andamento"). Assim, se outro líder já
+ * pausou/concluiu a mesma OP, a segunda ação não é gravada em dobro e volta
+ * como conflito.
+ */
+async function updateOpVerified(opId: string, payload: any, expectStatus?: string[]): Promise<OpWriteResult> {
+  let lastError = '';
+  // 1) production_orders (a tabela que o app lê) — com a condição de status
+  let primaryOk = false;
+  let primaryErrored = false;
+  try {
+    const res: any = await runWithCompletedAtFallback(
+      (p) => {
+        let q: any = supabase.from('production_orders').update(p).eq('id', opId);
+        if (expectStatus && expectStatus.length > 0) q = q.in('status', expectStatus);
+        return q.select('id');
+      },
+      payload
+    );
+    if (res.error) { lastError = res.error.message; primaryErrored = true; }
+    else if (Array.isArray(res.data) && res.data.length > 0) primaryOk = true;
+  } catch (err: any) {
+    lastError = String(err?.message || err);
+    primaryErrored = true;
+  }
+
+  if (!primaryOk && !primaryErrored && expectStatus && expectStatus.length > 0) {
+    // Nada alterado: a OP mudou de status (outro líder) ou falta permissão?
+    try {
+      const { data } = await supabase.from('production_orders').select('status').eq('id', opId).limit(1);
+      const current = data && (data[0] as any)?.status;
+      if (current && !expectStatus.includes(String(current))) {
+        return { ok: false, error: '', conflict: { currentStatus: String(current) } };
+      }
+    } catch { /* segue como falha de gravação */ }
+  }
+
+  // 2) ops — espelho. Se production_orders aceitou, grava sem condição (as
+  // duas precisam ficar iguais); se production_orders deu erro, tenta ops
+  // com a mesma condição de status.
+  let mirrorOk = false;
+  if (primaryOk || primaryErrored) {
+    try {
+      const res: any = await runWithCompletedAtFallback(
+        (p) => {
+          let q: any = supabase.from('ops').update(p).eq('id', opId);
+          if (!primaryOk && expectStatus && expectStatus.length > 0) q = q.in('status', expectStatus);
+          return q.select('id');
+        },
+        payload
+      );
+      if (res.error) lastError = res.error.message;
+      else if (Array.isArray(res.data) && res.data.length > 0) mirrorOk = true;
+    } catch (err: any) {
+      lastError = String(err?.message || err);
+    }
+  }
+
+  const ok = primaryOk || mirrorOk;
+  return {
+    ok,
+    error: ok ? '' : (lastError || 'o banco não permitiu alterar esta OP com este usuário (regra de permissão)'),
+  };
+}
+
+/**
+ * Soma um apontamento ao total da OP a partir do valor QUE ESTÁ NO BANCO (e
+ * não o da tela), com trava otimista: só grava se ninguém alterou o total
+ * entre a leitura e a gravação; se alterou, relê e tenta de novo. Dois
+ * líderes apontando ao mesmo tempo não se sobrescrevem.
+ */
+async function incrementOpQuantityVerified(
+  opId: string,
+  qty: number,
+  rejected: number
+): Promise<OpWriteResult & { finalQty?: number; finalRejected?: number }> {
+  let lastError = '';
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const { data, error } = await supabase
+      .from('production_orders')
+      .select('produced_quantity, rejected_quantity, status')
+      .eq('id', opId)
+      .limit(1);
+    if (error) { lastError = error.message; break; }
+    const row: any = data && data[0];
+    if (!row) { lastError = 'OP não encontrada no banco'; break; }
+    if (row.status === 'completed' || row.status === 'pending') {
+      return { ok: false, error: '', conflict: { currentStatus: String(row.status) } };
+    }
+    const baseQty = Number(row.produced_quantity) || 0;
+    const baseRej = Number(row.rejected_quantity) || 0;
+    const finalQty = baseQty + qty;
+    const finalRejected = baseRej + rejected;
+    const res: any = await supabase
+      .from('production_orders')
+      .update({ produced_quantity: finalQty, rejected_quantity: finalRejected })
+      .eq('id', opId)
+      .eq('produced_quantity', baseQty)
+      .select('id');
+    if (res.error) { lastError = res.error.message; break; }
+    if (Array.isArray(res.data) && res.data.length > 0) {
+      try {
+        await supabase.from('ops').update({ produced_quantity: finalQty, rejected_quantity: finalRejected }).eq('id', opId);
+      } catch { /* espelho; production_orders é a referência */ }
+      return { ok: true, error: '', finalQty, finalRejected };
+    }
+    // 0 linhas: outro apontamento entrou no meio (tenta de novo) ou falta permissão
+    const { data: again } = await supabase.from('production_orders').select('produced_quantity').eq('id', opId).limit(1);
+    const nowQty = again && again[0] ? Number((again[0] as any).produced_quantity) || 0 : baseQty;
+    if (nowQty === baseQty) {
+      lastError = 'o banco não permitiu alterar esta OP com este usuário (regra de permissão)';
+      break;
+    }
+  }
+  return { ok: false, error: lastError || 'não foi possível gravar o apontamento' };
+}
+
+function snapshotLocalState() {
+  return { ops: inMemoryOps, lines: inMemoryLines, events: inMemoryEvents };
+}
+
+function restoreLocalState(snap: { ops: ProductionOrder[]; lines: ProductionLine[]; events: ProductionEvent[] }) {
+  inMemoryOps = snap.ops;
+  inMemoryLines = snap.lines;
+  inMemoryEvents = snap.events;
+  persistOps();
+  persistLines();
+  persistEvents();
+}
+
+export const startOP = async (opId: string, lineId: string, leaderId: string) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'in_progress', leaderId, lineId } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'active', currentOpId: opId } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'STARTED',
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
+
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'in_progress', leaderId, lineId } : op);
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'active', currentOpId: opId } : l);
+
+  persistOps();
+  persistLines();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'STARTED',
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  const opWrite = await updateOpVerified(opId, { status: 'in_progress', leader_id: leaderId, line_id: lineId }, ['pending']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Iniciar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  try {
+    await updateLineStatusRemote(lineId, 'active', opId);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'STARTED',
+      createdAt: newEvent.createdAt,
+    });
+  } catch (error) {
+    console.error('Erro ao iniciar OP:', error);
+  }
+  return { ok: true as const };
+};
+
+export const pauseOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  reason: string,
+  observation: string,
+  producedQuantity?: number
+) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
+    trainingOps = trainingOps.map(op =>
+      op.id === opId
+        ? { ...op, status: 'paused', producedQuantity: updatedProducedQty !== undefined ? updatedProducedQty : op.producedQuantity }
+        : op
+    );
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'paused' } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      quantity: updatedProducedQty,
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
+  const updatedProducedQty = producedQuantity !== undefined && !isNaN(producedQuantity) ? producedQuantity : currentOp?.producedQuantity;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId
+      ? {
+          ...op,
+          status: 'paused',
+          producedQuantity: updatedProducedQty !== undefined ? updatedProducedQty : op.producedQuantity,
+        }
+      : op
+  );
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'paused' } : l);
+
+  persistOps();
+  persistLines();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'PAUSED',
+    reason,
+    observation,
+    quantity: updatedProducedQty,
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  const updateOpPayload: any = { status: 'paused' };
+  if (updatedProducedQty !== undefined) {
+    updateOpPayload.produced_quantity = updatedProducedQty;
+  }
+
+  const opWrite = await updateOpVerified(opId, updateOpPayload, ['in_progress']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Pausar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  try {
+    await updateLineStatusRemote(lineId, 'paused', null);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      quantity: updatedProducedQty,
+      createdAt: newEvent.createdAt,
+    });
+  } catch (error) {
+    console.error('Erro ao pausar OP:', error);
+  }
+  return { ok: true as const };
+};
+
+export const resumeOP = async (opId: string, lineId: string, leaderId: string) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'in_progress' } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'active' } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'RESUMED',
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
+
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'in_progress' } : op);
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'active' } : l);
+
+  persistOps();
+  persistLines();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'RESUMED',
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  const opWrite = await updateOpVerified(opId, { status: 'in_progress' }, ['paused']);
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Retomar OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  try {
+    await updateLineStatusRemote(lineId, 'active', opId);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'RESUMED',
+      createdAt: newEvent.createdAt,
+    });
+  } catch (error) {
+    console.error('Erro ao retomar OP:', error);
+  }
+  return { ok: true as const };
+};
+
+// Monta os dados de uma nova OP "resto" a partir da OP original, usada tanto
+// na conclusão Parcial simples quanto na combinação Parcial + Sleev — o saldo
+// que não coube nesta conclusão (estimativa - quantidade apontada) vira uma
+// OP nova e independente, livre no estoque para um próximo envase, mantendo
+// os mesmos dados de produto/lote/granel/prioridade da OP original. O sufixo
+// "-R" no número deixa claro, no Estoque/Cronograma, que ela é o resto de
+// outra OP.
+function buildRemainderOpData(sourceOp: ProductionOrder, remainderQty: number) {
+  // Número livre para o saldo: X-R, X-R2, X-R3... (a mesma OP pode ter mais de
+  // uma conclusão parcial, e o banco não aceita dois "X-R" no mesmo setor).
+  const base = String(sourceOp.number || '').trim().replace(/-R\d*$/i, '');
+  const taken = new Set(
+    inMemoryOps
+      .filter(o => (o.setor || null) === (sourceOp.setor || null))
+      .map(o => String(o.number || '').trim().toLowerCase())
+  );
+  let remainderNumber = `${base}-R`;
+  for (let n = 2; taken.has(remainderNumber.toLowerCase()); n++) remainderNumber = `${base}-R${n}`;
+  return {
+    number: remainderNumber,
+    product: sourceOp.product,
+    lote: sourceOp.lote,
+    plannedQuantity: remainderQty,
+    granel: sourceOp.granel,
+    priority: sourceOp.priority,
+    lineId: null,
+    setor: sourceOp.setor,
+    unidade: sourceOp.unidade,
+    tipoDocumento: sourceOp.tipoDocumento,
+    industria: sourceOp.industria,
+    status: 'pending' as const,
+  };
+}
+
+export const finishOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  finishedShift?: 'Manhã' | 'Tarde',
+  producedQuantity?: number,
+  sendToSleeve?: boolean,
+  lostQuantity?: number,
+  isPartial?: boolean
+) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const completedAtIso = new Date().toISOString();
+    const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
+    const finalLostQty = lostQuantity !== undefined ? lostQuantity : (currentOp?.rejectedQuantity || 0);
+    const plannedQty = currentOp?.plannedQuantity || 0;
+    // Só é de fato "parcial" se sobra saldo da estimativa — se o apontamento
+    // já cobre tudo, não há resto e a conclusão se comporta como Total.
+    const remainderQty = isPartial ? Math.max(0, plannedQty - finalProducedQty) : 0;
+    const effectivePartial = Boolean(isPartial) && remainderQty > 0;
+
+    if (sendToSleeve) {
+      // A quantidade apontada segue a regra do Sleev normalmente — a OP
+      // original vira a OP do Sleev com essa quantidade como novo planejado.
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'pending',
+              lineId: null,
+              leaderId: null,
+              plannedQuantity: finalProducedQty,
+              producedQuantity: 0,
+              rejectedQuantity: 0,
+              finishedShift: undefined,
+              completedAt: undefined,
+              isSleeve: true,
+            }
+          : op
+      );
+      // Parcial + Sleev: o saldo que não foi pro Sleev fica disponível como
+      // uma OP nova, comum (sem Sleev), pronta para um novo envase.
+      if (effectivePartial && currentOp) {
+        await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
+    });
+      }
+    } else if (effectivePartial && currentOp) {
+      // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
+      // como novo planejado, pronta para ser retomada num novo envase.
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'pending',
+              lineId: null,
+              leaderId: null,
+              plannedQuantity: remainderQty,
+              producedQuantity: 0,
+              rejectedQuantity: 0,
+              finishedShift: undefined,
+              completedAt: undefined,
+            }
+          : op
+      );
+    } else {
+      trainingOps = trainingOps.map(op =>
+        op.id === opId
+          ? {
+              ...op,
+              status: 'completed',
+              finishedShift: finishedShift || undefined,
+              completedAt: completedAtIso,
+              producedQuantity: finalProducedQty,
+              rejectedQuantity: finalLostQty,
+              leaderId: leaderId || op.leaderId,
+              isSleeve: false,
+            }
+          : op
+      );
+    }
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'FINISHED',
+      quantity: finalProducedQty,
+      createdAt: completedAtIso,
+    }, ...trainingEvents];
+    return;
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
+  const completedAtIso = new Date().toISOString();
+  const finalProducedQty = producedQuantity !== undefined ? producedQuantity : (currentOp?.producedQuantity || 0);
+  // Quantidade perdida informada AGORA (na conclusão desta etapa). Sem
+  // integração com o laboratório ainda, é o próprio líder que registra isso
+  // ao concluir a OP — usado no cálculo de Qualidade do OEE.
+  const finalLostQty = lostQuantity !== undefined ? lostQuantity : (currentOp?.rejectedQuantity || 0);
+  const plannedQty = currentOp?.plannedQuantity || 0;
+  // Só é de fato "parcial" se sobra saldo da estimativa — se o apontamento já
+  // cobre tudo, não há resto e a conclusão se comporta como Total.
+  const remainderQty = isPartial ? Math.max(0, plannedQty - finalProducedQty) : 0;
+  const effectivePartial = Boolean(isPartial) && remainderQty > 0;
+  // Concluindo na própria linha do Sleev: nunca "envia para o Sleev" de novo.
+  const finishingOnSleeve = isSleeveLineId(lineId) || /sle+v/i.test(String(currentLine?.name || ''));
+  if (finishingOnSleeve) sendToSleeve = false;
+
+  if (sendToSleeve) {
+    markOpAsSleeve(opId, true);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'pending',
+            lineId: null, // volta para o estoque sem linha
+            leaderId: null,
+            plannedQuantity: finalProducedQty, // assume a quantidade apontada no envase como nova meta para o sleev
+            producedQuantity: 0, // reinicia a contagem de produção para a fase do sleev
+            rejectedQuantity: 0, // reinicia a contagem de rejeitos — a etapa do Sleev começa sua própria contagem
+            finishedShift: undefined,
+            completedAt: undefined,
+            isSleeve: true,
+          }
+        : op
+    );
+  } else if (effectivePartial && currentOp) {
+    // Parcial sem Sleev: a própria OP volta pro estoque com o saldo restante
+    // como novo planejado, pronta para ser retomada num novo envase.
+    // Parcial NA LINHA DO SLEEV: o saldo volta ao estoque ainda aguardando o
+    // Sleev (a OP continua marcada como Sleev).
+    markOpAsSleeve(opId, finishingOnSleeve);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'pending',
+            lineId: null,
+            leaderId: null,
+            plannedQuantity: remainderQty,
+            producedQuantity: 0,
+            rejectedQuantity: 0,
+            finishedShift: undefined,
+            completedAt: undefined,
+            isSleeve: finishingOnSleeve,
+          }
+        : op
+    );
+  } else {
+    markOpAsSleeve(opId, false);
+    inMemoryOps = inMemoryOps.map(op =>
+      op.id === opId
+        ? {
+            ...op,
+            status: 'completed',
+            finishedShift: finishedShift || undefined,
+            completedAt: completedAtIso,
+            producedQuantity: finalProducedQty,
+            rejectedQuantity: finalLostQty,
+            leaderId: leaderId || op.leaderId,
+            isSleeve: false,
+          }
+        : op
+    );
+  }
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+
+  persistOps();
+  persistLines();
+
+  const observation = sendToSleeve
+    ? `Envase finalizado (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Retornou ao estoque para acabamento no Sleev${effectivePartial ? `, com ${remainderQty.toLocaleString('pt-BR')} un de saldo liberadas em uma nova OP` : ''}.`
+    : effectivePartial && finishingOnSleeve
+    ? `Sleev parcial (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Saldo de ${remainderQty.toLocaleString('pt-BR')} un voltou ao estoque aguardando finalização no Sleev.`
+    : effectivePartial
+    ? `Envase parcial (${finalProducedQty.toLocaleString('pt-BR')} un${finalLostQty > 0 ? `, ${finalLostQty.toLocaleString('pt-BR')} perdida(s)` : ''}). Saldo de ${remainderQty.toLocaleString('pt-BR')} un voltou ao estoque para um novo envase.`
+    : undefined;
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'FINISHED',
+    // Quantidade apontada nesta conclusão — é dela que o dashboard tira a
+    // produção de uma conclusão PARCIAL (a OP volta pro estoque zerada).
+    quantity: finalProducedQty,
+    observation,
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  const opPayload: any = sendToSleeve
+    ? {
+        status: 'pending',
+        line_id: null,
+        leader_id: null,
+        planned_quantity: finalProducedQty,
+        produced_quantity: 0,
+        rejected_quantity: 0,
+        finished_shift: null,
+      }
+    : effectivePartial
+    ? {
+        status: 'pending',
+        line_id: null,
+        leader_id: null,
+        planned_quantity: remainderQty,
+        produced_quantity: 0,
+        rejected_quantity: 0,
+        finished_shift: null,
+      }
+    : {
+        status: 'completed',
+        finished_shift: finishedShift || null,
+        produced_quantity: finalProducedQty,
+        rejected_quantity: finalLostQty,
+        leader_id: leaderId || null,
+        completed_at: completedAtIso,
+      };
+
+  // completed_at vai para as DUAS tabelas (updateOpVerified repete sem a
+  // coluna se ela não existir) e o app CONFERE se o banco aceitou.
+  const opWrite = await updateOpVerified(opId, opPayload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    markOpAsSleeve(opId, Boolean(currentOp?.isSleeve));
+    await reportOpWriteProblem('Concluir OP', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  // Parcial + Sleev: o saldo que não foi pro Sleev vira uma OP nova, comum
+  // (sem Sleev), pronta para um novo envase — só depois de a OP principal
+  // ter sido gravada.
+  if (sendToSleeve && effectivePartial && currentOp) {
+    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[finishOP] Não foi possível criar a OP de saldo da parcial:', err);
+      notifyDbWriteFailure('Criar OP de saldo', String(err?.message || err), currentOp?.number);
+    });
+  }
+
+  try {
+    // Atualizar linha e gravar evento
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId,
+      type: 'FINISHED',
+      quantity: finalProducedQty,
+      observation,
+      createdAt: newEvent.createdAt,
+    });
+  } catch (error) {
+    console.error('[finishOP] Erro inesperado ao finalizar OP:', error);
+  }
+  return { ok: true as const };
+};
+
+/**
+ * RETRABALHO — conclui o ENVASE de uma OP que ainda não pode ser finalizada
+ * (falta material, ex.: divisória). A quantidade envasada conta como produção
+ * AGORA; a OP volta pro estoque (sem linha) aguardando o retrabalho, com o
+ * produzido e a data do envase preservados. Com "Parcial", o saldo que não
+ * foi envasado vira uma OP nova, pronta para um novo envase.
+ */
+export const sendOpToRework = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  producedQuantity: number,
+  reason: string,
+  lostQuantity?: number,
+  isPartial?: boolean
+): Promise<{ ok: boolean; error?: string }> => {
+  const cleanReason = String(reason || '').trim().replace(/\|/g, '/');
+  if (!cleanReason) return { ok: false, error: 'Informe o que está faltando.' };
+  if (trainingModeActive) return { ok: false, error: 'Retrabalho não está disponível no modo treinamento.' };
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  if (!currentOp) return { ok: false, error: 'OP não encontrada.' };
+  const localSnapshot = snapshotLocalState();
+  const nowIso = new Date().toISOString();
+  const qty = Math.max(0, Math.floor(Number(producedQuantity) || 0));
+  const lost = lostQuantity !== undefined ? Math.max(0, Math.floor(Number(lostQuantity) || 0)) : (currentOp.rejectedQuantity || 0);
+  const planned = currentOp.plannedQuantity || 0;
+  const remainderQty = isPartial ? Math.max(0, planned - qty) : 0;
+  const effectivePartial = Boolean(isPartial) && remainderQty > 0;
+
+  const observation =
+    `Aguardando retrabalho: ${cleanReason} | Envase concluído com ${qty.toLocaleString('pt-BR')} un` +
+    `${lost > 0 ? `, ${lost.toLocaleString('pt-BR')} perdida(s)` : ''}` +
+    `${effectivePartial ? `; saldo de ${remainderQty.toLocaleString('pt-BR')} un liberado em uma nova OP` : ''}.`;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId
+      ? {
+          ...op,
+          status: 'pending',
+          lineId: null,
+          leaderId: null,
+          producedQuantity: qty,
+          rejectedQuantity: lost,
+          plannedQuantity: effectivePartial ? qty : op.plannedQuantity,
+          completedAt: nowIso,
+          finishedShift: undefined,
+        }
+      : op
+  );
+  inMemoryLines = inMemoryLines.map(l => (l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l));
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'FINISHED',
+    quantity: qty,
+    observation,
+    createdAt: nowIso,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistOps();
+  persistLines();
+  persistEvents();
+
+  const payload: any = {
+    status: 'pending',
+    line_id: null,
+    leader_id: null,
+    produced_quantity: qty,
+    rejected_quantity: lost,
+    finished_shift: null,
+    completed_at: nowIso,
+  };
+  if (effectivePartial) payload.planned_quantity = qty;
+  const opWrite = await updateOpVerified(opId, payload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Aguardar retrabalho', opWrite, opId, currentOp.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  if (effectivePartial) {
+    await createOP(buildRemainderOpData(currentOp, remainderQty)).catch(err => {
+      console.error('[sendOpToRework] Não foi possível criar a OP de saldo:', err);
+      notifyDbWriteFailure('Criar OP de saldo', String(err?.message || err), currentOp.number);
+    });
+  }
+
+  try {
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({ opId, lineId, leaderId, type: 'FINISHED', quantity: qty, observation, createdAt: nowIso });
+  } catch (error) {
+    console.error('[sendOpToRework] Erro ao registrar evento:', error);
+  }
+  return { ok: true };
+};
+
+/**
+ * Conclui o RETRABALHO: a OP é finalizada de vez. Produzido, rejeitos e a
+ * data do envase NÃO mudam (a produção já contou no dia do envase) — só o
+ * status. O evento não traz quantidade, então não soma produção de novo.
+ */
+export const finishReworkOP = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  observationExtra?: string
+): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) return { ok: false, error: 'Retrabalho não está disponível no modo treinamento.' };
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  if (!currentOp) return { ok: false, error: 'OP não encontrada.' };
+  const localSnapshot = snapshotLocalState();
+  const nowIso = new Date().toISOString();
+  const info = getReworkInfoByOp(inMemoryEvents.filter(e => e.opId === opId)).get(opId);
+  const extra = String(observationExtra || '').trim();
+  const observation = `Retrabalho concluído | ${info?.reason || 'material pendente'}${extra ? ` — ${extra}` : ''}`;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId ? { ...op, status: 'completed', leaderId: leaderId || op.leaderId, completedAt: op.completedAt || nowIso } : op
+  );
+  inMemoryLines = inMemoryLines.map(l => (l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l));
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'FINISHED',
+    observation,
+    createdAt: nowIso,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistOps();
+  persistLines();
+  persistEvents();
+
+  const payload: any = { status: 'completed', leader_id: leaderId || null };
+  if (!currentOp.completedAt) payload.completed_at = nowIso;
+  const opWrite = await updateOpVerified(opId, payload, ['in_progress', 'paused']);
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Concluir retrabalho', opWrite, opId, currentOp.number);
+    return { ok: false, error: opWrite.error };
+  }
+  try {
+    await updateLineStatusRemote(lineId, 'idle', null);
+    await recordEventRemote({ opId, lineId, leaderId, type: 'FINISHED', observation, createdAt: nowIso });
+  } catch (error) {
+    console.error('[finishReworkOP] Erro ao registrar evento:', error);
+  }
+  return { ok: true };
+};
+
+/**
+ * Cancela uma OP iniciada por engano — devolve para "Aguardando" (pending)
+ * e remove os eventos (STARTED/PAUSED/RESUMED) desta sessão errada, pra não
+ * contaminar o cálculo real de Disponibilidade/Ociosidade com um horário de
+ * início que nunca deveria ter existido (ver calculateProductionTime).
+ *
+ * Só permite cancelar enquanto NADA foi produzido/apontado nesta OP
+ * (`producedQuantity === 0`) — se já existe quantidade real reportada, isso
+ * deixou de ser um clique errado sem consequência e precisa ser resolvido
+ * via Pausar/Finalizar (nunca descartado silenciosamente).
+ */
+export const cancelOP = async (
+  opId: string,
+  lineId: string,
+  reason?: string
+): Promise<{ success: boolean; message?: string }> => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    if (!currentOp) return { success: false, message: 'OP não encontrada.' };
+    if ((currentOp.producedQuantity || 0) > 0) {
+      return { success: false, message: 'Esta OP já tem quantidade produzida registrada — não pode ser cancelada, apenas pausada ou finalizada.' };
+    }
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, status: 'pending', leaderId: null } : op);
+    trainingLines = trainingLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+    trainingEvents = [
+      {
+        id: `sim-ev-${Date.now()}`,
+        opId,
+        opNumber: currentOp.number,
+        lineId,
+        lineName: trainingLines.find(l => l.id === lineId)?.name || lineId,
+        type: 'CANCELLED',
+        observation: reason || 'Início cancelado (iniciado por engano)',
+        createdAt: new Date().toISOString(),
+      },
+      ...trainingEvents.filter(e => e.opId !== opId),
+    ];
+    return { success: true };
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  if (!currentOp) {
+    return { success: false, message: 'OP não encontrada.' };
+  }
+  if ((currentOp.producedQuantity || 0) > 0 && !isOpInRework(opId, inMemoryEvents)) {
+    return { success: false, message: 'Esta OP já tem quantidade produzida registrada — não pode ser cancelada, apenas pausada ou finalizada.' };
+  }
+
+  // "Sessão errada" = tudo que aconteceu com esta OP desde o último STARTED
+  // (inclusive) — nunca eventos de sessões anteriores legítimas (ex.: uma OP
+  // que já foi para o Sleev e voltou ao estoque com producedQuantity zerado
+  // de propósito ainda carrega o histórico real da etapa anterior).
+  const opEventsDesc = inMemoryEvents
+    .filter(e => e.opId === opId)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const lastStarted = opEventsDesc.find(e => e.type === 'STARTED');
+  const cutoffIso = lastStarted?.createdAt || new Date().toISOString();
+
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const cancelledEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp.number,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId: currentOp.leaderId || undefined,
+    type: 'CANCELLED',
+    observation: reason || 'Início cancelado (iniciado por engano)',
+    createdAt: new Date().toISOString(),
+  };
+
+  // 1. Volta a OP pra "aguardando" no banco e CONFERE se gravou — com a
+  // permissão (RLS) barrando, o Supabase não dá erro, só atualiza 0 linhas.
+  const resPO = await supabase
+    .from('production_orders')
+    .update({ status: 'pending', leader_id: null })
+    .eq('id', opId)
+    .select('id');
+  if (resPO.error || !resPO.data || resPO.data.length === 0) {
+    const reason = resPO.error?.message || 'sem permissão para alterar esta OP';
+    console.error(`[cancelOP] Banco não cancelou o início da OP ${opId}:`, reason);
+    return { success: false, message: `O banco não cancelou o início (${reason}). A OP continua como estava.` };
+  }
+
+  // 2. Só agora reflete na tela/memória
+  inMemoryEvents = [
+    cancelledEvent,
+    ...inMemoryEvents.filter(e => !(e.opId === opId && e.createdAt >= cutoffIso)),
+  ];
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, status: 'pending', leaderId: null } : op);
+  inMemoryLines = inMemoryLines.map(l => l.id === lineId ? { ...l, status: 'idle', currentOpId: null } : l);
+
+  persistEvents();
+  persistOps();
+  persistLines();
+
+  try {
+    // Tenta apagar os eventos da sessão errada. Se a permissão não deixar,
+    // não tem problema: o evento CANCELLED gravado abaixo já faz o cálculo de
+    // tempo (lib/productionTime) descartar essa sessão.
+    await Promise.allSettled([
+      supabase.from('ops').update({ status: 'pending', leader_id: null }).eq('id', opId),
+      supabase.from('events').delete().eq('op_id', opId).gte('created_at', cutoffIso),
+      supabase.from('production_events').delete().eq('op_id', opId).gte('created_at', cutoffIso),
+    ]);
+    await updateLineStatusRemote(lineId, 'idle', null);
+    // Registra um único evento de auditoria (sem horário de início/fim
+    // associado, então é inofensivo pro cálculo de tempo) — só pra deixar
+    // rastro de que isso aconteceu.
+    await recordEventRemote({
+      opId,
+      lineId,
+      leaderId: currentOp.leaderId || undefined,
+      type: 'CANCELLED',
+      observation: reason || 'Início cancelado (iniciado por engano)',
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Erro ao cancelar OP:', error);
+  }
+
+  return { success: true };
+};
+
+export const reportQuantity = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  quantity: number,
+  rejectedQty?: number
+) => {
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    const newQty = (currentOp?.producedQuantity || 0) + quantity;
+    const newRejectedQty = (currentOp?.rejectedQuantity || 0) + (rejectedQty || 0);
+    trainingOps = trainingOps.map(op => op.id === opId ? { ...op, producedQuantity: newQty, rejectedQuantity: newRejectedQty } : op);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'QUANTITY_REPORTED',
+      quantity,
+      createdAt: new Date().toISOString(),
+    }, ...trainingEvents];
+    return;
+  }
+
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const localSnapshot = snapshotLocalState();
+  const newQty = (currentOp?.producedQuantity || 0) + quantity;
+  // Rejeito informado pelo líder junto com este apontamento (soma ao total já
+  // registrado na OP) — enquanto o laboratório não entra no fluxo, é quem
+  // está no chão de fábrica que reporta a perda, usado na Qualidade do OEE.
+  const newRejectedQty = (currentOp?.rejectedQuantity || 0) + (rejectedQty || 0);
+
+  inMemoryOps = inMemoryOps.map(op => op.id === opId ? { ...op, producedQuantity: newQty, rejectedQuantity: newRejectedQty } : op);
+  persistOps();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity,
+    observation: rejectedQty ? `${rejectedQty.toLocaleString('pt-BR')} rejeitada(s) neste apontamento` : undefined,
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  // Grava o total da OP e CONFERE se o banco aceitou. Se recusar, o
+  // apontamento não é registrado (nem o evento) — antes o evento entrava e o
+  // total não, e o líder repetia o apontamento achando que não tinha ido.
+  const opWrite = await incrementOpQuantityVerified(opId, quantity, rejectedQty || 0);
+
+  if (opWrite.ok && opWrite.finalQty !== undefined) {
+    // Total real do banco (pode incluir apontamento de outro líder feito ao mesmo tempo)
+    inMemoryOps = inMemoryOps.map(op => op.id === opId
+      ? { ...op, producedQuantity: opWrite.finalQty as number, rejectedQuantity: opWrite.finalRejected ?? op.rejectedQuantity }
+      : op);
+    persistOps();
+  }
+
+  if (!opWrite.ok) {
+    // O banco recusou (ex.: regra de permissão): desfaz na tela e avisa —
+    // nunca mostrar como feito algo que não foi gravado.
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Apontar produção', opWrite, opId, currentOp?.number);
+    return { ok: false, error: opWrite.error };
+  }
+
+  // Grava em events e production_events com schemas validados
+  await recordEventRemote({
+    opId,
+    lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity,
+    observation: newEvent.observation,
+    createdAt: newEvent.createdAt,
+  });
+  return { ok: true as const };
+};
+
+export const updateProducedQuantityDirect = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  totalProducedQty: number
+) => {
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const oldQty = currentOp?.producedQuantity || 0;
+  const delta = totalProducedQty - oldQty;
+
+  inMemoryOps = inMemoryOps.map(op =>
+    op.id === opId ? { ...op, producedQuantity: totalProducedQty } : op
+  );
+  persistOps();
+
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity: delta > 0 ? delta : totalProducedQty,
+    createdAt: new Date().toISOString(),
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+
+  try {
+    const resProductionOrders = await supabase
+      .from('production_orders')
+      .update({ produced_quantity: totalProducedQty })
+      .eq('id', opId);
+    if (resProductionOrders.error) {
+      console.warn(
+        `[updateProducedQuantityDirect] Falha ao gravar em production_orders (OP ${opId}):`,
+        resProductionOrders.error.message
+      );
+    }
+  } catch (err) {
+    console.warn(`[updateProducedQuantityDirect] Erro em production_orders (OP ${opId}):`, err);
+  }
+
+  try {
+    const resOps = await supabase
+      .from('ops')
+      .update({ produced_quantity: totalProducedQty })
+      .eq('id', opId);
+    if (resOps.error) {
+      console.warn(
+        `[updateProducedQuantityDirect] Falha ao gravar em ops (OP ${opId}):`,
+        resOps.error.message
+      );
+    }
+  } catch (err) {
+    console.warn(`[updateProducedQuantityDirect] Erro em ops (OP ${opId}):`, err);
+  }
+
+  await recordEventRemote({
+    opId,
+    lineId,
+    leaderId,
+    type: 'QUANTITY_REPORTED',
+    quantity: delta > 0 ? delta : totalProducedQty,
+    createdAt: newEvent.createdAt,
+  });
+};
+
+// ---------------- DATABASE RESET & CLEANUP ----------------
+export const clearAllOPs = async (): Promise<void> => {
+  inMemoryOps = [];
+  persistOps();
+
+  // Also reset all lines to idle
+  inMemoryLines = inMemoryLines.map(l => ({ ...l, status: 'idle', currentOpId: null }));
+  persistLines();
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_orders').delete().neq('id', '___non_existent___'),
+      supabase.from('ops').delete().neq('id', '___non_existent___'),
+      supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+      supabase.from('lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao limpar OPs no Supabase:', err);
+  }
+};
+
+export const clearAllEvents = async (): Promise<void> => {
+  inMemoryEvents = [];
+  persistEvents();
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_events').delete().neq('id', '___non_existent___'),
+      supabase.from('events').delete().neq('id', '___non_existent___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao limpar eventos no Supabase:', err);
+  }
+};
+
+export const resetProductionDatabase = async (): Promise<void> => {
+  inMemoryOps = [];
+  inMemoryEvents = [];
+  inMemoryLines = DEFAULT_LINES.map(l => ({ ...l, status: 'idle', currentOpId: null }));
+  
+  persistOps();
+  persistEvents();
+  persistLines();
+
+  // Clean old storage versions as well
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V6');
+      window.localStorage.removeItem('SIG_PROD_OPS_STORAGE_V4');
+      window.localStorage.removeItem('SIG_PROD_DELETED_OPS_V4');
+      window.localStorage.removeItem('SIG_PROD_EVENTS_STORAGE_V4');
+      window.localStorage.removeItem('SIG_PROD_OPS_STORAGE');
+      window.localStorage.removeItem('SIG_PROD_EVENTS_STORAGE');
+    } catch {}
+  }
+
+  try {
+    await Promise.allSettled([
+      supabase.from('production_orders').delete().neq('id', '___non_existent___'),
+      supabase.from('ops').delete().neq('id', '___non_existent___'),
+      supabase.from('production_events').delete().neq('id', '___non_existent___'),
+      supabase.from('events').delete().neq('id', '___non_existent___'),
+      supabase.from('production_lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+      supabase.from('lines').update({ status: 'idle', current_op_id: null }).neq('id', '___none___'),
+    ]);
+  } catch (err) {
+    console.warn('Erro ao resetar banco no Supabase:', err);
+  }
+};
+
+
+// ---------------- HISTÓRICO DA PESAGEM (pesagem_history) ----------------
+// Registro de cada movimentação de OSM na Pesagem: quem registrou (entrada),
+// editou, excluiu ou deu saída — com o nome do usuário logado. O registro é
+// imutável: não existe função para editar ou apagar uma linha do histórico.
+
+let trainingPesagemHistory: PesagemHistoryEntry[] = [];
+const mapPesagemHistoryRow = (r: any): PesagemHistoryEntry => ({
+  id: String(r.id),
+  createdAt: r.created_at,
+  action: r.action as PesagemHistoryAction,
+  opId: r.op_id ?? null,
+  opNumber: String(r.op_number ?? ''),
+  product: r.product ?? null,
+  lote: r.lote ?? null,
+  industria: r.industria ?? null,
+  collaboratorName: String(r.collaborator_name ?? ''),
+  userId: r.user_id ?? null,
+  userName: r.user_name ?? null,
+  details: r.details ?? null,
+});
+
+export interface PesagemHistoryInput {
+  action: PesagemHistoryAction;
+  op: { id?: string | null; number?: string | null; product?: string | null; lote?: string | null; industria?: string | null };
+  collaboratorName: string;
+  userId?: string | null;
+  userName?: string | null;
+  details?: PesagemHistoryEntry['details'];
+}
+
+/**
+ * Grava uma movimentação no histórico. Retorna erro (em vez de lançar) para
+ * a tela avisar "a ação foi feita, mas o histórico não foi gravado" — nunca
+ * esconder uma falha de registro.
+ */
+export const logPesagemHistory = async (input: PesagemHistoryInput): Promise<{ error: string | null }> => {
+  const collaboratorName = String(input.collaboratorName || '').trim();
+  if (!collaboratorName) return { error: 'nome do usuário não informado' };
+  const row = {
+    action: input.action,
+    op_id: input.op.id ?? null,
+    op_number: String(input.op.number ?? '').trim(),
+    product: input.op.product ?? null,
+    lote: input.op.lote ?? null,
+    industria: input.op.industria ?? null,
+    collaborator_name: collaboratorName,
+    user_id: input.userId ?? null,
+    user_name: input.userName ?? null,
+    details: input.details ?? null,
+  };
+  if (trainingModeActive) {
+    trainingPesagemHistory.push(mapPesagemHistoryRow({ ...row, id: `sim-ph-${Date.now()}-${trainingPesagemHistory.length}`, created_at: new Date().toISOString() }));
+    return { error: null };
+  }
+  try {
+    // Sem .select(): só a Coordenação pode LER o histórico, então pedir a
+    // linha de volta falharia para a Pesagem/Manipulação. Uma inclusão
+    // barrada pela RLS sempre retorna erro, então basta conferir o erro.
+    const { error } = await supabase.from('pesagem_history').insert(row);
+    if (error) {
+      console.warn('[logPesagemHistory] Não foi possível gravar no histórico (rodou sql/add_pesagem_historico.sql?):', error.message);
+      return { error: error.message };
+    }
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+/** Histórico da Pesagem entre duas datas locais (AAAA-MM-DD, inclusivas), mais recente primeiro. */
+export const getPesagemHistory = async (fromDateStr: string, toDateStr: string): Promise<{ entries: PesagemHistoryEntry[]; error: string | null }> => {
+  const [fy, fm, fd] = fromDateStr.split('-').map(Number);
+  const [ty, tm, td] = toDateStr.split('-').map(Number);
+  const fromIso = new Date(fy, (fm || 1) - 1, fd || 1, 0, 0, 0, 0).toISOString();
+  const toIso = new Date(ty, (tm || 1) - 1, (td || 1) + 1, 0, 0, 0, 0).toISOString();
+  if (trainingModeActive) {
+    const entries = trainingPesagemHistory
+      .filter(e => e.createdAt >= fromIso && e.createdAt < toIso)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(e => ({ ...e }));
+    return { entries, error: null };
+  }
+  try {
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('pesagem_history')
+        .select('*')
+        .gte('created_at', fromIso)
+        .lt('created_at', toIso)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) return { entries: [], error: error.message };
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return { entries: rows.map(mapPesagemHistoryRow), error: null };
+  } catch (err: any) {
+    return { entries: [], error: String(err?.message || err) };
+  }
+};
+
+function resetTrainingPesagemHistory(): void {
+  trainingPesagemHistory = [];
+}
+
+
+// ---------------- RELATÓRIO DO DIA (daily_reports) ----------------
+// Parte digitada pelo Coordenador (quadro do dia, principais pontos,
+// segurança). Tabela criada por sql/add_daily_reports.sql. Os números de
+// produção, tempos e equipe NÃO ficam aqui — saem dos registros do app.
+
+// O DSS é guardado dentro do jsonb `pontos` com um tópico reservado — assim
+// não precisa de coluna nova no banco.
+const DSS_KEY = '__dss__';
+const mapDailyReportRow = (r: any): DailyReportManual => ({
+  date: String(r.report_date).slice(0, 10),
+  dss: Array.isArray(r.pontos) ? String((r.pontos.find((p: any) => p?.titulo === DSS_KEY) || {}).texto || '') : '',
+  atestados: Number(r.atestados) || 0,
+  faltas: Number(r.faltas) || 0,
+  atrasos: Number(r.atrasos) || 0,
+  saidasAntecipadas: Number(r.saidas_antecipadas) || 0,
+  pontos: Array.isArray(r.pontos) ? r.pontos.filter((p: any) => p?.titulo !== DSS_KEY).map((p: any) => ({ titulo: String(p?.titulo || ''), texto: String(p?.texto || '') })) : [],
+  seguranca: String(r.seguranca || ''),
+  updatedAt: r.updated_at || null,
+  updatedBy: r.updated_by || null,
+});
+
+let trainingDailyReports: DailyReportManual[] = [];
+
+/** Relatórios salvos entre duas datas ('AAAA-MM-DD', inclusivo). */
+export const getDailyReports = async (fromDate: string, toDate: string): Promise<{ reports: DailyReportManual[]; error: string | null }> => {
+  if (trainingModeActive) {
+    return { reports: trainingDailyReports.filter(r => r.date >= fromDate && r.date <= toDate).map(r => ({ ...r })), error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .gte('report_date', fromDate)
+      .lte('report_date', toDate)
+      .order('report_date', { ascending: true });
+    if (error) {
+      console.warn('[getDailyReports] Não foi possível ler daily_reports (rodou sql/add_daily_reports.sql?):', error.message);
+      return { reports: [], error: error.message };
+    }
+    return { reports: (data || []).map(mapDailyReportRow), error: null };
+  } catch (err: any) {
+    return { reports: [], error: String(err?.message || err) };
+  }
+};
+
+/** Salva (cria ou substitui) a parte digitada do relatório de um dia. */
+export const saveDailyReport = async (report: DailyReportManual, userId?: string | null): Promise<{ error: string | null }> => {
+  const clean: DailyReportManual = {
+    ...report,
+    atestados: Math.max(0, Math.floor(Number(report.atestados) || 0)),
+    faltas: Math.max(0, Math.floor(Number(report.faltas) || 0)),
+    atrasos: Math.max(0, Math.floor(Number(report.atrasos) || 0)),
+    saidasAntecipadas: Math.max(0, Math.floor(Number(report.saidasAntecipadas) || 0)),
+    pontos: (report.pontos || []).map(p => ({ titulo: String(p.titulo || '').trim(), texto: String(p.texto || '').trim() })).filter(p => p.titulo !== DSS_KEY),
+    seguranca: String(report.seguranca || '').trim(),
+    dss: String(report.dss || '').trim(),
+  };
+  const pontosToStore = clean.dss ? [...clean.pontos, { titulo: DSS_KEY, texto: clean.dss }] : clean.pontos;
+  const nowIso = new Date().toISOString();
+  if (trainingModeActive) {
+    trainingDailyReports = [...trainingDailyReports.filter(r => r.date !== clean.date), { ...clean, updatedAt: nowIso, updatedBy: userId || null }];
+    return { error: null };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('daily_reports')
+      .upsert({
+        report_date: clean.date,
+        atestados: clean.atestados,
+        faltas: clean.faltas,
+        atrasos: clean.atrasos,
+        saidas_antecipadas: clean.saidasAntecipadas,
+        pontos: pontosToStore,
+        seguranca: clean.seguranca,
+        updated_at: nowIso,
+        updated_by: userId && isUUID(userId) ? userId : null,
+      }, { onConflict: 'report_date' })
+      .select('report_date');
+    if (error) {
+      notifyDbWriteFailure('Salvar relatório do dia', error.message);
+      return { error: error.message };
+    }
+    if (!data || data.length === 0) {
+      notifyDbWriteFailure('Salvar relatório do dia', 'o banco não gravou (sem permissão)');
+      return { error: 'o banco não gravou (sem permissão)' };
+    }
+    return { error: null };
+  } catch (err: any) {
+    return { error: String(err?.message || err) };
+  }
+};
+
+
+// ---------------- OCORRÊNCIAS DE PESSOAL (staff_occurrences) ----------------
+// Faltas, atrasos, atestados, saídas antecipadas, acidentes/incidentes, hora
+// extra e free do balde — lançados pelo líder da linha/setor, com o nome do
+// colaborador e o motivo. Tabela criada por sql/add_staff_occurrences.sql.
+
+export const STAFF_OCCURRENCE_LABELS: Record<StaffOccurrenceType, string> = {
+  falta: 'Falta',
+  atraso: 'Atraso',
+  atestado: 'Atestado',
+  saida_antecipada: 'Saída antecipada',
+  acidente: 'Acidente',
+  incidente: 'Incidente',
+  hora_extra: 'Hora extra',
+  retorno: 'Retorno',
+  free_balde: 'Free do balde',
+};
+
+const mapStaffOccurrenceRow = (r: any): StaffOccurrence => ({
+  id: String(r.id),
+  date: String(r.occurred_on).slice(0, 10),
+  lineId: String(r.line_id || ''),
+  type: r.type as StaffOccurrenceType,
+  employeeName: String(r.employee_name || ''),
+  quantity: Math.max(1, Number(r.quantity) || 1),
+  reason: String(r.reason || ''),
+  occurredTime: r.occurred_time ? String(r.occurred_time).slice(0, 5) : null,
+  createdBy: r.created_by || null,
+  createdAt: r.created_at,
+});
+
+let trainingStaffOccurrences: StaffOccurrence[] = [];
+
+/** Ocorrências entre duas datas ('AAAA-MM-DD', inclusivo). */
+export const getStaffOccurrences = async (fromDate: string, toDate: string): Promise<{ list: StaffOccurrence[]; error: string | null }> => {
+  if (trainingModeActive) {
+    return { list: trainingStaffOccurrences.filter(o => o.date >= fromDate && o.date <= toDate), error: null };
+  }
+  try {
+    const PAGE_SIZE = 1000;
+    const rows: any[] = [];
+    let offset = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('staff_occurrences')
+        .select('*')
+        .gte('occurred_on', fromDate)
+        .lte('occurred_on', toDate)
+        .order('occurred_on', { ascending: true })
+        .order('created_at', { ascending: true })
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) {
+        console.warn('[getStaffOccurrences] Não foi possível ler staff_occurrences (rodou sql/add_staff_occurrences.sql?):', error.message);
+        return { list: [], error: error.message };
+      }
+      if (!data || data.length === 0) break;
+      rows.push(...data);
+      if (data.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+    return { list: rows.map(mapStaffOccurrenceRow), error: null };
+  } catch (err: any) {
+    return { list: [], error: String(err?.message || err) };
+  }
+};
+
+/** Registra uma ocorrência e confere se o banco gravou. */
+export const addStaffOccurrence = async (
+  occ: Omit<StaffOccurrence, 'id' | 'createdAt' | 'createdBy'>,
+  userId?: string | null
+): Promise<{ ok: boolean; error?: string }> => {
+  const name = String(occ.employeeName || '').trim();
+  const reason = String(occ.reason || '').trim();
+  const quantity = Math.max(1, Math.floor(Number(occ.quantity) || 1));
+  if (!name && occ.type !== 'free_balde') return { ok: false, error: 'Informe o nome do colaborador.' };
+  const occurredTime = /^\d{2}:\d{2}$/.test(String(occ.occurredTime || '')) ? String(occ.occurredTime) : null;
+  if (occ.type === 'retorno' && !occurredTime) return { ok: false, error: 'Informe o horário do retorno.' };
+  if (trainingModeActive) {
+    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, occurredTime, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
+    return { ok: true };
+  }
+  try {
+    const payload: any = {
+      occurred_on: occ.date,
+      line_id: occ.lineId,
+      type: occ.type,
+      employee_name: name,
+      quantity,
+      reason,
+      created_by: userId && isUUID(userId) ? userId : null,
+    };
+    if (occurredTime) payload.occurred_time = occurredTime;
+    const { data, error } = await supabase
+      .from('staff_occurrences')
+      .insert(payload)
+      .select('id');
+    if (error) {
+      if (/occurred_time|staff_occurrences_type_check|check constraint/i.test(error.message)) {
+        return { ok: false, error: 'Falta atualizar o banco para o "Retorno" — rode sql/add_staff_occurrence_retorno.sql no Supabase.' };
+      }
+      notifyDbWriteFailure('Registrar ocorrência de pessoal', error.message);
+      return { ok: false, error: /staff_occurrences|does not exist|relation/i.test(error.message) ? 'A tabela de ocorrências ainda não existe — rode sql/add_staff_occurrences.sql no Supabase.' : error.message };
+    }
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+/** Remove uma ocorrência lançada por engano. */
+export const deleteStaffOccurrence = async (id: string): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) {
+    trainingStaffOccurrences = trainingStaffOccurrences.filter(o => o.id !== id);
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase.from('staff_occurrences').delete().eq('id', id).select('id');
+    if (error) return { ok: false, error: error.message };
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não excluiu (só quem lançou ou a coordenação pode excluir)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+/** Soma das quantidades por tipo. */
+export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurrenceType, number> {
+  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, retorno: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
+  for (const o of list) if (o.type in out) out[o.type] += o.quantity || 1;
+  return out;
+}
+
+// ---------------- MANIPULAÇÃO: FASES DO REATOR E CONFERÊNCIA ----------------
+// Fluxo: Conferência → Iniciar → Manipulando → Finalizar manipulação (Kg) →
+// Aguardando amostragem → Coletar amostra → Aguardando CQ → Aprovado (→
+// Aguardando drenagem) ou Reprovado (→ Em ajuste → nova amostra) → Iniciar
+// drenagem → Drenando → Finalizar drenagem (OP concluída, reator em Setup).
+// O banco só aceita STARTED/PAUSED/RESUMED/FINISHED/QUANTITY_REPORTED, então
+// cada fase é um evento PAUSED com um MOTIVO fixo (abaixo) — a OP fica
+// 'paused' durante amostragem/CQ/ajuste e volta a 'in_progress' na drenagem.
+
+export const MANIP_PHASE_REASONS = {
+  resfriamento: 'Resfriamento',
+  aguardandoAmostragem: 'Aguardando amostragem',
+  aguardandoCq: 'Aguardando CQ',
+  emAjuste: 'Em ajuste',
+  emCorrecao: 'Em correção',
+  reprocesso: 'Reprocesso',
+  aguardandoDrenagem: 'Aguardando drenagem',
+} as const;
+
+export type ManipPhase =
+  | 'aguardando_inicio'
+  | 'manipulando'
+  | 'pausada'
+  | 'resfriando'
+  | 'aguardando_amostragem'
+  | 'aguardando_cq'
+  | 'em_ajuste'
+  | 'em_correcao'
+  | 'aguardando_drenagem'
+  | 'drenando'
+  | 'drenagem_pausada'
+  | 'encerrado';
+
+export const MANIP_PHASE_LABELS: Record<ManipPhase, string> = {
+  aguardando_inicio: 'Aguardando início',
+  manipulando: 'Manipulando',
+  pausada: 'Pausada',
+  resfriando: 'Resfriando',
+  aguardando_amostragem: 'Aguardando amostragem',
+  aguardando_cq: 'Aguardando CQ',
+  em_ajuste: 'Em ajuste',
+  em_correcao: 'Aprovado c/ correção',
+  aguardando_drenagem: 'Liberado p/ drenagem',
+  drenando: 'Drenando',
+  drenagem_pausada: 'Drenagem pausada',
+  encerrado: 'Encerrado',
+};
+
+const MANIP_PHASE_BY_REASON: Record<string, ManipPhase> = {
+  [MANIP_PHASE_REASONS.resfriamento]: 'resfriando',
+  [MANIP_PHASE_REASONS.aguardandoAmostragem]: 'aguardando_amostragem',
+  [MANIP_PHASE_REASONS.aguardandoCq]: 'aguardando_cq',
+  [MANIP_PHASE_REASONS.emAjuste]: 'em_ajuste',
+  [MANIP_PHASE_REASONS.emCorrecao]: 'em_correcao',
+  // Reprocesso: a OSM volta a ser manipulada; se o "retomar" não chegou a
+  // gravar, ela aparece como pausada (botão Retomar manipulação).
+  [MANIP_PHASE_REASONS.reprocesso]: 'pausada',
+  [MANIP_PHASE_REASONS.aguardandoDrenagem]: 'aguardando_drenagem',
+};
+
+export const isManipPhaseReason = (reason?: string | null) => !!reason && reason in MANIP_PHASE_BY_REASON;
+
+/** Eventos da OP depois do último cancelamento de início, em ordem cronológica. */
+export function getManipOpEvents(opId: string, events: ProductionEvent[]): ProductionEvent[] {
+  const own = events.filter(e => e.opId === opId);
+  const lastCancelMs = own
+    .filter(e => e.type === 'CANCELLED')
+    .reduce((max, e) => Math.max(max, new Date(e.createdAt).getTime()), -Infinity);
+  return own
+    .filter(e => new Date(e.createdAt).getTime() > lastCancelMs)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+export interface ManipPhaseInfo {
+  phase: ManipPhase;
+  /** Momento em que a fase atual começou (ISO) */
+  since: string | null;
+  /** Nº de amostras já coletadas */
+  samples: number;
+  /** Kg apontado ao finalizar a manipulação */
+  manipKg: number | null;
+}
+
+/** Fase atual da OP de Manipulação, derivada do status + eventos. */
+export function getManipPhase(op: ProductionOrder, events: ProductionEvent[]): ManipPhaseInfo {
+  const evs = getManipOpEvents(op.id, events);
+  const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
+  // Manipulação encerrada = já existe evento de fase (Análise/CQ/ajuste)
+  // DEPOIS do último reprocesso (o reprocesso devolve a OSM à manipulação).
+  const lastReproIdx = evs.map(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.reprocesso).lastIndexOf(true);
+  const evsSinceRepro = lastReproIdx >= 0 ? evs.slice(lastReproIdx + 1) : evs;
+  const manipFinished = evsSinceRepro.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason));
+  const firstManipEnd = evs.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason) && e.reason !== MANIP_PHASE_REASONS.reprocesso);
+  const manipKg = firstManipEnd && firstManipEnd.quantity != null ? Number(firstManipEnd.quantity) : (Number(op.producedQuantity) || null);
+  const last = evs.length > 0 ? evs[evs.length - 1] : null;
+  const since = last?.createdAt || null;
+
+  if (op.status === 'completed') return { phase: 'encerrado', since: op.completedAt || since, samples, manipKg };
+  if (op.status === 'pending') return { phase: 'aguardando_inicio', since: null, samples, manipKg };
+  if (op.status === 'in_progress') {
+    return { phase: manipFinished ? 'drenando' : 'manipulando', since, samples, manipKg };
+  }
+  // paused: o último PAUSED diz em que fase está
+  const lastPause = [...evs].reverse().find(e => e.type === 'PAUSED');
+  const byReason = lastPause?.reason ? MANIP_PHASE_BY_REASON[lastPause.reason] : undefined;
+  if (byReason) return { phase: byReason, since: lastPause!.createdAt, samples, manipKg };
+  return { phase: manipFinished ? 'drenagem_pausada' : 'pausada', since: lastPause?.createdAt || since, samples, manipKg };
+}
+
+/**
+ * Registra a mudança de fase de uma OP que JÁ está pausada (coletar amostra,
+ * aprovado, reprovado) — só grava o evento, não mexe no status da OP.
+ */
+export const recordManipulacaoPhase = async (
+  opId: string,
+  lineId: string,
+  leaderId: string,
+  reason: string,
+  observation: string
+): Promise<{ ok: boolean; error?: string }> => {
+  const createdAt = new Date().toISOString();
+  if (trainingModeActive) {
+    const currentOp = trainingOps.find(op => op.id === opId);
+    const currentLine = trainingLines.find(l => l.id === lineId);
+    trainingEvents = [{
+      id: `sim-ev-${Date.now()}`,
+      opId,
+      opNumber: currentOp?.number || opId,
+      lineId,
+      lineName: currentLine?.name || lineId,
+      leaderId,
+      type: 'PAUSED',
+      reason,
+      observation,
+      createdAt,
+    }, ...trainingEvents];
+    return { ok: true };
+  }
+  const currentOp = inMemoryOps.find(op => op.id === opId);
+  const currentLine = inMemoryLines.find(l => l.id === lineId);
+  const newEvent: ProductionEvent = {
+    id: `ev-${Date.now()}`,
+    opId,
+    opNumber: currentOp?.number || opId,
+    lineId,
+    lineName: currentLine?.name || lineId,
+    leaderId,
+    type: 'PAUSED',
+    reason,
+    observation,
+    createdAt,
+  };
+  inMemoryEvents = [newEvent, ...inMemoryEvents];
+  persistEvents();
+  try {
+    await recordEventRemote({ opId, lineId, leaderId, type: 'PAUSED', reason, observation, createdAt });
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+export interface ManipConferencia {
+  id: string;
+  opId: string;
+  osmNumber: string;
+  lote: string;
+  reactorId: string;
+  items: Record<string, boolean>;
+  operador: string;
+  observacao: string;
+  conferidoPor: string | null;
+  conferidoNome: string;
+  conferidoEm: string;
+}
+
+export const MANIP_CONFERENCIA_ITEMS: { key: string; label: string }[] = [
+  { key: 'identificacao', label: 'OP / produto / lote conferem com a etiqueta' },
+  { key: 'reator', label: 'Reator de destino correto' },
+  { key: 'materias_primas', label: 'Todas as matérias-primas presentes' },
+  { key: 'quantidades', label: 'Quantidades (Kg) conferem com a OSM' },
+  { key: 'operador', label: 'Operador responsável identificado' },
+];
+
+const mapConferenciaRow = (r: any): ManipConferencia => ({
+  id: String(r.id),
+  opId: String(r.op_id),
+  osmNumber: String(r.osm_number || ''),
+  lote: String(r.lote || ''),
+  reactorId: String(r.reactor_id || ''),
+  items: (r.items && typeof r.items === 'object') ? r.items : {},
+  operador: String(r.operador || ''),
+  observacao: String(r.observacao || ''),
+  conferidoPor: r.conferido_por || null,
+  conferidoNome: String(r.conferido_nome || ''),
+  conferidoEm: r.conferido_em,
+});
+
+let trainingConferencias: ManipConferencia[] = [];
+
+export const getManipConferencias = async (): Promise<{ list: ManipConferencia[]; error: string | null }> => {
+  if (trainingModeActive) return { list: [...trainingConferencias], error: null };
+  try {
+    const { data, error } = await supabase
+      .from('manipulacao_conferencias')
+      .select('*')
+      .order('conferido_em', { ascending: false })
+      .limit(2000);
+    if (error) {
+      console.warn('[getManipConferencias] Não foi possível ler (rodou sql/add_conferencia_manipulacao.sql?):', error.message);
+      return { list: [], error: error.message };
+    }
+    return { list: (data || []).map(mapConferenciaRow), error: null };
+  } catch (err: any) {
+    return { list: [], error: String(err?.message || err) };
+  }
+};
+
+export const addManipConferencia = async (
+  conf: Omit<ManipConferencia, 'id' | 'conferidoEm'>
+): Promise<{ ok: boolean; error?: string }> => {
+  // Conferência por botão único: quem clicou é o responsável.
+  const operador = String(conf.operador || conf.conferidoNome || '').trim();
+  if (trainingModeActive) {
+    trainingConferencias = [
+      { ...conf, operador, id: `sim-conf-${Date.now()}`, conferidoEm: new Date().toISOString() },
+      ...trainingConferencias.filter(c => c.opId !== conf.opId),
+    ];
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase
+      .from('manipulacao_conferencias')
+      .insert({
+        op_id: conf.opId,
+        osm_number: conf.osmNumber || '',
+        lote: conf.lote || '',
+        reactor_id: conf.reactorId || '',
+        items: conf.items,
+        operador,
+        observacao: String(conf.observacao || '').trim(),
+        conferido_por: conf.conferidoPor && isUUID(conf.conferidoPor) ? conf.conferidoPor : null,
+        conferido_nome: conf.conferidoNome || '',
+      })
+      .select('id');
+    if (error) {
+      notifyDbWriteFailure('Registrar conferência da pesagem', error.message);
+      if (/duplicate|unique/i.test(error.message)) return { ok: false, error: 'Esta OSM já foi conferida.' };
+      return { ok: false, error: /manipulacao_conferencias|does not exist|relation/i.test(error.message) ? 'A tabela de conferência ainda não existe — rode sql/add_conferencia_manipulacao.sql no Supabase.' : error.message };
+    }
+    if (!data || data.length === 0) return { ok: false, error: 'o banco não gravou (sem permissão)' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+export const deleteManipConferencia = async (id: string): Promise<{ ok: boolean; error?: string }> => {
+  if (trainingModeActive) {
+    trainingConferencias = trainingConferencias.filter(c => c.id !== id);
+    return { ok: true };
+  }
+  try {
+    const { data, error } = await supabase.from('manipulacao_conferencias').delete().eq('id', id).select('id');
+    if (error) return { ok: false, error: error.message };
+    if (!data || data.length === 0) return { ok: false, error: 'só quem conferiu ou a coordenação pode desfazer' };
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+};
+
+// ---------------- CORRIGIR CONCLUSÃO PARCIAL FEITA POR ENGANO ----------------
+// A OP foi concluída como PARCIAL quando na verdade era TOTAL: ela voltou pro
+// estoque com o "saldo" como planejado. A correção fecha a OP como concluída
+// na data, linha e turno da última parcial, sem mexer no banco à mão.
+// A produção continua vindo das parciais (produzido da OP fica 0 e o
+// planejado fica o saldo) — assim o rendimento é calculado igual a uma
+// conclusão total: produzido = parciais; esperado = planejado original.
+
+/** Última conclusão parcial da OP (ou null se não houver). */
+export function getLastPartialFinishEvent(opId: string, events: ProductionEvent[]): ProductionEvent | null {
+  let last: ProductionEvent | null = null;
+  for (const ev of events || []) {
+    if (String(ev.opId) !== String(opId) || !isPartialFinishEvent(ev)) continue;
+    if (!last || new Date(ev.createdAt).getTime() > new Date(last.createdAt).getTime()) last = ev;
+  }
+  return last;
+}
+
+export const convertPartialToTotal = async (
+  op: ProductionOrder,
+  events: ProductionEvent[]
+): Promise<{ ok: boolean; error?: string }> => {
+  const lastPartial = getLastPartialFinishEvent(op.id, events);
+  if (!lastPartial) return { ok: false, error: 'Esta OP não tem conclusão parcial registrada.' };
+  if (op.status !== 'pending') return { ok: false, error: 'A OP já voltou para uma linha — só dá para corrigir enquanto ela está no estoque.' };
+
+  const completedAt = lastPartial.createdAt;
+  const finishedShift: 'Manhã' | 'Tarde' = new Date(completedAt).getHours() < 12 ? 'Manhã' : 'Tarde';
+  const lineId = lastPartial.lineId || null;
+  const patch = {
+    status: 'completed' as const,
+    lineId,
+    completedAt,
+    finishedShift,
+    producedQuantity: 0,
+    rejectedQuantity: 0,
+    isSleeve: false,
+  };
+
+  if (trainingModeActive) {
+    trainingOps = trainingOps.map(o => (o.id === op.id ? { ...o, ...patch } : o));
+    return { ok: true };
+  }
+
+  const localSnapshot = snapshotLocalState();
+  inMemoryOps = inMemoryOps.map(o => (o.id === op.id ? { ...o, ...patch } : o));
+  persistOps();
+
+  const opWrite = await updateOpVerified(op.id, {
+    status: 'completed',
+    line_id: lineId,
+    completed_at: completedAt,
+    finished_shift: finishedShift,
+    produced_quantity: 0,
+    rejected_quantity: 0,
+  }, ['pending']);
+
+  if (!opWrite.ok) {
+    restoreLocalState(localSnapshot);
+    await reportOpWriteProblem('Corrigir parcial para total', opWrite, op.id, op.number);
+    return { ok: false, error: opWrite.error || 'O banco não gravou (a OP mudou de status ou falta permissão).' };
+  }
+  markOpAsSleeve(op.id, false);
+  return { ok: true };
+};
+
+// ---------------- EXCLUSÃO DE APONTAMENTO (coordenação / ADM) ----------------
+/**
+ * Apaga um apontamento de quantidade lançado errado. Além de apagar o evento
+ * (nas duas tabelas de eventos), desconta a quantidade:
+ *  - do total da OP (produced_quantity);
+ *  - das pausas/conclusão registradas DEPOIS dele (elas guardam o total
+ *    acumulado da OP — sem isso o dashboard "devolveria" a quantidade).
+ * Guarda uma cópia em apontamentos_excluidos (quem lançou, quem apagou,
+ * quando e por quê). Requer sql/excluir_apontamentos.sql.
+ */
+export const deleteQuantityReport = async (
+  ev: ProductionEvent,
+  op: ProductionOrder | undefined,
+  actor: { uid: string; name: string },
+  motivo: string,
+  reportedByName?: string
+): Promise<{ ok: true } | { ok: false; error: string }> => {
+  if (!ev || ev.type !== 'QUANTITY_REPORTED' || !ev.opId) return { ok: false, error: 'Só apontamentos de quantidade podem ser apagados.' };
+  const qty = Number(ev.quantity) || 0;
+  try {
+    // 1) Cópia de auditoria
+    const audit = await supabase.from('apontamentos_excluidos').insert({
+      event_id: String(ev.id),
+      op_id: String(ev.opId),
+      op_number: op?.number || ev.opNumber || '',
+      product: op?.product || '',
+      line_id: ev.lineId || op?.lineId || null,
+      quantity: qty,
+      reported_at: ev.createdAt,
+      reported_by: ev.leaderId || null,
+      reported_by_name: reportedByName || '',
+      deleted_by: actor.uid,
+      deleted_by_name: actor.name,
+      motivo,
+    });
+    if (audit.error) {
+      return { ok: false, error: /apontamentos_excluidos|does not exist|relation/i.test(audit.error.message)
+        ? 'Rode o sql/excluir_apontamentos.sql no Supabase antes de apagar apontamentos.'
+        : audit.error.message };
+    }
+
+    // 2) Apaga o evento nas duas tabelas (a cópia de production_events tem
+    // outro id, mas o mesmo op/tipo/instante)
+    const delA = await supabase.from('events').delete()
+      .eq('op_id', ev.opId).eq('type', 'QUANTITY_REPORTED').eq('created_at', ev.createdAt).select('id');
+    const delB = await supabase.from('production_events').delete()
+      .eq('op_id', ev.opId).eq('type', 'QUANTITY_REPORTED').eq('created_at', ev.createdAt).select('id');
+    const deleted = (delA.data?.length || 0) + (delB.data?.length || 0);
+    if (deleted === 0) {
+      return { ok: false, error: 'O banco não apagou o apontamento (sem permissão). Rode o sql/excluir_apontamentos.sql no Supabase.' };
+    }
+
+    if (qty > 0) {
+      // 3) Pausas/conclusão depois dele (até a próxima conclusão) guardam o acumulado
+      const fixLater = async (table: 'events' | 'production_events', qCol: 'quantity_reported' | 'quantity') => {
+        const { data } = await supabase.from(table)
+          .select(`id, type, created_at, ${qCol}`)
+          .eq('op_id', ev.opId).gt('created_at', ev.createdAt).in('type', ['PAUSED', 'FINISHED'])
+          .order('created_at', { ascending: true });
+        for (const row of (data || []) as any[]) {
+          const q = row[qCol];
+          if (q !== null && q !== undefined && !isNaN(Number(q))) {
+            await supabase.from(table).update({ [qCol]: Math.max(0, Number(q) - qty) }).eq('id', row.id);
+          }
+          if (row.type === 'FINISHED') break;
+        }
+      };
+      await fixLater('events', 'quantity_reported');
+      await fixLater('production_events', 'quantity');
+
+      // 4) Total da OP
+      if (op) {
+        await updateOP(String(op.id), { producedQuantity: Math.max(0, (Number(op.producedQuantity) || 0) - qty) });
+      }
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Erro ao apagar o apontamento.' };
+  }
+};
