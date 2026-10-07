@@ -23,6 +23,7 @@ export type LedgerSector = 'Envase' | 'Sleev' | 'Manipulação' | 'Pesagem';
 export interface LedgerEntry {
   key: string;
   day: string; // 'AAAA-MM-DD' (local)
+  hour?: number; // 0–23 (local) — só quando montado com { byHour: true }
   at: string; // ISO do último registro que compõe este lançamento
   sector: LedgerSector;
   lineId: string | null;
@@ -49,7 +50,8 @@ const lineSector = (lineId?: string | null): LedgerSector | null => {
   return isSleeveLineId(lineId) ? 'Sleev' : 'Envase';
 };
 
-export function buildProductionLedger(ops: ProductionOrder[], events: ProductionEvent[]): LedgerEntry[] {
+export function buildProductionLedger(ops: ProductionOrder[], events: ProductionEvent[], opts: { byHour?: boolean } = {}): LedgerEntry[] {
+  const byHour = !!opts.byHour;
   const out: LedgerEntry[] = [];
   const realOps = (ops || []).filter(o => o && !o.isPartialRecord);
   const opById = new Map(realOps.map(o => [String(o.id), o]));
@@ -80,14 +82,15 @@ export function buildProductionLedger(ops: ProductionOrder[], events: Production
     const day = toLocalDateStr(iso);
     if (!day) return;
     const lid = lineId || op.lineId || null;
-    const key = `${op.id}|${lid}|${day}`;
+    const hr = byHour ? new Date(iso).getHours() : undefined;
+    const key = `${op.id}|${lid}|${day}${byHour ? `|${hr}` : ''}`;
     const cur = acc.get(key);
     if (cur) {
       cur.qty += qty;
       if (iso > cur.at) cur.at = iso;
     } else {
       acc.set(key, {
-        key, day, at: iso, sector, lineId: lid, opId: String(op.id), number: op.number, product: op.product,
+        key, day, hour: hr, at: iso, sector, lineId: lid, opId: String(op.id), number: op.number, product: op.product,
         lote: op.lote, qty, unit: 'Un', opStatus: op.status, leaderId: leaderId || op.leaderId || null,
       });
     }
@@ -162,4 +165,15 @@ export function sumLedgerByDay(entries: LedgerEntry[], sector: LedgerSector): Ma
     m.set(e.day, (m.get(e.day) || 0) + e.qty);
   }
   return m;
+}
+
+/** Soma por hora (0–23) de um dia, de um setor. Monte o livro com { byHour: true }. */
+export function sumLedgerByHour(entries: LedgerEntry[], sector: LedgerSector, day: string): number[] {
+  const h = Array.from({ length: 24 }, () => 0);
+  for (const e of entries) {
+    if (e.sector !== sector || e.day !== day) continue;
+    const hr = typeof e.hour === 'number' ? e.hour : new Date(e.at).getHours();
+    if (hr >= 0 && hr < 24) h[hr] += e.qty;
+  }
+  return h;
 }

@@ -11,8 +11,8 @@ import {
   Boxes,
 } from 'lucide-react';
 import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
-import { buildProductionLedger, sumLedgerByDay } from '../services/productionLedger';
-import { groupProductionByDayAndSetor, groupProductionByMonth, groupProductionByHour, calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
+import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../services/productionLedger';
+import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import {
   ResponsiveContainer,
@@ -390,9 +390,15 @@ export function HomeDashboard({
     return productionOps.filter((o) => getOpReferenceDateStr(o).startsWith(monthKey));
   }, [productionOps, currentMonth, currentYear]);
 
+  // Produção REAL do Envase (Envase 1 + 2) no mês atual — mesma fonte do
+  // velocímetro e dos gráficos (livro de produção / apontamentos).
+  const envaseByDayAll = useMemo(() => sumLedgerByDay(buildProductionLedger(ops, events), 'Envase'), [ops, events]);
   const monthProducedQuantity = useMemo(() => {
-    return opsThisMonth.reduce((acc, o) => acc + (o.producedQuantity || 0), 0);
-  }, [opsThisMonth]);
+    const monthKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`;
+    let t = 0;
+    for (const [day, q] of envaseByDayAll.entries()) if (day.startsWith(monthKey)) t += q;
+    return t;
+  }, [envaseByDayAll, currentYear, currentMonth]);
 
   // Porcentagem da Meta Mensal
   const monthlyGoalPercentage = useMemo(() => {
@@ -926,7 +932,7 @@ export function HomeDashboard({
   // apontamento (histórico importado) conta no dia em que foi fechada.
   // Mesma fonte do Dashboard Detalhado (services/productionLedger) — os
   // números das duas telas sempre batem.
-  const envaseProducedByDay = useMemo(() => sumLedgerByDay(buildProductionLedger(ops, events), 'Envase'), [ops, events]);
+  const envaseProducedByDay = envaseByDayAll;
   const envaseProducedInPeriod = useMemo(() => {
     let t = 0;
     for (const [day, q] of envaseProducedByDay.entries()) {
@@ -1036,7 +1042,15 @@ export function HomeDashboard({
 
   // 4. Gráfico Mensal (12 Meses) com Média/Realizado e Meta
   const monthlyChartData = useMemo(() => {
-    const grouped = groupProductionByMonth(productionOps, currentYear);
+    // Realizado = produção REAL do Envase (apontamentos), mesma fonte do
+    // velocímetro. Antes somava a OP inteira no dia do fechamento e misturava
+    // Kg da Manipulação/Pesagem, por isso não batia.
+    const MONTHS = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+    const grouped = MONTHS.map((label, month) => ({ month, label, quantity: 0 }));
+    for (const [day, q] of envaseByDayAll.entries()) {
+      const [y, m] = day.split('-').map(Number);
+      if (y === currentYear && m >= 1 && m <= 12) grouped[m - 1].quantity += q;
+    }
 
     return grouped.map((item, idx) => {
       // Média Anterior REAL: média do realizado dos meses anteriores do ano
@@ -1070,23 +1084,27 @@ export function HomeDashboard({
         isCurrent: item.month === currentMonth,
       };
     });
-  }, [productionOps, goals, factoryMonthlyGoals, currentYear, currentMonth]);
+  }, [envaseByDayAll, goals, factoryMonthlyGoals, currentYear, currentMonth]);
 
   // 4b. Gráfico "por hora" (0h–23h) — usado quando o filtro de período é
   // "Dia", no lugar do gráfico de 12 meses (que não faz sentido pro recorte
   // de um único dia).
   const hourlyChartData = useMemo(() => {
-    return groupProductionByHour(productionOps, todayDateStr);
-  }, [productionOps, todayDateStr]);
+    const h = sumLedgerByHour(buildProductionLedger(ops, events, { byHour: true }), 'Envase', todayDateStr);
+    return h.map((quantity, hour) => ({ hour, label: `${String(hour).padStart(2, '0')}h`, quantity }));
+  }, [ops, events, todayDateStr]);
 
   // 4c. Gráfico "por dia" do mês selecionado — usado quando o filtro de
   // período é "Mês", no lugar do gráfico de 12 meses (que também não faz
   // sentido pro recorte de um único mês: cada barra já seria só um ponto).
   const dailyChartData = useMemo(() => {
-    const byDaySetor = groupProductionByDayAndSetor(productionOps, selectedMonth + 1, currentYear);
+    // Mesma fonte do velocímetro: produção REAL do Envase em cada dia.
+    const monthKey = `${currentYear}-${String(selectedMonth + 1).padStart(2, '0')}`;
     const totalsByDay = new Map<number, number>();
-    for (const row of byDaySetor) {
-      totalsByDay.set(row.day, (totalsByDay.get(row.day) || 0) + row.quantity);
+    for (const [dayStr, q] of envaseByDayAll.entries()) {
+      if (!dayStr.startsWith(monthKey)) continue;
+      const d = Number(dayStr.slice(8, 10));
+      totalsByDay.set(d, (totalsByDay.get(d) || 0) + q);
     }
     const daysInSelectedMonth = new Date(currentYear, selectedMonth + 1, 0).getDate();
     return Array.from({ length: daysInSelectedMonth }, (_, i) => {
@@ -1097,7 +1115,7 @@ export function HomeDashboard({
         quantity: totalsByDay.get(day) || 0,
       };
     });
-  }, [productionOps, selectedMonth, currentYear]);
+  }, [envaseByDayAll, selectedMonth, currentYear]);
 
   // Renderiza o card de "produção em tempo real" de uma linha/reator — usado
   // tanto pra Envase/Sleeve quanto pra cada reator da Manipulação (mesmo
