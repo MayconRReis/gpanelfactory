@@ -152,6 +152,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // Histórico da OP (linha do tempo)
   const [historyOp, setHistoryOp] = useState<ProductionOrder | null>(null);
 
+  // Filtros da lista de OPs finalizadas
+  const [donePeriod, setDonePeriod] = useState<'hoje' | '7d' | 'mes' | 'todos'>('7d');
+  const [doneReactor, setDoneReactor] = useState<string>('all');
+  const [doneIndustria, setDoneIndustria] = useState<string>('all');
+  const [doneSearch, setDoneSearch] = useState('');
+  const [doneHideZero, setDoneHideZero] = useState(true);
+  const [doneLimit, setDoneLimit] = useState(30);
+
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 3500);
@@ -480,6 +488,43 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       .filter(op => op.status === 'completed')
       .sort((a, b) => new Date(b.completedAt || b.createdAt || 0).getTime() - new Date(a.completedAt || a.createdAt || 0).getTime());
   }, [manipulacaoOps]);
+
+  const doneLocalDay = (iso?: string) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const doneIndustrias = useMemo(
+    () => Array.from(new Set(completedManipulacaoOps.map(o => o.industria).filter(Boolean))) as string[],
+    [completedManipulacaoOps]
+  );
+  const doneFiltered = useMemo(() => {
+    const today = todayLocalStr();
+    const from = (() => {
+      if (donePeriod === 'todos') return '';
+      const d = new Date();
+      if (donePeriod === '7d') d.setDate(d.getDate() - 6);
+      if (donePeriod === 'mes') d.setDate(1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })();
+    const q = doneSearch.trim().toLowerCase();
+    return completedManipulacaoOps.filter(op => {
+      const day = doneLocalDay(op.completedAt || op.createdAt);
+      if (donePeriod === 'hoje' && day !== today) return false;
+      if (from && donePeriod !== 'hoje' && day < from) return false;
+      if (doneReactor !== 'all' && op.lineId !== doneReactor) return false;
+      if (doneIndustria !== 'all' && op.industria !== doneIndustria) return false;
+      if (doneHideZero && !(Number(op.producedQuantity) > 0)) return false;
+      if (q && !(`${op.number} ${op.product} ${op.lote || ''}`.toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [completedManipulacaoOps, donePeriod, doneReactor, doneIndustria, doneHideZero, doneSearch]);
+  const doneHiddenZero = useMemo(
+    () => (doneHideZero ? completedManipulacaoOps.filter(o => !(Number(o.producedQuantity) > 0)).length : 0),
+    [completedManipulacaoOps, doneHideZero]
+  );
+  const doneTotalKg = doneFiltered.reduce((a, o) => a + (Number(o.producedQuantity) || 0), 0);
+  useEffect(() => { setDoneLimit(30); }, [donePeriod, doneReactor, doneIndustria, doneSearch, doneHideZero]);
 
   // Data de hoje e total de Kg produzidos hoje na Manipulação
   // Dia LOCAL, acompanhando o relógio da tela (antes era UTC e fixado ao abrir:
@@ -1058,6 +1103,51 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   };
 
   // Linha do tempo da OP (modal Histórico)
+  // Tempos de cada etapa da OSM, a partir dos eventos:
+  // manipulação (rodando antes da Análise), análise/CQ/ajuste (parada nas
+  // etapas do CQ), drenagem (rodando depois da Análise) e pausas comuns.
+  const computeStages = (op: ProductionOrder) => {
+    const evs = getManipOpEvents(op.id, events);
+    let runStart: number | null = null;
+    let phaseStart: number | null = null;
+    let pauseStart: number | null = null;
+    let afterAnalysis = false;
+    let manipMs = 0, cqMs = 0, drainMs = 0, pauseMs = 0;
+    let first: number | null = null, last: number | null = null;
+    for (const e of evs) {
+      const t = new Date(e.createdAt).getTime();
+      if (isNaN(t)) continue;
+      if (e.type === 'STARTED' || e.type === 'RESUMED') {
+        if (first === null && e.type === 'STARTED') first = t;
+        if (phaseStart !== null) { cqMs += t - phaseStart; phaseStart = null; }
+        if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
+        runStart = t;
+      } else if (e.type === 'PAUSED') {
+        if (runStart !== null) { (afterAnalysis ? (drainMs += t - runStart) : (manipMs += t - runStart)); runStart = null; }
+        if (isManipPhaseReason(e.reason)) {
+          if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
+          afterAnalysis = true;
+          if (phaseStart === null) phaseStart = t;
+        } else if (pauseStart === null && phaseStart === null) {
+          pauseStart = t;
+        }
+      } else if (e.type === 'FINISHED') {
+        if (runStart !== null) { (afterAnalysis ? (drainMs += t - runStart) : (manipMs += t - runStart)); runStart = null; }
+        if (phaseStart !== null) { cqMs += t - phaseStart; phaseStart = null; }
+        if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
+        last = t;
+      }
+    }
+    const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
+    const rejected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emAjuste).length;
+    return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, cqMs, drainMs, pauseMs, samples, rejected };
+  };
+  const fmtMs = (ms: number) => {
+    if (!(ms > 0)) return '—';
+    const m = Math.round(ms / 60000);
+    return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}` : `${m} min`;
+  };
+
   const buildHistory = (op: ProductionOrder) => {
     const evs = getManipOpEvents(op.id, events);
     const rows: { at: string; text: string; tone: string }[] = [];
@@ -1443,72 +1533,111 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
               )}
             </section>
 
-            {/* HISTÓRICO DE OPS FINALIZADAS NA MANIPULAÇÃO */}
+            {/* HISTÓRICO DE OPS FINALIZADAS NA MANIPULAÇÃO — com filtros */}
             {completedManipulacaoOps.length > 0 && (
-              <section className="space-y-4 pt-4 border-t border-[#27272a]">
-                <div className="flex items-center justify-between">
+              <section className="space-y-3 pt-4 border-t border-[#27272a]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <History className="w-5 h-5 text-emerald-400" />
                     <h3 className="text-base font-bold text-white">OPs Finalizadas na Manipulação</h3>
                   </div>
                   <span className="text-xs text-[#a1a1aa] font-mono">
-                    {completedManipulacaoOps.length} concluídas
+                    {doneFiltered.length} de {completedManipulacaoOps.length} · {doneTotalKg.toLocaleString('pt-BR')} kg
                   </span>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {completedManipulacaoOps.map((op) => {
-                    const finishedKg = Number(op.producedQuantity) || 0;
-                    const shift = op.finishedShift || op.scheduledShift || 'Manhã';
-                    const reactorName = reactorLines.find(r => r.id === op.lineId)?.name;
-
-                    return (
-                      <div
-                        key={op.id}
-                        className="bg-[#141418] border border-[#27272a] rounded-xl p-4 flex items-center justify-between gap-3"
-                      >
-                        <div>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-mono font-bold text-sm text-white">{op.number}</span>
-                            <span
-                              className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${
-                                shift === 'Manhã'
-                                  ? 'bg-blue-950/60 text-blue-300 border-blue-800/40'
-                                  : 'bg-amber-950/60 text-amber-300 border-amber-800/40'
-                              }`}
-                            >
-                              {shift}
-                            </span>
-                            {op.industria && (
-                              <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>
-                                {op.industria}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-[#a1a1aa] truncate max-w-[180px] mt-0.5">
-                            {op.product}
-                          </div>
-                          {reactorName && (
-                            <div className="text-[10px] text-cyan-500/80 mt-0.5">{reactorName}</div>
-                          )}
-                        </div>
-
-                        <div className="text-right flex flex-col items-end gap-1">
-                          <button type="button" onClick={() => setHistoryOp(op)} className="text-[10px] text-[#a1a1aa] hover:text-white flex items-center gap-1">
-                            <History className="w-3 h-3" /> Histórico
-                          </button>
-                          <div className="font-mono font-black text-sm text-emerald-400">
-                            {finishedKg.toLocaleString('pt-BR')} Kg
-                          </div>
-                          <div className="text-[10px] text-emerald-500 flex items-center gap-1 justify-end font-semibold">
-                            <CheckCircle2 className="w-3 h-3" />
-                            <span>Concluído</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+                {/* Filtros */}
+                <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {([['hoje', 'Hoje'], ['7d', '7 dias'], ['mes', 'Mês'], ['todos', 'Todas']] as const).map(([k, l]) => (
+                      <button key={k} type="button" onClick={() => setDonePeriod(k)}
+                        className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all ${donePeriod === k ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'}`}>
+                        {l}
+                      </button>
+                    ))}
+                    <span className="w-px h-6 bg-[#27272a] mx-1" />
+                    <button type="button" onClick={() => setDoneReactor('all')}
+                      className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all ${doneReactor === 'all' ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'}`}>
+                      Todos os reatores
+                    </button>
+                    {reactorLines.map(r => (
+                      <button key={r.id} type="button" onClick={() => setDoneReactor(r.id)}
+                        className={`h-8 px-3 rounded-lg text-[11px] font-bold border transition-all ${doneReactor === r.id ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'}`}>
+                        {r.name}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2">
+                    <Input value={doneSearch} onChange={e => setDoneSearch(e.target.value)} placeholder="Buscar OP, produto ou lote"
+                      className="h-9 bg-[#0b0b0e] border-[#25252c] rounded-lg text-xs" />
+                    <select value={doneIndustria} onChange={e => setDoneIndustria(e.target.value)}
+                      className="h-9 bg-[#0b0b0e] border border-[#25252c] rounded-lg px-2 text-xs text-white">
+                      <option value="all">Todas as indústrias</option>
+                      {doneIndustrias.map(i => <option key={i} value={i}>{i}</option>)}
+                    </select>
+                    <label className="h-9 flex items-center gap-2 px-3 rounded-lg bg-[#0b0b0e] border border-[#25252c] text-[11px] text-[#d4d4d8] cursor-pointer">
+                      <input type="checkbox" checked={doneHideZero} onChange={e => setDoneHideZero(e.target.checked)} className="accent-cyan-500" />
+                      Ocultar sem Kg{doneHiddenZero > 0 ? ` (${doneHiddenZero})` : ''}
+                    </label>
+                  </div>
                 </div>
+
+                {doneFiltered.length === 0 ? (
+                  <p className="text-xs text-[#71717a] text-center py-6">Nenhuma OP finalizada com esses filtros.</p>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {doneFiltered.slice(0, doneLimit).map((op) => {
+                        const finishedKg = Number(op.producedQuantity) || 0;
+                        const shift = op.finishedShift || op.scheduledShift || 'Manhã';
+                        const reactorName = reactorLines.find(r => r.id === op.lineId)?.name;
+                        const doneAt = op.completedAt ? new Date(op.completedAt) : null;
+                        return (
+                          <button
+                            type="button"
+                            key={op.id}
+                            onClick={() => setHistoryOp(op)}
+                            title="Ver detalhes da manipulação"
+                            className="text-left bg-[#141418] border border-[#27272a] hover:border-cyan-700/60 hover:bg-[#17171d] rounded-xl p-4 flex items-center justify-between gap-3 transition-all"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-mono font-bold text-sm text-white">{op.number}</span>
+                                <span className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${shift === 'Manhã' ? 'bg-blue-950/60 text-blue-300 border-blue-800/40' : 'bg-amber-950/60 text-amber-300 border-amber-800/40'}`}>
+                                  {shift}
+                                </span>
+                                {op.industria && (
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${getIndustriaBadgeClass(op.industria)}`}>{op.industria}</span>
+                                )}
+                              </div>
+                              <div className="text-xs text-[#a1a1aa] truncate max-w-[200px] mt-0.5">{op.product}</div>
+                              <div className="text-[10px] text-[#71717a] mt-0.5">
+                                {reactorName && <span className="text-cyan-500/80">{reactorName} · </span>}
+                                {doneAt ? `${doneAt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${doneAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : '—'}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <div className={`font-mono font-black text-sm ${finishedKg > 0 ? 'text-emerald-400' : 'text-[#52525b]'}`}>
+                                {finishedKg.toLocaleString('pt-BR')} Kg
+                              </div>
+                              <div className="text-[10px] text-[#a1a1aa] flex items-center gap-1 justify-end mt-1">
+                                <History className="w-3 h-3" /> Detalhes
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {doneFiltered.length > doneLimit && (
+                      <div className="text-center">
+                        <button type="button" onClick={() => setDoneLimit(l => l + 30)}
+                          className="h-9 px-4 rounded-lg bg-[#16161e] border border-[#26262f] text-xs font-bold text-[#d4d4d8] hover:text-white">
+                          Mostrar mais ({doneFiltered.length - doneLimit} restantes)
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
               </section>
             )}
           </>
@@ -1741,16 +1870,57 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
       {/* MODAL: HISTÓRICO DA OP */}
       <Dialog open={!!historyOp} onOpenChange={(open) => !open && setHistoryOp(null)}>
-        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-lg w-full rounded-2xl shadow-2xl p-6">
           <DialogHeader>
             <DialogTitle className="text-lg font-bold text-white flex items-center gap-2">
               <History className="w-5 h-5 text-cyan-400" />
-              Histórico · OP {historyOp?.number}
+              Manipulação · OP {historyOp?.number}
             </DialogTitle>
             <p className="text-xs text-[#a1a1aa]">
               {historyOp?.product} · {reactorLines.find(r => r.id === historyOp?.lineId)?.name || '—'}
             </p>
           </DialogHeader>
+          {historyOp && (() => {
+            const st = computeStages(historyOp);
+            const conf = conferenciaFor(historyOp);
+            const kg = Number(historyOp.producedQuantity) || 0;
+            const planned = Number(historyOp.plannedQuantity) || 0;
+            const hm = (ms: number | null) => (ms ? `${new Date(ms).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : '—');
+            const cell = (label: string, value: React.ReactNode, tone = 'text-white') => (
+              <div className="bg-[#121215] border border-[#27272a] rounded-lg px-2.5 py-2">
+                <div className="text-[9px] uppercase font-bold text-[#71717a]">{label}</div>
+                <div className={`text-xs font-bold font-mono ${tone}`}>{value}</div>
+              </div>
+            );
+            return (
+              <div className="space-y-2">
+                <div className="grid grid-cols-3 gap-1.5">
+                  {cell('Kg final', `${kg.toLocaleString('pt-BR')} kg`, kg > 0 ? 'text-emerald-400' : 'text-[#71717a]')}
+                  {cell('Planejado', planned > 0 ? `${planned.toLocaleString('pt-BR')} kg` : '—')}
+                  {cell('Lote', historyOp.lote || '—')}
+                  {cell('Início', hm(st.first))}
+                  {cell('Fim', hm(st.last))}
+                  {cell('Duração total', st.first && st.last ? fmtMs(st.last - st.first) : '—')}
+                </div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {cell('Manipulação', fmtMs(st.manipMs), 'text-cyan-300')}
+                  {cell('Análise / CQ', fmtMs(st.cqMs), 'text-sky-300')}
+                  {cell('Drenagem', fmtMs(st.drainMs), 'text-teal-300')}
+                  {cell('Pausas', fmtMs(st.pauseMs), 'text-amber-300')}
+                </div>
+                <div className="flex flex-wrap gap-1.5 text-[10px]">
+                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Amostras: <strong>{st.samples || '—'}</strong>{st.rejected > 0 && <span className="text-orange-300"> · {st.rejected} reprovada(s)</span>}</span>
+                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Turno: <strong>{historyOp.finishedShift || historyOp.scheduledShift || '—'}</strong></span>
+                  {historyOp.industria && <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Indústria: <strong>{historyOp.industria}</strong></span>}
+                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Conferida: <strong>{conf ? `${conf.conferidoNome || '—'} · ${new Date(conf.conferidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : 'não registrada'}</strong></span>
+                </div>
+                {!st.first && (
+                  <p className="text-[11px] text-[#71717a]">OSM sem registros de início/fim no app (ex.: importada do histórico) — só os dados do cadastro estão disponíveis.</p>
+                )}
+                <div className="text-[10px] uppercase font-bold text-[#71717a] pt-1">Linha do tempo</div>
+              </div>
+            );
+          })()}
           {historyOp && (() => {
             const rows = buildHistory(historyOp);
             if (rows.length === 0) return <p className="text-xs text-[#71717a] py-6 text-center">Nenhum registro ainda.</p>;
