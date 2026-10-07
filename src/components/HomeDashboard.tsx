@@ -989,30 +989,22 @@ export function HomeDashboard({
       return legacy > 0 ? legacy : null;
     };
     if (dashboardPeriod === 'dia') {
-      // Meta esperada do dia por linha de Envase: a meta diária cadastrada da
-      // linha; sem ela, o previsto das OPs da linha no dia (programadas para
-      // hoje, em produção/pausadas ou concluídas hoje) — mesma regra da tela do líder.
+      // Meta do dia = soma das METAS DIÁRIAS cadastradas do Envase 1 + Envase 2
+      // (Metas de Produção). A meta da linha vale todos os dias até ser alterada.
+      // Não usa mais o "previsto das OPs do dia".
       const envLines = envaseMetricLines;
       let total = 0;
-      let usedPlanned = false;
+      const missing: string[] = [];
       for (const l of envLines) {
         const fixed = getLineDailyGoal(l.id);
-        if (fixed && fixed > 0) { total += fixed; continue; }
-        const planned = ops
-          .filter(o => o && o.lineId === l.id && !o.isPartialRecord)
-          .filter(o =>
-            o.scheduledDate === todayDateStr ||
-            o.status === 'in_progress' || o.status === 'paused' ||
-            (o.status === 'completed' && !!o.completedAt && toLocalDateStr(o.completedAt) === todayDateStr)
-          )
-          .reduce((a, o) => a + (Number(o.plannedQuantity) || 0), 0);
-        if (planned > 0) { total += planned; usedPlanned = true; }
+        if (fixed && fixed > 0) total += fixed;
+        else missing.push(l.name);
       }
       return {
         goal: total > 0 ? total : null,
         label: total > 0
-          ? `${usedPlanned ? 'previsto das OPs do dia' : 'meta do dia'} (${envLines.map(l => l.name).join(' + ')})`
-          : 'Sem meta diária nem OPs programadas hoje nos Envases',
+          ? `meta diária (${envLines.map(l => l.name).join(' + ')})${missing.length ? ` · sem meta: ${missing.join(', ')}` : ''}`
+          : 'Cadastre a meta diária do Envase 1 e 2 em Metas de Produção',
       };
     }
     if (dashboardPeriod === 'mes') {

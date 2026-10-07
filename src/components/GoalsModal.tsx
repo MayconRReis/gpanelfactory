@@ -47,6 +47,7 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, factory
   const [dailyInputs, setDailyInputs] = useState<Record<string, string>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
   const [savedFlashId, setSavedFlashId] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Preenche os campos com os valores atuais só quando o modal abre, ou
   // quando o usuário troca de mês/ano — assim não perdemos o que ele está
@@ -101,11 +102,14 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, factory
     const val = parseInt(monthlyInput, 10);
     if (isNaN(val) || val < 0) return;
     setSavingId('monthly');
+    setSaveError(null);
     const ok = await saveFactoryMonthlyGoal(selectedYear, selectedMonth, val);
     setSavingId(null);
     if (ok) {
       flashSaved('monthly');
       onGoalsSaved?.();
+    } else {
+      setSaveError('Não foi possível salvar a meta do mês — verifique sua permissão e tente de novo.');
     }
   };
 
@@ -114,9 +118,16 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, factory
     if (isNaN(val) || val < 0) return;
     const key = `d-${lineId}`;
     setSavingId(key);
+    setSaveError(null);
     const ok = await saveLineDailyGoal(lineId, val);
     setSavingId(null);
-    if (ok) flashSaved(key);
+    if (ok) {
+      flashSaved(key);
+      // Recarrega as metas na tela (antes o velocímetro só via a nova meta depois de recarregar a página)
+      onGoalsSaved?.();
+    } else {
+      setSaveError('Não foi possível salvar a meta diária — verifique sua permissão e tente de novo.');
+    }
   };
 
   return (
@@ -234,8 +245,11 @@ export function GoalsModal({ isOpen, onClose, lines, factoryMonthlyGoal, factory
               </h4>
             </div>
             <p className="text-[11px] text-[#71717a] -mt-1.5">
-              Quantidade/dia esperada de cada linha (ex: Envase 1: 18.000, Envase 2: 18.000, Sleev: 10.000). Fica fixa até você atualizar.
+              Quantidade/dia esperada de cada linha (ex: Envase 1: 18.000, Envase 2: 18.000, Sleev: 10.000). Vale para todos os dias, mês a mês, até você alterar. A soma do Envase 1 + Envase 2 é a meta do velocímetro do dia.
             </p>
+            {saveError && (
+              <p className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/50 rounded-lg px-3 py-2">{saveError}</p>
+            )}
 
             <div className="space-y-2">
               {lines.length === 0 && (
