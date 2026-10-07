@@ -35,7 +35,7 @@ import { getAllOPs, createOP, updateOP, deleteOP, getLines, getLeaders, getMonth
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, PesagemHistoryChange } from '../types';
 import { getUserRule, isAdminRule } from '../lib/permissions';
 import { PesagemMovimentacoes } from '../components/PesagemMovimentacoes';
-import { DailyProductionHistory } from '../components/DailyProductionHistory';
+import { DetailedDashboard } from '../components/DetailedDashboard';
 import { getIndustriaBadgeClass, isManualExitEligible } from '../lib/industria';
 
 // AAAA-MM-DD → DD/MM/AAAA (para o histórico)
@@ -771,7 +771,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                   ? 'bg-purple-800 text-purple-200'
                   : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
               }`}>
-                diária & semanal
+                detalhado
               </span>
             </button>
 
@@ -799,16 +799,8 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
           <PesagemMovimentacoes />
         ) : activeViewTab === 'historico' ? (
           <div className="space-y-6">
-            <DailyProductionHistory
-              ops={ops}
-              lines={lines}
-              leaders={leaders}
-              goals={goals}
-              events={events}
-              defaultSectorFilter="Pesagem"
-              defaultDailyChartMode="osms"
-              pesagemOnly={true}
-            />
+            {/* Dashboard da Pesagem — mesmo modelo do Dashboard Detalhado, só com as OSMs pesadas */}
+            <DetailedDashboard ops={ops} lines={lines} events={events} users={leaders} sector="Pesagem" />
           </div>
         ) : (
           <>

@@ -65,7 +65,7 @@ import {
   deleteManipConferencia,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
-import { ManipulacaoDashboard } from '../components/ManipulacaoDashboard';
+import { DetailedDashboard } from '../components/DetailedDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
 import { getAutoShiftNow, REACTOR_MEAL_BREAKS, REACTOR_WORK_SCHEDULE } from '../lib/productionTime';
 
@@ -1318,7 +1318,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   ? 'bg-cyan-800 text-cyan-200'
                   : 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/40'
               }`}>
-                diária & semanal
+                detalhado
               </span>
             </button>
           </div>
@@ -1328,11 +1328,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       {/* CORPO PRINCIPAL */}
       <main className={`flex-1 w-full mx-auto flex flex-col gap-8 ${embedded ? 'p-0 max-w-full' : 'max-w-6xl p-4 sm:p-6 lg:p-8'}`}>
         {activeViewTab === 'dashboard' ? (
-          <ManipulacaoDashboard
-            ops={ops}
-            onRefresh={() => fetchData(true)}
-            isRefreshing={isRefreshing}
-          />
+          // Dashboard da Manipulação — mesmo modelo do Dashboard Detalhado, só com os reatores
+          <DetailedDashboard ops={ops} lines={lines} events={events} sector="Manipulação" />
         ) : (
           <>
             {/* OS 3 REATORES — cada um com sua OP ativa (iniciar/pausar/

@@ -63,7 +63,9 @@ export function isPesagemOp(op: ProductionOrder): boolean {
   return (
     op.setor === 'Pesagem' ||
     op.tipoDocumento === 'OSM' ||
-    (Boolean(op.number) && String(op.number).startsWith('300')) ||
+    // Número só decide em registros antigos sem setor e sem tipo — hoje o número
+    // não define o setor (OSMs da Macpaul/Carvalho também começam com 400).
+    (!op.setor && !op.tipoDocumento && Boolean(op.number) && String(op.number).startsWith('300')) ||
     (Boolean(op.lineId) && String(op.lineId).toLowerCase().includes('pesagem'))
   );
 }

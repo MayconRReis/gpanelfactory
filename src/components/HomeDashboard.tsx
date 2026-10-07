@@ -437,7 +437,8 @@ export function HomeDashboard({
       if (o.status !== 'completed') return false;
       // Dia LOCAL do fechamento (antes era o dia em UTC: OP fechada após as 21h caía amanhã)
       const opDate = getOpReferenceDateStr(o);
-      return opDate === todayDateStr && /^4/.test(String(o.number).trim());
+      // OP de Envase pelo SETOR — não pelo número (OSMs da Macpaul/Carvalho também começam com 400)
+      return opDate === todayDateStr && !o.isPartialRecord && isEnvaseLineOpBase(o);
     }).length;
   }, [ops, todayDateStr]);
 
@@ -785,7 +786,7 @@ export function HomeDashboard({
   // dashboard (Dia/Mês/Ano/Geral), usando o mesmo recorte do OEE.
   const completedOpsPeriod = useMemo(() => {
     return periodOpsAndEvents.periodOps.filter(
-      (o) => o.status === 'completed' && /^4/.test(String(o.number).trim())
+      (o) => o.status === 'completed' && !o.isPartialRecord && isEnvaseLineOpBase(o)
     ).length;
   }, [periodOpsAndEvents]);
 

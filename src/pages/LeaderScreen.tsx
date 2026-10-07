@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { DetailedDashboard } from '../components/DetailedDashboard';
 import { supabase } from '../lib/supabase';
 import { useAuthStore } from '../store/authStore';
 import { Button } from '../components/ui/button';
@@ -1178,20 +1179,10 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
             }`}
           >
             <Activity className="w-3.5 h-3.5" />
-            <span>Dashboard Diário ({dailyMetrics.progressPercent}%)</span>
+            <span>Dashboard</span>
           </button>
 
-          <button
-            onClick={() => setActiveTab('monthly_dash')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
-              activeTab === 'monthly_dash'
-                ? 'bg-blue-600 text-white shadow-md shadow-blue-900/30'
-                : 'text-[#a1a1aa] hover:text-white hover:bg-[#15151c]'
-            }`}
-          >
-            <BarChart3 className="w-3.5 h-3.5" />
-            <span>Dashboard Mensal ({monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')} un)</span>
-          </button>
+
 
         </div>
       </header>
@@ -1356,8 +1347,27 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider">
                         Produção Pausada
                       </h4>
-                      <p className="text-xs text-amber-200/80 mt-0.5">
-                        A linha está interrompida. Clique em <strong>Retomar Produção</strong> para continuar a contagem.
+                      {(() => {
+                        // Última pausa desta OP: motivo e o que o líder escreveu
+                        const lastPause = recentEvents
+                          .filter(e => String(e.opId) === String(activeOp.id) && e.type === 'PAUSED')
+                          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+                        if (!lastPause) return null;
+                        const since = new Date(lastPause.createdAt);
+                        return (
+                          <>
+                            <p className="text-[13px] font-semibold text-amber-100 mt-1 leading-snug">
+                              <span className="text-amber-300/70 font-normal">Motivo:</span> {lastPause.reason || 'Sem motivo informado'}
+                              <span className="text-amber-300/50 font-normal"> · desde {since.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+                            </p>
+                            {lastPause.observation && String(lastPause.observation).trim() && (
+                              <p className="text-xs text-amber-200/75 mt-0.5">{String(lastPause.observation).trim()}</p>
+                            )}
+                          </>
+                        );
+                      })()}
+                      <p className="text-[10px] text-amber-200/60 mt-1.5">
+                        Clique em <strong>Retomar Produção</strong> para continuar a contagem.
                       </p>
                     </div>
                   </div>
@@ -1722,456 +1732,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
         {/* ABA 2: DASHBOARD DIÁRIO DO LÍDER */}
         {/* --------------------------------------------------------------------- */}
         {activeTab === 'daily_dash' && (
-          <div className="space-y-6 animate-in fade-in duration-200">
-            
-            {/* Título e Data de Hoje */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-              <div>
-                <h2 className="text-base font-black text-white uppercase tracking-tight flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-blue-400" />
-                  Dashboard Diário da Produção
-                </h2>
-                <p className="text-xs text-[#71717a]">
-                  Métricas de desempenho e apontamentos de hoje para <strong>{currentLine?.name}</strong>.
-                </p>
-              </div>
-
-              <span className="flex items-center gap-1.5 text-xs text-[#a1a1aa] bg-[#14141b] border border-[#272733] px-3 py-1.5 rounded-xl font-mono">
-                <Calendar className="w-3.5 h-3.5 text-emerald-400" />
-                <span>{new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long' })}</span>
-              </span>
-            </div>
-
-            {/* 4 CARDS DE KPI DIÁRIO */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              
-              {/* Total Produzido Hoje ou Taxa Horária no Sleev */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  {isSleeve ? 'Produção por Hora (Sleev)' : 'Produzido Hoje'}
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-white font-mono">
-                    {isSleeve
-                      ? sleeveRate.producedPerHour.toLocaleString('pt-BR')
-                      : dailyMetrics.producedToday.toLocaleString('pt-BR')}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">
-                    {isSleeve ? 'un/h' : 'un'}
-                  </span>
-                </div>
-                <div className={`text-[11px] flex items-center gap-1 font-semibold ${isSleeve ? 'text-purple-400' : 'text-emerald-400'}`}>
-                  <TrendingUp className="w-3 h-3" />
-                  <span>
-                    {isSleeve
-                      ? `${sleeveRate.workingHours > 0 ? sleeveRate.workingHours.toFixed(1) : '0'}h trabalhadas`
-                      : 'Em ritmo normal'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Meta do Dia & % Atingido */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Meta do Dia
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-blue-400 font-mono">
-                    {dailyMetrics.progressPercent}%
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">
-                    {dailyMetrics.targetSource === 'nenhuma'
-                      ? 'sem meta cadastrada'
-                      : `/ ${dailyMetrics.dailyTarget.toLocaleString('pt-BR')} un${dailyMetrics.targetSource === 'planejado' ? ' (planejado do dia)' : ''}`}
-                  </span>
-                </div>
-                <div className="w-full h-1.5 bg-[#1a1a24] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full"
-                    style={{ width: `${dailyMetrics.progressPercent}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* OPs Finalizadas Hoje */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  OPs Concluídas Hoje
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono">
-                    {dailyMetrics.completedTodayCount}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">
-                    / {dailyMetrics.totalOpsToday} programadas
-                  </span>
-                </div>
-                <div className="text-[11px] text-[#a1a1aa] font-medium">
-                  {dailyMetrics.totalOpsToday - dailyMetrics.completedTodayCount} ordens restantes
-                </div>
-              </div>
-
-              {/* Paradas do Dia */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Paradas Registradas
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className={`text-2xl sm:text-3xl font-black font-mono ${
-                    dailyMetrics.pauseCountToday > 0 ? 'text-amber-400' : 'text-emerald-400'
-                  }`}>
-                    {dailyMetrics.pauseCountToday}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">pausas</span>
-                </div>
-                <div className="text-[11px] text-[#a1a1aa] font-medium">
-                  {dailyMetrics.pauseCountToday === 0 ? 'Sem interrupções hoje' : `${dailyMetrics.pauseCountToday} pausa(s) registrada(s) hoje`}
-                </div>
-              </div>
-
-            </div>
-
-            {/* HISTÓRICO DE APONTAMENTOS E EVENTOS DE HOJE */}
-            <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-blue-400" />
-                  Linha do Tempo de Apontamentos & Acontecimentos de Hoje
-                </h3>
-                <span className="text-[11px] text-[#71717a]">
-                  Registro auditável em tempo real
-                </span>
-              </div>
-
-              {dailyMetrics.todayEvents.length > 0 ? (
-                <div className="space-y-2.5">
-                  {dailyMetrics.todayEvents.map(event => (
-                    <div
-                      key={event.id}
-                      className="p-3.5 rounded-xl bg-[#16161e] border border-[#242430] flex items-center justify-between gap-3 text-xs"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                          event.type === 'QUANTITY_REPORTED' ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' :
-                          event.type === 'STARTED' ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30' :
-                          event.type === 'PAUSED' ? 'bg-amber-600/20 text-amber-400 border border-amber-500/30' :
-                          event.type === 'CANCELLED' ? 'bg-rose-600/20 text-rose-400 border border-rose-500/30' :
-                          'bg-purple-600/20 text-purple-400 border border-purple-500/30'
-                        }`}>
-                          {event.type === 'QUANTITY_REPORTED' ? <Package className="w-4 h-4" /> :
-                           event.type === 'STARTED' ? <Play className="w-4 h-4" /> :
-                           event.type === 'PAUSED' ? <Pause className="w-4 h-4" /> :
-                           <CheckCircle2 className="w-4 h-4" />}
-                        </div>
-
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-white truncate">
-                              {event.type === 'QUANTITY_REPORTED' ? `Apontamento de +${event.quantity} ${displayUnit}` :
-                               event.type === 'STARTED' ? 'Início de Produção' :
-                               event.type === 'PAUSED' ? `Pausa: ${event.reason || 'Operacional'}` :
-                               event.type === 'RESUMED' ? 'Retomada de Produção' :
-                               event.type === 'CANCELLED' ? 'Início Cancelado (por engano)' : 
-                               (() => {
-                                 const relatedOp = allOps.find(o => o.id === event.opId || o.number === event.opNumber);
-                                 if (relatedOp?.finishedShift) {
-                                   return `Finalizado · Turno da ${relatedOp.finishedShift}`;
-                                 }
-                                 return `${docTypeLabel} Finalizada com Sucesso`;
-                               })()}
-                            </span>
-                            {(() => {
-                              // Número da OP (o evento às vezes só traz o id interno)
-                              const relatedOp = allOps.find(o => o.id === event.opId);
-                              const opLabel = relatedOp?.number || event.opNumber;
-                              return opLabel ? (
-                                <span className="text-[10px] font-mono text-blue-400 bg-blue-950 px-1.5 py-0.5 rounded shrink-0">
-                                  {docTypeLabel} {opLabel}
-                                </span>
-                              ) : null;
-                            })()}
-                          </div>
-                          {(() => {
-                            const who = responsibleFor(event.leaderId);
-                            return (
-                              <p className="text-[11px] mt-0.5 flex items-center gap-1">
-                                <span className="text-[#71717a]">por</span>
-                                {who ? (
-                                  <>
-                                    <strong className="text-[#d4d4d8]">{who.name}</strong>
-                                    {who.isCoordinator && (
-                                      <span className="text-[9px] font-bold uppercase px-1 py-0.5 rounded bg-indigo-950/70 text-indigo-300 border border-indigo-800/50">Coordenação</span>
-                                    )}
-                                  </>
-                                ) : (
-                                  <span className="text-[#52525b]">responsável não registrado</span>
-                                )}
-                              </p>
-                            );
-                          })()}
-                          {event.observation && (
-                            <p className="text-[11px] text-[#71717a] truncate mt-0.5">
-                              Obs: {event.observation}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      <span className="text-[11px] font-mono text-[#71717a] shrink-0">
-                        {event.createdAt ? new Date(event.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="p-8 text-center bg-[#15151c] rounded-xl border border-dashed border-[#272733]">
-                  <p className="text-xs text-[#71717a]">
-                    Nenhum apontamento ou parada registrado hoje nesta linha até o momento.
-                  </p>
-                </div>
-              )}
-            </div>
-
-          </div>
-        )}
-
-        {/* --------------------------------------------------------------------- */}
-        {/* ABA 3: DASHBOARD MENSAL DE PRODUÇÃO */}
-        {/* --------------------------------------------------------------------- */}
-        {activeTab === 'monthly_dash' && (
-          <div className="space-y-6 animate-in fade-in duration-200">
-            
-            {/* Cabeçalho Mensal */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-              <div>
-                <h2 className="text-base font-black text-white uppercase tracking-tight flex items-center gap-2">
-                  <BarChart3 className="w-5 h-5 text-blue-400" />
-                  Dashboard Mensal de Produção — {currentMonthName}
-                </h2>
-                <p className="text-xs text-[#71717a]">
-                  Consolidado histórico de volume e OPs entregues em <strong>{currentLine?.name}</strong>.
-                </p>
-              </div>
-
-              <span className="flex items-center gap-1.5 text-xs text-[#a1a1aa] bg-[#14141b] border border-[#272733] px-3 py-1.5 rounded-xl font-mono">
-                <CalendarDays className="w-3.5 h-3.5 text-blue-400" />
-                <span className="capitalize">{currentMonthName}</span>
-              </span>
-            </div>
-
-            {/* 4 CARDS DE KPI MENSAL */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-              
-              {/* Total Produzido no Mês */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Total Produzido no Mês
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-white font-mono">
-                    {monthlyMetrics.totalProducedMonth.toLocaleString('pt-BR')}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">un</span>
-                </div>
-                <div className="text-[11px] text-blue-400 font-semibold flex items-center gap-1">
-                  <ArrowUpRight className="w-3 h-3" />
-                  <span>Planejado no mês: {monthlyMetrics.totalPlannedMonth.toLocaleString('pt-BR')} un</span>
-                </div>
-              </div>
-
-              {/* OPs Entregues no Mês */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  OPs Entregues no Mês
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono">
-                    {monthlyMetrics.completedOpsMonth}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">
-                    / {monthlyMetrics.totalOpsMonth} OPs
-                  </span>
-                </div>
-                <div className="text-[11px] text-[#a1a1aa] font-medium">
-                  {monthlyMetrics.totalOpsMonth - monthlyMetrics.completedOpsMonth} restantes na grade
-                </div>
-              </div>
-
-              {/* Cumprimento do Plano */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Aderência ao Plano
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-blue-400 font-mono">
-                    {monthlyMetrics.efficiencyMonth}%
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">índice</span>
-                </div>
-                <div className="w-full h-1.5 bg-[#1a1a24] rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full"
-                    style={{ width: `${monthlyMetrics.efficiencyMonth}%` }}
-                  />
-                </div>
-              </div>
-
-              {/* Conformidade & Qualidade */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-2">
-                <span className="text-[10px] font-bold text-[#71717a] uppercase tracking-wider block">
-                  Garantia Operacional
-                </span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl sm:text-3xl font-black text-emerald-400 font-mono">
-                    {monthlyMetrics.qualityMonth !== null ? `${monthlyMetrics.qualityMonth}%` : '—'}
-                  </span>
-                  <span className="text-xs text-[#71717a] font-mono">qualidade</span>
-                </div>
-                <div className="text-[11px] text-emerald-400 flex items-center gap-1 font-semibold">
-                  <ShieldCheck className="w-3 h-3" />
-                  <span>
-                    {monthlyMetrics.qualityMonth !== null
-                      ? '(produzido − perdido) ÷ produzido das OPs concluídas'
-                      : 'Sem OPs concluídas no mês'}
-                  </span>
-                </div>
-              </div>
-
-            </div>
-
-            {/* GRÁFICO INTERATIVO DE PRODUÇÃO DIÁRIA NO MÊS */}
-            <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-5 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-2">
-                    <TrendingUp className="w-4 h-4 text-blue-400" />
-                    Curva Diária de Produção no Mês ({currentMonthName})
-                  </h3>
-                  <p className="text-[11px] text-[#71717a]">
-                    Volume registrado por dia (apontamentos, pausas e conclusões){lineDailyGoal !== null ? ' vs meta diária da linha' : ''}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="flex items-center gap-1.5 text-blue-400">
-                    <span className="w-3 h-3 rounded-sm bg-blue-500" />
-                    Volume Produzido
-                  </span>
-                  {lineDailyGoal !== null && (
-                    <span className="flex items-center gap-1.5 text-slate-400">
-                      <span className="w-3 h-1 bg-slate-500" />
-                      Meta diária ({lineDailyGoal.toLocaleString('pt-BR')} un)
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="h-64 sm:h-72 w-full pt-2">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={monthlyMetrics.chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#22222d" vertical={false} />
-                    <XAxis
-                      dataKey="dia"
-                      stroke="#52525b"
-                      fontSize={10}
-                      tickLine={false}
-                      axisLine={{ stroke: '#22222d' }}
-                    />
-                    <YAxis
-                      stroke="#52525b"
-                      fontSize={10}
-                      tickLine={false}
-                      axisLine={{ stroke: '#22222d' }}
-                      tickFormatter={(v) => `${v}`}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: '#121217',
-                        border: '1px solid #2b2b38',
-                        borderRadius: '12px',
-                        fontSize: '12px',
-                        color: '#fff',
-                      }}
-                      formatter={(val: any) => [`${Number(val).toLocaleString('pt-BR')} un`, 'Quantidade']}
-                    />
-                    <Bar dataKey="produzido" fill="#3b82f6" radius={[6, 6, 0, 0]} />
-                    {lineDailyGoal !== null && (
-                      <ReferenceLine y={lineDailyGoal} stroke="#64748b" strokeDasharray="5 3" />
-                    )}
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* GRID INFERIOR: TOP PRODUTOS FABRICADOS & PRINCIPAIS PARADAS */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              
-              {/* Top Produtos no Mês */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-5 space-y-4">
-                <h3 className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  <Package className="w-4 h-4 text-emerald-400" />
-                  Top Produtos Fabricados na Linha neste Mês
-                </h3>
-
-                {monthlyMetrics.topProducts.length > 0 ? (
-                  <div className="space-y-3">
-                    {monthlyMetrics.topProducts.map((p, idx) => {
-                      const pct = p.planned > 0 ? Math.min(Math.round((p.produced / p.planned) * 100), 100) : 100;
-                      return (
-                        <div key={idx} className="p-3 rounded-xl bg-[#16161e] border border-[#242430] space-y-2">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-bold text-white truncate max-w-[220px]">
-                              {p.product}
-                            </span>
-                            <span className="font-mono text-emerald-400 font-bold">
-                              {p.produced.toLocaleString('pt-BR')} un
-                            </span>
-                          </div>
-                          <div className="w-full h-1.5 bg-[#0e0e12] rounded-full overflow-hidden">
-                            <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${pct}%` }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="text-xs text-[#71717a] italic">Sem produtos registrados neste período.</p>
-                )}
-              </div>
-
-              {/* Análise de Motivos de Parada */}
-              <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-5 space-y-4">
-                <h3 className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  Principais Motivos de Paradas no Mês
-                </h3>
-
-                {monthlyMetrics.topReasons.length > 0 ? (
-                  <div className="space-y-2.5">
-                    {monthlyMetrics.topReasons.map((r, idx) => (
-                      <div
-                        key={idx}
-                        className="p-3 rounded-xl bg-[#16161e] border border-[#242430] flex items-center justify-between text-xs"
-                      >
-                        <span className="text-[#e4e4e7] font-medium truncate pr-2">
-                          {r.reason}
-                        </span>
-                        <span className="px-2 py-0.5 rounded-md bg-amber-950/60 text-amber-400 border border-amber-800/40 font-mono font-bold shrink-0">
-                          {r.count} {r.count === 1 ? 'ocorrência' : 'ocorrências'}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="p-6 text-center bg-[#16161e] rounded-xl border border-[#242430]">
-                    <CheckCircle2 className="w-6 h-6 text-emerald-400 mx-auto mb-1.5" />
-                    <p className="text-xs text-[#a1a1aa]">Nenhuma parada registrada neste mês para esta linha.</p>
-                  </div>
-                )}
-              </div>
-
-            </div>
-
+          <div className="animate-in fade-in duration-200">
+            {/* Dashboard da linha selecionada — mesmo modelo do Dashboard Detalhado, só com os dados desta linha */}
+            <DetailedDashboard key={currentLine?.id || 'sem-linha'} ops={allOps} lines={lines} events={recentEvents} users={allUsers} sector="Envase" lineId={currentLine?.id || null} />
           </div>
         )}
 

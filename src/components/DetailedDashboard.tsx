@@ -10,7 +10,7 @@ import {
   ProductionOrder, ProductionLine, UserProfile, ProductionEvent, MonthlyGoal, FactoryMonthlyGoal,
   WorkSession, LineChangeover,
 } from '../types';
-import { getWorkSessions, getChangeovers, isSleeveLineId, toLocalDateStr } from '../services/db';
+import { getWorkSessions, getChangeovers, isSleeveLineId, toLocalDateStr, getFactoryMonthlyGoals, getMonthlyGoals, getLineDailyGoals } from '../services/db';
 import { buildProductionLedger, LedgerEntry, LedgerSector } from '../services/productionLedger';
 import { calculateProductionTime, formatMsToHoursMinutes, getScheduledWindow } from '../lib/productionTime';
 import { SetupHistory } from './SetupHistory';
@@ -36,6 +36,10 @@ interface Props {
   factoryMonthlyGoals?: FactoryMonthlyGoal[];
   /** Conteúdo da aba OEE (o painel de OEE por setor, com o próprio filtro) */
   oeeSlot?: React.ReactNode;
+  /** Dashboard de um setor só (telas do Envase, Manipulação e Pesagem). Sem valor = fábrica toda. */
+  sector?: 'Envase' | 'Manipulação' | 'Pesagem';
+  /** Dashboard de UMA linha (tela do líder do Envase): tudo filtrado para ela, com a meta diária da linha */
+  lineId?: string | null;
 }
 
 const SECTOR_META: Record<LedgerSector, { label: string; unit: 'Un' | 'Kg'; color: string; icon: React.ComponentType<{ className?: string }>; text: string }> = {
@@ -91,7 +95,17 @@ function workdaysInMonth(y: number, m: number): number {
   return n;
 }
 
-export function DetailedDashboard({ ops, lines, events, users = [], goals = [], factoryMonthlyGoals = [], oeeSlot }: Props) {
+export function DetailedDashboard({ ops, lines: allLines, events, users = [], goals: goalsProp = [], factoryMonthlyGoals: factoryGoalsProp = [], oeeSlot, sector, lineId }: Props) {
+  const lineIsSleeve = !!lineId && isSleeveLineId(lineId);
+  // Escopo do setor: quais setores do livro de produção e quais linhas entram
+  const sectorSet: LedgerSector[] = lineId ? [lineIsSleeve ? 'Sleev' : 'Envase'] : sector === 'Envase' ? ['Envase', 'Sleev'] : sector === 'Manipulação' ? ['Manipulação'] : sector === 'Pesagem' ? ['Pesagem'] : SECTORS;
+  const lines = useMemo(() => allLines.filter(l => {
+    if (lineId) return l.id === lineId;
+    if (sector === 'Envase') return !/reator|pesagem|manipula/i.test(l.id) && !/reator/i.test(l.name);
+    if (sector === 'Manipulação') return /reator/i.test(l.id) || /reator/i.test(l.name);
+    if (sector === 'Pesagem') return false;
+    return true;
+  }), [allLines, sector, lineId]);
   const today = isoOf(new Date());
   const [tab, setTab] = useState<Tab>('resumo');
   const [period, setPeriod] = useState<Period>('dia');
@@ -102,6 +116,20 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
 
   const [nowTick, setNowTick] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setNowTick(Date.now()), 60000); return () => clearInterval(t); }, []);
+
+  // Metas: usa as recebidas; nas telas dos setores (sem metas recebidas) busca sozinho
+  const [loadedFactoryGoals, setLoadedFactoryGoals] = useState<FactoryMonthlyGoal[]>([]);
+  const [loadedGoals, setLoadedGoals] = useState<MonthlyGoal[]>([]);
+  const anchorYear = parseIso(anchor).getFullYear();
+  useEffect(() => {
+    if (factoryGoalsProp.length > 0 || goalsProp.length > 0) return;
+    let cancelled = false;
+    getFactoryMonthlyGoals(anchorYear).then(g => { if (!cancelled) setLoadedFactoryGoals(g); }).catch(() => {});
+    getMonthlyGoals(anchorYear).then(g => { if (!cancelled) setLoadedGoals(g); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [anchorYear, factoryGoalsProp.length, goalsProp.length]);
+  const factoryMonthlyGoals = factoryGoalsProp.length > 0 ? factoryGoalsProp : loadedFactoryGoals;
+  const goals = goalsProp.length > 0 ? goalsProp : loadedGoals;
 
   const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
   const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
@@ -117,7 +145,10 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
   }, []);
 
   // ---------- Livro de produção (mesma fonte do Dashboard) ----------
-  const ledger = useMemo(() => buildProductionLedger(ops, events), [ops, events]);
+  const ledger = useMemo(() => {
+    const all = buildProductionLedger(ops, events);
+    return lineId ? all.filter(e => e.lineId === lineId) : all;
+  }, [ops, events, lineId]);
   const periodEntries = useMemo(() => ledger.filter(e => inRange(e.day)), [ledger, rangeStart, rangeEnd]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const totals = useMemo(() => {
@@ -129,12 +160,22 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
 
   // OPs de Envase concluídas no período
   const envaseOpsDone = useMemo(() => ops.filter(o =>
-    o.status === 'completed' && !o.isPartialRecord && (!o.setor || o.setor === 'Envase') && !isSleeveLineId(o.lineId) &&
+    o.status === 'completed' && !o.isPartialRecord && (!o.setor || o.setor === 'Envase') &&
+    (lineId ? o.lineId === lineId : !isSleeveLineId(o.lineId)) &&
     o.completedAt && inRange(toLocalDateStr(o.completedAt))
-  ).length, [ops, rangeStart, rangeEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+  ).length, [ops, rangeStart, rangeEnd, lineId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- Meta do Envase (meta mensal da fábrica) ----------
+  // Linha: meta diária da linha (Metas de Produção) × dias úteis do mês
+  const [lineDailyGoal, setLineDailyGoal] = useState<number>(0);
+  useEffect(() => {
+    if (!lineId) return;
+    let cancelled = false;
+    getLineDailyGoals().then(list => { if (!cancelled) setLineDailyGoal(list.find(g => g.lineId === lineId)?.goalQuantity || 0); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [lineId]);
   const monthGoal = (y: number, m: number): number => {
+    if (lineId) return lineDailyGoal > 0 ? lineDailyGoal * workdaysInMonth(y, m) : 0;
     const f = factoryMonthlyGoals.find(g => g.year === y && g.month === m + 1);
     if (f && f.goalQuantity > 0) return f.goalQuantity;
     return goals.filter(g => g.year === y && g.month === m + 1).reduce((a, g) => a + (g.goalQuantity || 0), 0);
@@ -152,17 +193,17 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
       if (g > 0 && wd > 0) total += g / wd;
     }
     return Math.round(total);
-  }, [rangeStart, rangeEnd, factoryMonthlyGoals, goals]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rangeStart, rangeEnd, factoryMonthlyGoals, goals, lineDailyGoal, lineId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- Gráfico do Resumo ----------
-  const [chartSector, setChartSector] = useState<LedgerSector>('Envase');
+  const [chartSector, setChartSector] = useState<LedgerSector>(lineIsSleeve ? 'Sleev' : sector === 'Manipulação' ? 'Manipulação' : sector === 'Pesagem' ? 'Pesagem' : 'Envase');
   const chartData = useMemo(() => {
     const byYearMonth = period === 'ano';
     // Dia/semana: mostra o mês inteiro em volta (contexto); mês: o mês; ano: 12 meses
     const [cs, ce] = period === 'dia' || period === 'semana' ? periodRange('mes', anchor) : [rangeStart, rangeEnd];
     if (byYearMonth) {
       const y = parseIso(rangeStart).getFullYear();
-      const arr = MONTHS.map((m, i) => ({ label: m, value: 0, goal: chartSector === 'Envase' ? monthGoal(y, i) : 0, highlight: false }));
+      const arr = MONTHS.map((m, i) => ({ label: m, value: 0, goal: (chartSector === 'Envase' || !!lineId) ? monthGoal(y, i) : 0, highlight: false }));
       for (const e of ledger) {
         if (e.sector !== chartSector || !e.day.startsWith(String(y))) continue;
         arr[Number(e.day.slice(5, 7)) - 1].value += chartSector === 'Pesagem' ? 1 : e.qty;
@@ -173,7 +214,7 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
     for (let d = parseIso(cs); isoOf(d) <= ce; d.setDate(d.getDate() + 1)) {
       const day = isoOf(d);
       const w = d.getDay();
-      const g = chartSector === 'Envase' && w !== 0 && w !== 6
+      const g = (chartSector === 'Envase' || !!lineId) && w !== 0 && w !== 6
         ? Math.round(monthGoal(d.getFullYear(), d.getMonth()) / Math.max(1, workdaysInMonth(d.getFullYear(), d.getMonth())))
         : 0;
       arr.push({ label: String(d.getDate()), day, value: 0, goal: g, highlight: inRange(day) });
@@ -185,8 +226,8 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
       if (i !== undefined) arr[i].value += chartSector === 'Pesagem' ? 1 : e.qty;
     }
     return arr;
-  }, [ledger, chartSector, period, anchor, rangeStart, rangeEnd, factoryMonthlyGoals, goals]); // eslint-disable-line react-hooks/exhaustive-deps
-  const chartGoalLine = chartSector === 'Envase' && period !== 'ano'
+  }, [ledger, chartSector, period, anchor, rangeStart, rangeEnd, factoryMonthlyGoals, goals, lineDailyGoal]); // eslint-disable-line react-hooks/exhaustive-deps
+  const chartGoalLine = (chartSector === 'Envase' || !!lineId) && period !== 'ano'
     ? Math.round(monthGoal(parseIso(anchor).getFullYear(), parseIso(anchor).getMonth()) / Math.max(1, workdaysInMonth(parseIso(anchor).getFullYear(), parseIso(anchor).getMonth())))
     : 0;
   const chartUnit = chartSector === 'Pesagem' ? 'OSMs' : SECTOR_META[chartSector].unit;
@@ -240,8 +281,9 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
   // ---------- Paradas: quando e por quê ----------
   // Cada pausa registrada pelo líder, recortada ao expediente da linha
   // (jornada do dia + expediente aberto/hora extra) — a noite não aparece.
-  const [stopLine, setStopLine] = useState<string>('envase');
-  const stopLines = useMemo(() => lines.filter(l => !/reator|pesagem|manipula/i.test(l.id)), [lines]);
+  const [stopLine, setStopLine] = useState<string>(lineId || (sector === 'Manipulação' ? 'todas' : 'envase'));
+  useEffect(() => { if (lineId) setStopLine(lineId); }, [lineId]);
+  const stopLines = useMemo(() => lines.filter(l => (sector === 'Manipulação' ? /reator/i.test(l.id) : !/reator|pesagem|manipula/i.test(l.id))), [lines, sector]);
   const coverageFor = (lineId: string, dayMs: number): Array<[number, number]> => {
     const out: Array<[number, number]> = [];
     const w = getScheduledWindow(dayMs, lineId);
@@ -346,11 +388,12 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
   const opRows = useMemo(() => {
     const q = fSearch.trim().toLowerCase();
     return periodEntries
+      .filter(e => sectorSet.includes(e.sector))
       .filter(e => fSector === 'Todos' || e.sector === fSector)
       .filter(e => fLine === 'Todas' || e.lineId === fLine)
       .filter(e => !q || e.number.toLowerCase().includes(q) || e.product.toLowerCase().includes(q) || (e.lote || '').toLowerCase().includes(q))
       .sort((a, b) => b.at.localeCompare(a.at));
-  }, [periodEntries, fSector, fLine, fSearch]);
+  }, [periodEntries, fSector, fLine, fSearch, sector]); // eslint-disable-line react-hooks/exhaustive-deps
   const opTotals = useMemo(() => {
     let un = 0; let kg = 0;
     for (const e of opRows) { if (e.unit === 'Un') un += e.qty; else kg += e.qty; }
@@ -374,17 +417,27 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
   };
 
   // ---------- UI ----------
-  const TABS: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  const ALL_TABS: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { id: 'resumo', label: 'Resumo', icon: LayoutGrid },
     { id: 'oee', label: 'OEE', icon: Gauge },
-    { id: 'linhas', label: 'Linhas & Tempo', icon: Factory },
-    { id: 'ops', label: 'Produção por OP', icon: ListOrdered },
+    { id: 'linhas', label: sector === 'Manipulação' ? 'Reatores & Tempo' : 'Linhas & Tempo', icon: Factory },
+    { id: 'ops', label: sector === 'Pesagem' ? 'OSMs pesadas' : sector === 'Manipulação' ? 'Produção por OSM' : 'Produção por OP', icon: ListOrdered },
     { id: 'setups', label: 'Setups', icon: RefreshCcw },
     { id: 'ocorrencias', label: 'Ocorrências', icon: ClipboardList },
   ];
+  // Dashboard de setor: sem OEE e sem Ocorrências; Setups só no Envase; Pesagem não tem tempo de linha
+  const TABS = ALL_TABS.filter(t => {
+    if (!sector) return t.id !== 'oee' || !!oeeSlot;
+    if (t.id === 'oee' || t.id === 'ocorrencias') return false;
+    if (t.id === 'setups') return sector === 'Envase';
+    if (t.id === 'linhas') return sector !== 'Pesagem';
+    return true;
+  });
   const card = 'bg-[#121217] border border-[#22222b] rounded-2xl';
   const chip = (active: boolean) => `h-8 px-3 rounded-lg text-[11px] font-bold border transition-all ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-[#16161e] border-[#26262f] text-[#a1a1aa] hover:text-white'}`;
-  const periodPct = periodGoal > 0 ? Math.round((totals['Envase'] / periodGoal) * 1000) / 10 : null;
+  const mainQty = lineIsSleeve ? totals['Sleev'] : totals['Envase'];
+  const periodPct = periodGoal > 0 ? Math.round((mainQty / periodGoal) * 1000) / 10 : null;
+  const lineRow = lineId ? lineRows.find(r => r.line.id === lineId) : undefined;
   const usesPeriodBar = tab !== 'oee';
 
   return (
@@ -426,14 +479,47 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
       {/* ===================== RESUMO ===================== */}
       {tab === 'resumo' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {(sector === 'Manipulação' || sector === 'Pesagem') && (() => {
+            const sec: LedgerSector = sector === 'Manipulação' ? 'Manipulação' : 'Pesagem';
+            const n = periodEntries.filter(e => e.sector === sec).length;
+            const kg = totals[sec];
+            const avgDisp = (() => {
+              const rows = lineRows.filter(r => r.disp !== null);
+              return rows.length ? Math.round((rows.reduce((a, r) => a + (r.disp || 0), 0) / rows.length) * 10) / 10 : null;
+            })();
+            const days = new Set(periodEntries.filter(e => e.sector === sec).map(e => e.day)).size;
+            const items: [string, string, string][] = sector === 'Manipulação'
+              ? [
+                  ['Kg manipulados', `${nf(kg)} kg`, 'text-cyan-300'],
+                  ['OSMs concluídas', nf(n), 'text-white'],
+                  ['Média por OSM', n ? `${nf(kg / n)} kg` : '—', 'text-white'],
+                  ['Disponibilidade dos reatores', avgDisp !== null ? `${avgDisp}%` : '—', avgDisp === null ? 'text-[#71717a]' : avgDisp >= 85 ? 'text-emerald-300' : avgDisp >= 65 ? 'text-amber-300' : 'text-rose-300'],
+                ]
+              : [
+                  ['OSMs pesadas', nf(n), 'text-amber-300'],
+                  ['Kg pesados', `${nf(kg)} kg`, 'text-white'],
+                  ['Média por OSM', n ? `${nf(kg / n)} kg` : '—', 'text-white'],
+                  ['Média por dia', days ? `${nf(n / days)} OSMs` : '—', 'text-white'],
+                ];
+            return (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {items.map(([l, v, c]) => (
+                  <div key={l} className={`${card} p-4`}>
+                    <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa]">{l}</span>
+                    <p className={`text-2xl font-black font-mono mt-1 ${c}`}>{v}</p>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          <div className={`grid grid-cols-2 ${sector === 'Envase' && !lineId ? 'lg:grid-cols-2' : 'lg:grid-cols-4'} gap-3 ${sector === 'Manipulação' || sector === 'Pesagem' ? 'hidden' : ''}`}>
             {/* Envase com meta */}
             <div className={`${card} p-4`}>
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-wider text-blue-300 flex items-center gap-1.5"><Package className="w-3.5 h-3.5" /> Envase</span>
+                <span className="text-[10px] font-black uppercase tracking-wider text-blue-300 flex items-center gap-1.5"><Package className="w-3.5 h-3.5" /> {lineId ? (lines[0]?.name || 'Linha') : 'Envase'}</span>
                 {periodPct !== null && <span className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded ${periodPct >= 100 ? 'bg-emerald-950 text-emerald-300' : periodPct >= 80 ? 'bg-amber-950 text-amber-300' : 'bg-rose-950 text-rose-300'}`}>{periodPct}% da meta</span>}
               </div>
-              <p className="text-2xl font-black font-mono text-white mt-1">{nf(totals['Envase'])} <span className="text-xs text-[#71717a]">un</span></p>
+              <p className="text-2xl font-black font-mono text-white mt-1">{nf(mainQty)} <span className="text-xs text-[#71717a]">un</span></p>
               <p className="text-[10px] text-[#71717a] mt-1">
                 {periodGoal > 0 ? <>Meta do período: <span className="text-[#d4d4d8] font-mono">{nf(periodGoal)} un</span></> : 'Sem meta cadastrada'} · {envaseOpsDone} OP(s) concluída(s)
               </p>
@@ -443,12 +529,36 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
                 </div>
               )}
             </div>
+            {lineId ? (
+              <>
+                {/* Linha: tempo e disponibilidade */}
+                <div className={`${card} p-4`}>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa]">Disponibilidade</span>
+                  <p className={`text-2xl font-black font-mono mt-1 ${lineRow?.disp == null ? 'text-[#71717a]' : lineRow.disp >= 85 ? 'text-emerald-300' : lineRow.disp >= 65 ? 'text-amber-300' : 'text-rose-300'}`}>{lineRow?.disp != null ? `${lineRow.disp}%` : '—'}</p>
+                  <p className="text-[10px] text-[#71717a] mt-1">Ociosidade {lineRow?.disp != null ? `${Math.round((100 - lineRow.disp) * 10) / 10}%` : '—'}</p>
+                </div>
+                <div className={`${card} p-4`}>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa]">Tempo</span>
+                  <p className="text-2xl font-black font-mono text-emerald-300 mt-1">{lineRow?.working ? formatMsToHoursMinutes(lineRow.working) : '—'}</p>
+                  <p className="text-[10px] text-[#71717a] mt-1">trabalhado · ocioso {lineRow?.idle ? formatMsToHoursMinutes(lineRow.idle) : '—'}</p>
+                </div>
+                <div className={`${card} p-4`}>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-[#a1a1aa]">Produtividade</span>
+                  <p className="text-2xl font-black font-mono text-white mt-1">{lineRow?.perHour ? `${nf(lineRow.perHour)}/h` : '—'}</p>
+                  <p className="text-[10px] text-[#71717a] mt-1">un por hora trabalhada</p>
+                </div>
+              </>
+            ) : (
+            <>
             {/* Sleev */}
             <div className={`${card} p-4`}>
               <span className="text-[10px] font-black uppercase tracking-wider text-purple-300 flex items-center gap-1.5"><Layers className="w-3.5 h-3.5" /> Sleev</span>
               <p className="text-2xl font-black font-mono text-white mt-1">{nf(totals['Sleev'])} <span className="text-xs text-[#71717a]">un</span></p>
               <p className="text-[10px] text-[#71717a] mt-1">Acabamento — separado do Envase</p>
             </div>
+            </>
+            )}
+            {!sector && (<>
             {/* Manipulação */}
             <div className={`${card} p-4`}>
               <span className="text-[10px] font-black uppercase tracking-wider text-cyan-300 flex items-center gap-1.5"><FlaskConical className="w-3.5 h-3.5" /> Manipulação</span>
@@ -461,6 +571,7 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
               <p className="text-2xl font-black font-mono text-white mt-1">{nf(totals.osms)} <span className="text-xs text-[#71717a]">OSMs</span></p>
               <p className="text-[10px] text-[#71717a] mt-1">{nf(totals['Pesagem'])} kg pesados</p>
             </div>
+            </>)}
           </div>
 
           {/* Gráfico — um setor por vez, uma unidade só */}
@@ -478,7 +589,7 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
                 </p>
               </div>
               <div className="flex items-center gap-1 flex-wrap">
-                {SECTORS.map(s => (
+                {sectorSet.length > 1 && sectorSet.map(s => (
                   <button key={s} onClick={() => setChartSector(s)} className={chip(chartSector === s)}>{SECTOR_META[s].label}</button>
                 ))}
               </div>
@@ -510,8 +621,8 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
           </div>
 
           {/* Por linha (rápido) */}
-          <div className={`${card} p-4`}>
-            <h3 className="text-xs font-black uppercase tracking-wider text-white mb-3 flex items-center gap-2"><Target className="w-4 h-4 text-blue-400" /> Produção por linha no período</h3>
+          <div className={`${card} p-4 ${sector === 'Pesagem' ? 'hidden' : ''}`}>
+            <h3 className="text-xs font-black uppercase tracking-wider text-white mb-3 flex items-center gap-2"><Target className="w-4 h-4 text-blue-400" /> {sector === 'Manipulação' ? 'Produção por reator no período' : 'Produção por linha no período'}</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
               {lineRows.filter(r => r.qty > 0 || r.working > 0).map(r => (
                 <div key={r.line.id} className="bg-[#16161e] border border-[#24242e] rounded-xl px-3 py-2 flex items-center justify-between gap-2">
@@ -635,7 +746,7 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
                 <p className="text-[10px] text-[#71717a]">Cada pausa dentro do expediente, com horário, motivo e o que o líder escreveu. Fim de expediente fica de fora.</p>
               </div>
               <div className="flex items-center gap-1 flex-wrap">
-                <button onClick={() => setStopLine('envase')} className={chip(stopLine === 'envase')}>Envase</button>
+                {sector !== 'Manipulação' && !lineId && <button onClick={() => setStopLine('envase')} className={chip(stopLine === 'envase')}>Envase</button>}
                 {stopLines.map(l => <button key={l.id} onClick={() => setStopLine(l.id)} className={chip(stopLine === l.id)}>{l.name}</button>)}
                 <button onClick={() => setStopLine('todas')} className={chip(stopLine === 'todas')}>Todas</button>
               </div>
@@ -690,7 +801,7 @@ export function DetailedDashboard({ ops, lines, events, users = [], goals = [], 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <select value={fSector} onChange={e => setFSector(e.target.value as any)} className="h-9 bg-[#0b0b0e] border border-[#25252c] rounded-lg px-2 text-xs text-white">
               <option value="Todos">Todos os setores</option>
-              {SECTORS.map(s => <option key={s} value={s}>{s}</option>)}
+              {sectorSet.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
             <select value={fLine} onChange={e => setFLine(e.target.value)} className="h-9 bg-[#0b0b0e] border border-[#25252c] rounded-lg px-2 text-xs text-white">
               <option value="Todas">Todas as linhas</option>
