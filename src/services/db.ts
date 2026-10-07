@@ -5443,6 +5443,7 @@ export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurr
 // 'paused' durante amostragem/CQ/ajuste e volta a 'in_progress' na drenagem.
 
 export const MANIP_PHASE_REASONS = {
+  resfriamento: 'Resfriamento',
   aguardandoAmostragem: 'Aguardando amostragem',
   aguardandoCq: 'Aguardando CQ',
   emAjuste: 'Em ajuste',
@@ -5453,6 +5454,7 @@ export type ManipPhase =
   | 'aguardando_inicio'
   | 'manipulando'
   | 'pausada'
+  | 'resfriando'
   | 'aguardando_amostragem'
   | 'aguardando_cq'
   | 'em_ajuste'
@@ -5465,6 +5467,7 @@ export const MANIP_PHASE_LABELS: Record<ManipPhase, string> = {
   aguardando_inicio: 'Aguardando início',
   manipulando: 'Manipulando',
   pausada: 'Pausada',
+  resfriando: 'Resfriando',
   aguardando_amostragem: 'Aguardando amostragem',
   aguardando_cq: 'Aguardando CQ',
   em_ajuste: 'Em ajuste',
@@ -5475,6 +5478,7 @@ export const MANIP_PHASE_LABELS: Record<ManipPhase, string> = {
 };
 
 const MANIP_PHASE_BY_REASON: Record<string, ManipPhase> = {
+  [MANIP_PHASE_REASONS.resfriamento]: 'resfriando',
   [MANIP_PHASE_REASONS.aguardandoAmostragem]: 'aguardando_amostragem',
   [MANIP_PHASE_REASONS.aguardandoCq]: 'aguardando_cq',
   [MANIP_PHASE_REASONS.emAjuste]: 'em_ajuste',

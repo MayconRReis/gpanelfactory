@@ -35,6 +35,7 @@ import {
   Timer,
   ListChecks,
   Undo2,
+  Snowflake,
 } from 'lucide-react';
 import {
   getAllOPs,
@@ -206,7 +207,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       // (OP em amostragem/CQ/ajuste/drenagem ainda ocupa o reator — conta como em produção)
       autoCloseStaleWorkSessions(
         allSessions.filter(ws => ws.lineId.startsWith('reator-')),
-        allOps.map(o => (o.setor === 'Manipulação' && o.status === 'paused' && ['aguardando_amostragem', 'aguardando_cq', 'em_ajuste', 'aguardando_drenagem'].includes(getManipPhase(o, allEvents).phase)) ? { ...o, status: 'in_progress' as const } : o),
+        allOps.map(o => (o.setor === 'Manipulação' && o.status === 'paused' && ['resfriando', 'aguardando_amostragem', 'aguardando_cq', 'em_ajuste', 'aguardando_drenagem'].includes(getManipPhase(o, allEvents).phase)) ? { ...o, status: 'in_progress' as const } : o),
         allEvents
       ).then(n => {
         if (n > 0) getWorkSessions(3).then(ws => { if (requestId === fetchRequestIdRef.current) setWorkSessions(ws); });
@@ -482,6 +483,14 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     return h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m} min`;
   };
 
+  // Cronômetro hh:mm:ss (resfriamento)
+  const fmtClock = (fromIso: string | null) => {
+    if (!fromIso) return '00:00:00';
+    const sec = Math.max(0, Math.floor((currentTime.getTime() - new Date(fromIso).getTime()) / 1000));
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(Math.floor(sec / 3600))}:${pad(Math.floor((sec % 3600) / 60))}:${pad(sec % 60)}`;
+  };
+
   // OSMs de Manipulação Concluídas
   const completedManipulacaoOps = useMemo(() => {
     return manipulacaoOps
@@ -743,10 +752,29 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   // ANÁLISE: encerra a manipulação e já manda a Amostra 01 para o CQ
   // (sem pausa e sem modal — o Kg é informado só ao finalizar a drenagem).
-  const handleAnalise = (op: ProductionOrder) => runPhaseAction(
+  // Se a OP estava em RESFRIAMENTO, a Análise encerra o cronômetro do
+  // resfriamento (a OP já está parada — só grava a nova fase).
+  const handleAnalise = (op: ProductionOrder) => {
+    if (getManipPhase(op, events).phase === 'resfriando') {
+      return runPhaseAction(
+        op,
+        () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Resfriamento concluído · Amostra 01 enviada para análise'),
+        `OP ${op.number} enviada para análise — aguardando CQ.`
+      );
+    }
+    return runPhaseAction(
+      op,
+      () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Manipulação finalizada · Amostra 01 enviada para análise') as any,
+      `OP ${op.number} enviada para análise — aguardando CQ.`
+    );
+  };
+
+  // RESFRIAMENTO: encerra a manipulação e inicia o cronômetro do
+  // resfriamento, que só para quando clicarem em Análise.
+  const handleResfriamento = (op: ProductionOrder) => runPhaseAction(
     op,
-    () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Manipulação finalizada · Amostra 01 enviada para análise') as any,
-    `OP ${op.number} enviada para análise — aguardando CQ.`
+    () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.resfriamento, 'Manipulação finalizada · Resfriamento iniciado') as any,
+    `OP ${op.number} em resfriamento.`
   );
 
   const handleCollectSample = (op: ProductionOrder) => {
@@ -878,6 +906,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     aguardando_inicio: { border: 'border-[#27272a]', badge: 'bg-[#1a1a22] text-[#a1a1aa] border-[#2c2c3c]', icon: <Clock className="w-3 h-3" /> },
     manipulando: { border: 'border-cyan-500/50 shadow-lg shadow-cyan-950/20', badge: 'bg-cyan-950/90 text-cyan-300 border-cyan-800/60', icon: <FlaskConical className="w-3 h-3 text-cyan-400 animate-pulse" /> },
     pausada: { border: 'border-amber-500/50 shadow-lg shadow-amber-950/20', badge: 'bg-amber-950/90 text-amber-300 border-amber-800/60', icon: <Pause className="w-3 h-3 text-amber-400" /> },
+    resfriando: { border: 'border-blue-400/50 shadow-lg shadow-blue-950/20', badge: 'bg-blue-950/90 text-blue-200 border-blue-800/60', icon: <Snowflake className="w-3 h-3 text-blue-300 animate-pulse" /> },
     aguardando_amostragem: { border: 'border-violet-500/50 shadow-lg shadow-violet-950/20', badge: 'bg-violet-950/90 text-violet-300 border-violet-800/60', icon: <TestTube className="w-3 h-3 text-violet-400" /> },
     aguardando_cq: { border: 'border-sky-500/50 shadow-lg shadow-sky-950/20', badge: 'bg-sky-950/90 text-sky-300 border-sky-800/60', icon: <ShieldCheck className="w-3 h-3 text-sky-400 animate-pulse" /> },
     em_ajuste: { border: 'border-orange-500/50 shadow-lg shadow-orange-950/20', badge: 'bg-orange-950/90 text-orange-300 border-orange-800/60', icon: <Wrench className="w-3 h-3 text-orange-400" /> },
@@ -1027,10 +1056,32 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
 
           {phase === 'manipulando' && (
-            <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
-              {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
-              <span>Análise</span>
-            </Button>
+            <>
+              <Button onClick={() => handleResfriamento(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-blue-600 hover:bg-blue-500 shadow-blue-950/40 ${btnBase}`} title="Produto precisa resfriar antes da análise">
+                {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Snowflake className="w-4 h-4" />}
+                <span>Resfriamento</span>
+              </Button>
+              <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+                {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+                <span>Análise</span>
+              </Button>
+            </>
+          )}
+
+          {phase === 'resfriando' && (
+            <>
+              <div className="w-full bg-blue-950/40 border border-blue-800/50 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-blue-200 flex items-center gap-1.5">
+                  <Snowflake className="w-3.5 h-3.5 text-blue-300" />
+                  Resfriando
+                </span>
+                <span className="font-mono text-lg font-black text-white tabular-nums" title="Tempo de resfriamento">{fmtClock(info.since)}</span>
+              </div>
+              <Button onClick={() => handleAnalise(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+                {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+                <span>Análise</span>
+              </Button>
+            </>
           )}
 
           {(phase === 'pausada' || phase === 'drenagem_pausada') && (
@@ -1112,14 +1163,20 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     let phaseStart: number | null = null;
     let pauseStart: number | null = null;
     let afterAnalysis = false;
-    let manipMs = 0, cqMs = 0, drainMs = 0, pauseMs = 0;
+    let manipMs = 0, coolMs = 0, cqMs = 0, drainMs = 0, pauseMs = 0;
+    let phaseIsCool = false;
+    const closePhase = (t: number) => {
+      if (phaseStart === null) return;
+      if (phaseIsCool) coolMs += t - phaseStart; else cqMs += t - phaseStart;
+      phaseStart = null;
+    };
     let first: number | null = null, last: number | null = null;
     for (const e of evs) {
       const t = new Date(e.createdAt).getTime();
       if (isNaN(t)) continue;
       if (e.type === 'STARTED' || e.type === 'RESUMED') {
         if (first === null && e.type === 'STARTED') first = t;
-        if (phaseStart !== null) { cqMs += t - phaseStart; phaseStart = null; }
+        closePhase(t);
         if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
         runStart = t;
       } else if (e.type === 'PAUSED') {
@@ -1127,20 +1184,23 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         if (isManipPhaseReason(e.reason)) {
           if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
           afterAnalysis = true;
-          if (phaseStart === null) phaseStart = t;
+          // Cada fase fecha a anterior: o resfriamento conta à parte da análise/CQ
+          closePhase(t);
+          phaseStart = t;
+          phaseIsCool = e.reason === MANIP_PHASE_REASONS.resfriamento;
         } else if (pauseStart === null && phaseStart === null) {
           pauseStart = t;
         }
       } else if (e.type === 'FINISHED') {
         if (runStart !== null) { (afterAnalysis ? (drainMs += t - runStart) : (manipMs += t - runStart)); runStart = null; }
-        if (phaseStart !== null) { cqMs += t - phaseStart; phaseStart = null; }
+        closePhase(t);
         if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
         last = t;
       }
     }
     const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
     const rejected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emAjuste).length;
-    return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, cqMs, drainMs, pauseMs, samples, rejected };
+    return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, coolMs, cqMs, drainMs, pauseMs, samples, rejected };
   };
   const fmtMs = (ms: number) => {
     if (!(ms > 0)) return '—';
@@ -1158,7 +1218,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     evs.forEach(e => {
       if (e.type === 'STARTED') rows.push({ at: e.createdAt, text: 'Manipulação iniciada', tone: 'text-cyan-300' });
       else if (e.type === 'PAUSED') {
-        if (e.reason === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Aguardando amostragem', tone: 'text-violet-300' }); }
+        if (e.reason === MANIP_PHASE_REASONS.resfriamento) { manipFinished = true; rows.push({ at: e.createdAt, text: 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Resfriamento iniciado', tone: 'text-blue-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Aguardando amostragem', tone: 'text-violet-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoCq) { manipFinished = true; rows.push({ at: e.createdAt, text: `${e.observation || 'Amostra enviada para análise'} · aguardando CQ`, tone: 'text-sky-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.emAjuste) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: não aprovado · em ajuste', tone: 'text-orange-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoDrenagem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: aprovado · liberado para drenagem', tone: 'text-emerald-300' }); }
@@ -1899,8 +1960,9 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   {cell('Fim', hm(st.last))}
                   {cell('Duração total', st.first && st.last ? fmtMs(st.last - st.first) : '—')}
                 </div>
-                <div className="grid grid-cols-4 gap-1.5">
+                <div className={`grid gap-1.5 ${st.coolMs > 0 ? 'grid-cols-5' : 'grid-cols-4'}`}>
                   {cell('Manipulação', fmtMs(st.manipMs), 'text-cyan-300')}
+                  {st.coolMs > 0 && cell('Resfriamento', fmtMs(st.coolMs), 'text-blue-300')}
                   {cell('Análise / CQ', fmtMs(st.cqMs), 'text-sky-300')}
                   {cell('Drenagem', fmtMs(st.drainMs), 'text-teal-300')}
                   {cell('Pausas', fmtMs(st.pauseMs), 'text-amber-300')}
