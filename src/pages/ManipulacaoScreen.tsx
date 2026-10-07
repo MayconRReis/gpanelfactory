@@ -36,6 +36,7 @@ import {
   ListChecks,
   Undo2,
   Snowflake,
+  RotateCcw,
 } from 'lucide-react';
 import {
   getAllOPs,
@@ -765,17 +766,25 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // (sem pausa e sem modal — o Kg é informado só ao finalizar a drenagem).
   // Se a OP estava em RESFRIAMENTO, a Análise encerra o cronômetro do
   // resfriamento (a OP já está parada — só grava a nova fase).
+  // Nº da próxima amostra e se a OSM está voltando de um reprocesso
+  const nextSampleInfo = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples + 1;
+    const isRepro = getManipOpEvents(op.id, events).some(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.reprocesso);
+    return { label: `Amostra ${String(n).padStart(2, '0')}`, isRepro };
+  };
+
   const handleAnalise = (op: ProductionOrder) => {
+    const { label, isRepro } = nextSampleInfo(op);
     if (getManipPhase(op, events).phase === 'resfriando') {
       return runPhaseAction(
         op,
-        () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Resfriamento concluído · Amostra 01 enviada para análise'),
+        () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, `Resfriamento concluído · ${label} enviada para análise`),
         `OP ${op.number} enviada para análise — aguardando CQ.`
       );
     }
     return runPhaseAction(
       op,
-      () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, 'Manipulação finalizada · Amostra 01 enviada para análise') as any,
+      () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoCq, `${isRepro ? 'Reprocesso finalizado' : 'Manipulação finalizada'} · ${label} enviada para análise`) as any,
       `OP ${op.number} enviada para análise — aguardando CQ.`
     );
   };
@@ -784,7 +793,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   // resfriamento, que só para quando clicarem em Análise.
   const handleResfriamento = (op: ProductionOrder) => runPhaseAction(
     op,
-    () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.resfriamento, 'Manipulação finalizada · Resfriamento iniciado') as any,
+    () => pauseOP(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.resfriamento, `${nextSampleInfo(op).isRepro ? 'Reprocesso finalizado' : 'Manipulação finalizada'} · Resfriamento iniciado`) as any,
     `OP ${op.number} em resfriamento.`
   );
 
@@ -796,6 +805,19 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   const handleCqApproved = (op: ProductionOrder) => {
     const n = getManipPhase(op, events).samples;
     return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.aguardandoDrenagem, `CQ: aprovado — Amostra ${String(n).padStart(2, '0')} · liberado para drenagem`), 'Aprovado pelo CQ — liberado para drenagem.');
+  };
+
+  // REPROCESSO (substitui o "Reprovado"): o CQ não aprovou a amostra e a
+  // OSM VOLTA A SER MANIPULADA — pode pausar, resfriar de novo e depois
+  // precisa ser levada de novo ao laboratório (Análise).
+  const handleReprocesso = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples;
+    return runPhaseAction(op, async () => {
+      const r: any = await recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.reprocesso, `CQ: reprovado — Amostra ${String(n).padStart(2, '0')} · reprocesso iniciado`);
+      if (r && r.ok === false) return r;
+      await ensureShiftOpen(op.lineId as string);
+      return resumeOP(op.id, op.lineId as string, profile!.uid);
+    }, `OP ${op.number} em reprocesso — voltou para a manipulação.`);
   };
 
   const handleCqRejected = (op: ProductionOrder) => {
@@ -1105,7 +1127,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Snowflake className="w-4 h-4" />}
                 <span>Resfriamento</span>
               </Button>
-              <Button onClick={() => askStep(op, 'Enviar para análise?', 'A manipulação será finalizada e a Amostra 01 vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Enviar para análise?', 'A manipulação será finalizada e a amostra vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
                 <span>Análise</span>
               </Button>
@@ -1121,7 +1143,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 </span>
                 <span className="font-mono text-lg font-black text-white tabular-nums" title="Tempo de resfriamento">{fmtClock(info.since)}</span>
               </div>
-              <Button onClick={() => askStep(op, 'Encerrar resfriamento e enviar para análise?', 'O cronômetro do resfriamento para e a Amostra 01 vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
+              <Button onClick={() => askStep(op, 'Encerrar resfriamento e enviar para análise?', 'O cronômetro do resfriamento para e a amostra vai para o CQ.', 'Enviar para análise', 'bg-sky-600 hover:bg-sky-500', () => handleAnalise(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-sky-600 hover:bg-sky-500 shadow-sky-950/40 ${btnBase}`}>
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
                 <span>Análise</span>
               </Button>
@@ -1144,9 +1166,9 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
           {phase === 'aguardando_cq' && (
             <>
-              <Button onClick={() => askStep(op, 'Confirmar REPROVADO?', 'O CQ não aprovou a amostra. O reator entra em ajuste e depois precisa de nova análise.', 'Reprovado', 'bg-rose-600 hover:bg-rose-500', () => handleCqRejected(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-rose-600 hover:bg-rose-500 shadow-rose-950/40 ${btnBase}`}>
-                <ThumbsDown className="w-4 h-4" />
-                <span>Reprovado</span>
+              <Button onClick={() => askStep(op, 'Confirmar REPROCESSO?', 'O CQ não aprovou a amostra. A OSM volta para a manipulação (pode resfriar de novo) e depois precisa ir de novo para análise.', 'Reprocesso', 'bg-rose-600 hover:bg-rose-500', () => handleReprocesso(op))} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-rose-600 hover:bg-rose-500 shadow-rose-950/40 ${btnBase}`}>
+                <RotateCcw className="w-4 h-4" />
+                <span>Reprocesso</span>
               </Button>
               <Button onClick={() => askStep(op, 'Confirmar APROVADO COM CORREÇÃO?', 'Será necessário fazer a correção e enviar uma nova análise.', 'Aprovado c/ correção', 'bg-lime-600 hover:bg-lime-500', () => handleCqApprovedWithCorrection(op))} disabled={isBusy} title="Aprovado, mas com correção" className={`flex-1 basis-[7.5rem] bg-lime-600 hover:bg-lime-500 shadow-lime-950/40 ${btnBase}`}>
                 <Wrench className="w-4 h-4" />
@@ -1248,11 +1270,16 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         if (runStart !== null) { (afterAnalysis ? (drainMs += t - runStart) : (manipMs += t - runStart)); runStart = null; }
         if (isManipPhaseReason(e.reason)) {
           if (pauseStart !== null) { pauseMs += t - pauseStart; pauseStart = null; }
-          afterAnalysis = true;
           // Cada fase fecha a anterior: o resfriamento conta à parte da análise/CQ
           closePhase(t);
-          phaseStart = t;
-          phaseIsCool = e.reason === MANIP_PHASE_REASONS.resfriamento;
+          if (e.reason === MANIP_PHASE_REASONS.reprocesso) {
+            // volta para a manipulação: o próximo trecho rodando é manipulação
+            afterAnalysis = false;
+          } else {
+            afterAnalysis = true;
+            phaseStart = t;
+            phaseIsCool = e.reason === MANIP_PHASE_REASONS.resfriamento;
+          }
         } else if (pauseStart === null && phaseStart === null) {
           pauseStart = t;
         }
@@ -1264,7 +1291,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       }
     }
     const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
-    const rejected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emAjuste).length;
+    const rejected = evs.filter(e => e.type === 'PAUSED' && (e.reason === MANIP_PHASE_REASONS.emAjuste || e.reason === MANIP_PHASE_REASONS.reprocesso)).length;
     const corrected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emCorrecao).length;
     return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, coolMs, cqMs, drainMs, pauseMs, samples, rejected, corrected };
   };
@@ -1280,11 +1307,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     const conf = conferenciaFor(op);
     if (conf) rows.push({ at: conf.conferidoEm, text: `Pesagem conferida${conf.conferidoNome ? ` por ${conf.conferidoNome}` : ''}`, tone: 'text-emerald-300' });
     let manipFinished = false;
+    let reproPending = false;
     let inDrain = false;
     evs.forEach(e => {
       if (e.type === 'STARTED') rows.push({ at: e.createdAt, text: 'Manipulação iniciada', tone: 'text-cyan-300' });
       else if (e.type === 'PAUSED') {
-        if (e.reason === MANIP_PHASE_REASONS.resfriamento) { manipFinished = true; rows.push({ at: e.createdAt, text: 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Resfriamento iniciado', tone: 'text-blue-300' }); }
+        if (e.reason === MANIP_PHASE_REASONS.reprocesso) { manipFinished = false; inDrain = false; reproPending = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: reprovado · reprocesso', tone: 'text-rose-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.resfriamento) { manipFinished = true; rows.push({ at: e.createdAt, text: 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Resfriamento iniciado', tone: 'text-blue-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Aguardando amostragem', tone: 'text-violet-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoCq) { manipFinished = true; rows.push({ at: e.createdAt, text: `${e.observation || 'Amostra enviada para análise'} · aguardando CQ`, tone: 'text-sky-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.emAjuste) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: não aprovado · em ajuste', tone: 'text-orange-300' }); }
@@ -1292,7 +1321,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoDrenagem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: aprovado · liberado para drenagem', tone: 'text-emerald-300' }); }
         else rows.push({ at: e.createdAt, text: `${inDrain ? 'Drenagem pausada' : 'Pausada'}${e.reason ? ` — ${e.reason}` : ''}${e.observation ? ` · ${e.observation}` : ''}`, tone: 'text-amber-300' });
       } else if (e.type === 'RESUMED') {
-        if (manipFinished && !inDrain) { inDrain = true; rows.push({ at: e.createdAt, text: 'Drenagem iniciada', tone: 'text-teal-300' }); }
+        if (reproPending) { reproPending = false; rows.push({ at: e.createdAt, text: 'Reprocesso iniciado — voltou para a manipulação', tone: 'text-cyan-300' }); }
+        else if (manipFinished && !inDrain) { inDrain = true; rows.push({ at: e.createdAt, text: 'Drenagem iniciada', tone: 'text-teal-300' }); }
         else rows.push({ at: e.createdAt, text: inDrain ? 'Drenagem retomada' : 'Manipulação retomada', tone: 'text-cyan-300' });
       } else if (e.type === 'FINISHED') {
         rows.push({ at: e.createdAt, text: `Drenagem finalizada${e.quantity ? ` · ${Number(e.quantity).toLocaleString('pt-BR')} kg` : ''} — OP concluída`, tone: 'text-emerald-300' });
@@ -1534,7 +1564,11 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   <span className="text-xs">Carregando reatores...</span>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-start">
+                // Telas grandes (xl): Conferência + 3 reatores lado a lado.
+                // Telas menores: Conferência vira uma faixa inteira em cima
+                // (itens em colunas) e os reatores ficam numa grade própria
+                // logo abaixo — sem buracos entre os cards.
+                <div className="grid grid-cols-1 xl:grid-cols-4 gap-4 items-start">
                   {/* LINHA DE CONFERÊNCIA — confere a pesagem antes do reator
                       poder iniciar. Próximas de cada reator em cima; qualquer
                       OSM do cronograma pode ser conferida. Não conta tempo de reator. */}
@@ -1560,13 +1594,17 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                         {conferenciaQueue.proximas.length > 0 && (
                           <div className="space-y-1.5">
                             <p className="text-[10px] text-violet-300 font-semibold uppercase tracking-wide">Próximas dos reatores</p>
-                            {conferenciaQueue.proximas.map(op => renderConferenciaItem(op, true))}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 gap-1.5">
+                              {conferenciaQueue.proximas.map(op => renderConferenciaItem(op, true))}
+                            </div>
                           </div>
                         )}
                         {conferenciaQueue.demais.length > 0 && (
                           <div className="space-y-1.5 pt-1">
                             <p className="text-[10px] text-[#71717a] font-semibold uppercase tracking-wide">Demais no cronograma ({conferenciaQueue.demais.length})</p>
-                            {conferenciaQueue.demais.map(op => renderConferenciaItem(op, false))}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 gap-1.5">
+                              {conferenciaQueue.demais.map(op => renderConferenciaItem(op, false))}
+                            </div>
                           </div>
                         )}
                       </>
@@ -1576,7 +1614,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                         <button type="button" onClick={() => setShowConferidas(v => !v)} className="text-[10px] text-emerald-400 font-semibold uppercase tracking-wide hover:text-emerald-300">
                           {showConferidas ? '▾' : '▸'} Conferidas aguardando início ({conferenciaQueue.conferidas.length})
                         </button>
-                        {showConferidas && conferenciaQueue.conferidas.map(op => {
+                        {showConferidas && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 gap-1.5">{conferenciaQueue.conferidas.map(op => {
                           const c = conferenciaFor(op);
                           const canUndo = !!c && (c.conferidoPor === profile?.uid);
                           return (
@@ -1594,11 +1632,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                               )}
                             </div>
                           );
-                        })}
+                        })}</div>}
                       </div>
                     )}
                   </div>
 
+                  {/* REATORES — grade própria (2 colunas no tablet, 3 a partir de lg) */}
+                  <div className="xl:col-span-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 items-start">
                   {reactorLines.map((reactor) => {
                     const { activeOp, queuedOps } = reactorState[reactor.id] || { activeOp: null, queuedOps: [] };
                     const setupSince = reactorSetupSince[reactor.id];
@@ -1661,6 +1701,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                       </div>
                     );
                   })}
+                  </div>
                 </div>
               )}
 
@@ -2159,7 +2200,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   {cell('Pausas', fmtMs(st.pauseMs), 'text-amber-300')}
                 </div>
                 <div className="flex flex-wrap gap-1.5 text-[10px]">
-                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Amostras: <strong>{st.samples || '—'}</strong>{st.rejected > 0 && <span className="text-orange-300"> · {st.rejected} reprovada(s)</span>}{st.corrected > 0 && <span className="text-lime-300"> · {st.corrected} aprovada(s) c/ correção</span>}</span>
+                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Amostras: <strong>{st.samples || '—'}</strong>{st.rejected > 0 && <span className="text-orange-300"> · {st.rejected} reprocesso(s)</span>}{st.corrected > 0 && <span className="text-lime-300"> · {st.corrected} aprovada(s) c/ correção</span>}</span>
                   <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Turno: <strong>{historyOp.finishedShift || historyOp.scheduledShift || '—'}</strong></span>
                   {historyOp.industria && <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Indústria: <strong>{historyOp.industria}</strong></span>}
                   <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Conferida: <strong>{conf ? `${conf.conferidoNome || '—'} · ${new Date(conf.conferidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : 'não registrada'}</strong></span>

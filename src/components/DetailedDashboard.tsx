@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ChevronLeft, ChevronRight, CalendarDays, LayoutGrid, Gauge, Factory, ListOrdered, RefreshCcw, ClipboardList,
+  ChevronLeft, ChevronRight, CalendarDays, LayoutGrid, Gauge, Factory, ListOrdered, RefreshCcw, ClipboardList, ListChecks,
   Download, Search, Package, FlaskConical, Scale, Layers, Target, Clock,
 } from 'lucide-react';
 import {
@@ -14,6 +14,7 @@ import { getWorkSessions, getChangeovers, isSleeveLineId, toLocalDateStr, getFac
 import { buildProductionLedger, LedgerEntry, LedgerSector } from '../services/productionLedger';
 import { calculateProductionTime, formatMsToHoursMinutes, getScheduledWindow } from '../lib/productionTime';
 import { SetupHistory } from './SetupHistory';
+import { ApontamentosHistorico } from './ApontamentosHistorico';
 import { StaffOccurrencesSummary } from './StaffOccurrences';
 
 /**
@@ -25,7 +26,7 @@ import { StaffOccurrencesSummary } from './StaffOccurrences';
  */
 
 type Period = 'dia' | 'semana' | 'mes' | 'ano';
-type Tab = 'resumo' | 'oee' | 'linhas' | 'ops' | 'setups' | 'ocorrencias';
+type Tab = 'resumo' | 'oee' | 'linhas' | 'ops' | 'apontamentos' | 'setups' | 'ocorrencias';
 
 interface Props {
   ops: ProductionOrder[];
@@ -422,6 +423,7 @@ export function DetailedDashboard({ ops, lines: allLines, events, users = [], go
     { id: 'oee', label: 'OEE', icon: Gauge },
     { id: 'linhas', label: sector === 'Manipulação' ? 'Reatores & Tempo' : 'Linhas & Tempo', icon: Factory },
     { id: 'ops', label: sector === 'Pesagem' ? 'OSMs pesadas' : sector === 'Manipulação' ? 'Produção por OSM' : 'Produção por OP', icon: ListOrdered },
+    { id: 'apontamentos', label: 'Apontamentos', icon: ListChecks },
     { id: 'setups', label: 'Setups', icon: RefreshCcw },
     { id: 'ocorrencias', label: 'Ocorrências', icon: ClipboardList },
   ];
@@ -429,7 +431,7 @@ export function DetailedDashboard({ ops, lines: allLines, events, users = [], go
   const TABS = ALL_TABS.filter(t => {
     if (!sector) return t.id !== 'oee' || !!oeeSlot;
     if (t.id === 'oee' || t.id === 'ocorrencias') return false;
-    if (t.id === 'setups') return sector === 'Envase';
+    if (t.id === 'setups' || t.id === 'apontamentos') return sector === 'Envase';
     if (t.id === 'linhas') return sector !== 'Pesagem';
     return true;
   });
@@ -849,6 +851,19 @@ export function DetailedDashboard({ ops, lines: allLines, events, users = [], go
       )}
 
       {/* ===================== SETUPS ===================== */}
+      {/* ===================== APONTAMENTOS ===================== */}
+      {tab === 'apontamentos' && (
+        <ApontamentosHistorico
+          ops={ops}
+          events={events}
+          lines={lines.filter(l => !/reator|pesagem|manipula/i.test(l.id) && !/reator/i.test(l.name))}
+          users={users}
+          rangeStart={rangeStart}
+          rangeEnd={rangeEnd}
+          lineId={lineId}
+        />
+      )}
+
       {tab === 'setups' && (
         <SetupHistory changeovers={changeovers} ops={ops} lines={lines} users={users}
           rangeStart={rangeStart} rangeEnd={rangeEnd} periodLabel={label} nowMs={nowTick} />
