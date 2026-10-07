@@ -66,6 +66,7 @@ import {
   deleteManipConferencia,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
+import { ManipulacaoHistorico } from '../components/ManipulacaoHistorico';
 import { DetailedDashboard } from '../components/DetailedDashboard';
 import { getIndustriaBadgeClass } from '../lib/industria';
 import { getAutoShiftNow, REACTOR_MEAL_BREAKS, REACTOR_WORK_SCHEDULE } from '../lib/productionTime';
@@ -100,6 +101,7 @@ const MANIPULACAO_PAUSE_REASONS: PauseReason[] = [
   { id: 'mp-3', name: 'Esquentando Reator' },
   // Almoço/café: até 1h por pausa não conta como ociosidade
   { id: 'mp-4', name: 'Intervalo' },
+  { id: 'mp-5', name: 'Outro' },
 ];
 
 export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps = {}) {
@@ -112,7 +114,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   const [currentTime, setCurrentTime] = useState(new Date());
 
   // Sub-abas de visualização: Operação em Tempo Real vs Dashboard de Produção (Diária & Semanal)
-  const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao'>('operacao');
+  const [activeViewTab, setActiveViewTab] = useState<'dashboard' | 'operacao' | 'historico'>('operacao');
 
   // Modal de Pausa
   const [pausingOp, setPausingOp] = useState<ProductionOrder | null>(null);
@@ -207,7 +209,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
       // (OP em amostragem/CQ/ajuste/drenagem ainda ocupa o reator — conta como em produção)
       autoCloseStaleWorkSessions(
         allSessions.filter(ws => ws.lineId.startsWith('reator-')),
-        allOps.map(o => (o.setor === 'Manipulação' && o.status === 'paused' && ['resfriando', 'aguardando_amostragem', 'aguardando_cq', 'em_ajuste', 'aguardando_drenagem'].includes(getManipPhase(o, allEvents).phase)) ? { ...o, status: 'in_progress' as const } : o),
+        allOps.map(o => (o.setor === 'Manipulação' && o.status === 'paused' && ['resfriando', 'aguardando_amostragem', 'aguardando_cq', 'em_ajuste', 'em_correcao', 'aguardando_drenagem'].includes(getManipPhase(o, allEvents).phase)) ? { ...o, status: 'in_progress' as const } : o),
         allEvents
       ).then(n => {
         if (n > 0) getWorkSessions(3).then(ws => { if (requestId === fetchRequestIdRef.current) setWorkSessions(ws); });
@@ -691,6 +693,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
   const handleConfirmPause = async () => {
     if (!profile || !pausingOp || !pausingOp.lineId || !pauseReason) return;
+    if (pauseReason === 'Outro' && !pauseObs.trim()) { showToast('Descreva o motivo da pausa.', 'error'); return; }
     setIsPauseSubmitting(true);
     try {
       await pauseOP(pausingOp.id, pausingOp.lineId, profile.uid, pauseReason, pauseObs);
@@ -790,6 +793,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
   const handleCqRejected = (op: ProductionOrder) => {
     const n = getManipPhase(op, events).samples;
     return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.emAjuste, `CQ: não aprovado — Amostra ${String(n).padStart(2, '0')} · ajuste iniciado`), 'Não aprovado — reator em ajuste.');
+  };
+
+  // APROVADO COM CORREÇÃO: o CQ aprovou, mas pediu uma correção. Depois da
+  // correção é OBRIGATÓRIO mandar uma nova amostra para análise.
+  const handleCqApprovedWithCorrection = (op: ProductionOrder) => {
+    const n = getManipPhase(op, events).samples;
+    return runPhaseAction(op, () => recordManipulacaoPhase(op.id, op.lineId as string, profile!.uid, MANIP_PHASE_REASONS.emCorrecao, `CQ: aprovado com correção — Amostra ${String(n).padStart(2, '0')} · correção iniciada`), 'Aprovado com correção — faça a correção e envie nova análise.');
   };
 
   const handleStartDrain = (op: ProductionOrder) => runPhaseAction(op, async () => {
@@ -910,6 +920,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     aguardando_amostragem: { border: 'border-violet-500/50 shadow-lg shadow-violet-950/20', badge: 'bg-violet-950/90 text-violet-300 border-violet-800/60', icon: <TestTube className="w-3 h-3 text-violet-400" /> },
     aguardando_cq: { border: 'border-sky-500/50 shadow-lg shadow-sky-950/20', badge: 'bg-sky-950/90 text-sky-300 border-sky-800/60', icon: <ShieldCheck className="w-3 h-3 text-sky-400 animate-pulse" /> },
     em_ajuste: { border: 'border-orange-500/50 shadow-lg shadow-orange-950/20', badge: 'bg-orange-950/90 text-orange-300 border-orange-800/60', icon: <Wrench className="w-3 h-3 text-orange-400" /> },
+    em_correcao: { border: 'border-lime-500/50 shadow-lg shadow-lime-950/20', badge: 'bg-lime-950/90 text-lime-300 border-lime-800/60', icon: <Wrench className="w-3 h-3 text-lime-400" /> },
     aguardando_drenagem: { border: 'border-emerald-500/50 shadow-lg shadow-emerald-950/20', badge: 'bg-emerald-950/90 text-emerald-300 border-emerald-800/60', icon: <ThumbsUp className="w-3 h-3 text-emerald-400" /> },
     drenando: { border: 'border-teal-500/50 shadow-lg shadow-teal-950/20', badge: 'bg-teal-950/90 text-teal-300 border-teal-800/60', icon: <Droplets className="w-3 h-3 text-teal-400 animate-pulse" /> },
     drenagem_pausada: { border: 'border-amber-500/50 shadow-lg shadow-amber-950/20', badge: 'bg-amber-950/90 text-amber-300 border-amber-800/60', icon: <Pause className="w-3 h-3 text-amber-400" /> },
@@ -1012,6 +1023,17 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           )}
         </div>
 
+        {(phase === 'pausada' || phase === 'drenagem_pausada') && (() => {
+          const lp = [...opEvents].reverse().find(e => e.type === 'PAUSED');
+          if (!lp) return null;
+          return (
+            <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl px-3 py-2">
+              <div className="text-[12px] font-semibold text-amber-200">Motivo: {lp.reason || '—'} · desde {new Date(lp.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div>
+              {lp.observation && <div className="text-[11px] text-amber-100/70 mt-0.5">{lp.observation}</div>}
+            </div>
+          );
+        })()}
+
         {/* Conferência / Kg manipulado / amostras */}
         <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
           {conf ? (
@@ -1057,6 +1079,10 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
           {phase === 'manipulando' && (
             <>
+              <Button onClick={() => handleOpenPauseModal(op)} disabled={isBusy} title="Pausar (manutenção, laboratório...)" className={`px-3 bg-amber-600 hover:bg-amber-500 shadow-amber-950/40 ${btnBase}`}>
+                <Pause className="w-4 h-4" />
+                <span>Pausar</span>
+              </Button>
               <Button onClick={() => handleResfriamento(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-blue-600 hover:bg-blue-500 shadow-blue-950/40 ${btnBase}`} title="Produto precisa resfriar antes da análise">
                 {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Snowflake className="w-4 h-4" />}
                 <span>Resfriamento</span>
@@ -1104,9 +1130,23 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 <ThumbsDown className="w-4 h-4" />
                 <span>Reprovado</span>
               </Button>
+              <Button onClick={() => handleCqApprovedWithCorrection(op)} disabled={isBusy} title="Aprovado, mas com correção" className={`flex-1 basis-[7.5rem] bg-lime-600 hover:bg-lime-500 shadow-lime-950/40 ${btnBase}`}>
+                <Wrench className="w-4 h-4" />
+                <span>Aprovado c/ correção</span>
+              </Button>
               <Button onClick={() => handleCqApproved(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-emerald-600 hover:bg-emerald-500 shadow-emerald-950/40 ${btnBase}`}>
                 <ThumbsUp className="w-4 h-4" />
                 <span>Aprovado</span>
+              </Button>
+            </>
+          )}
+
+          {phase === 'em_correcao' && (
+            <>
+              <p className="w-full text-[11px] text-lime-200/80">Faça a correção e envie uma nova amostra para análise.</p>
+              <Button onClick={() => handleCollectSample(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-violet-600 hover:bg-violet-500 shadow-violet-950/40 ${btnBase}`}>
+                {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+                <span>Nova análise</span>
               </Button>
             </>
           )}
@@ -1115,6 +1155,13 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             <Button onClick={() => handleStartDrain(op)} disabled={isBusy} className={`flex-1 basis-[7.5rem] bg-teal-600 hover:bg-teal-500 shadow-teal-950/40 ${btnBase}`}>
               {isBusy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Droplets className="w-4 h-4" />}
               <span>Iniciar drenagem</span>
+            </Button>
+          )}
+
+          {phase === 'drenando' && (
+            <Button onClick={() => handleOpenPauseModal(op)} disabled={isBusy} title="Pausar a drenagem" className={`px-3 bg-amber-600 hover:bg-amber-500 shadow-amber-950/40 ${btnBase}`}>
+              <Pause className="w-4 h-4" />
+              <span>Pausar</span>
             </Button>
           )}
 
@@ -1200,7 +1247,8 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     }
     const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
     const rejected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emAjuste).length;
-    return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, coolMs, cqMs, drainMs, pauseMs, samples, rejected };
+    const corrected = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.emCorrecao).length;
+    return { first, last: last ?? (op.completedAt ? new Date(op.completedAt).getTime() : null), manipMs, coolMs, cqMs, drainMs, pauseMs, samples, rejected, corrected };
   };
   const fmtMs = (ms: number) => {
     if (!(ms > 0)) return '—';
@@ -1222,6 +1270,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'Manipulação finalizada', tone: 'text-white' }); rows.push({ at: e.createdAt, text: 'Aguardando amostragem', tone: 'text-violet-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoCq) { manipFinished = true; rows.push({ at: e.createdAt, text: `${e.observation || 'Amostra enviada para análise'} · aguardando CQ`, tone: 'text-sky-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.emAjuste) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: não aprovado · em ajuste', tone: 'text-orange-300' }); }
+        else if (e.reason === MANIP_PHASE_REASONS.emCorrecao) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: aprovado com correção', tone: 'text-lime-300' }); }
         else if (e.reason === MANIP_PHASE_REASONS.aguardandoDrenagem) { manipFinished = true; rows.push({ at: e.createdAt, text: e.observation || 'CQ: aprovado · liberado para drenagem', tone: 'text-emerald-300' }); }
         else rows.push({ at: e.createdAt, text: `${inDrain ? 'Drenagem pausada' : 'Pausada'}${e.reason ? ` — ${e.reason}` : ''}${e.observation ? ` · ${e.observation}` : ''}`, tone: 'text-amber-300' });
       } else if (e.type === 'RESUMED') {
@@ -1382,13 +1431,28 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                 detalhado
               </span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveViewTab('historico')}
+              className={`w-full sm:w-auto justify-center px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer ${
+                activeViewTab === 'historico'
+                  ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-950/50'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#1a1a20]'
+              }`}
+            >
+              <History className="w-4 h-4 shrink-0" />
+              <span>HISTÓRICO</span>
+            </button>
           </div>
         </div>
       </div>
 
       {/* CORPO PRINCIPAL */}
       <main className={`flex-1 w-full mx-auto flex flex-col gap-8 ${embedded ? 'p-0 max-w-full' : 'max-w-6xl p-4 sm:p-6 lg:p-8'}`}>
-        {activeViewTab === 'dashboard' ? (
+        {activeViewTab === 'historico' ? (
+          <ManipulacaoHistorico ops={ops} events={events} reactors={reactorLines} conferencias={conferencias} />
+        ) : activeViewTab === 'dashboard' ? (
           // Dashboard da Manipulação — mesmo modelo do Dashboard Detalhado, só com os reatores
           <DetailedDashboard ops={ops} lines={lines} events={events} sector="Manipulação" />
         ) : (
@@ -1771,7 +1835,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
 
             <div className="space-y-2">
               <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Observação (Opcional)
+                {pauseReason === 'Outro' ? 'Descrição *' : 'Observação (Opcional)'}
               </Label>
               <Input
                 value={pauseObs}
@@ -1795,7 +1859,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
             <Button
               type="button"
               onClick={handleConfirmPause}
-              disabled={isPauseSubmitting || !pauseReason}
+              disabled={isPauseSubmitting || !pauseReason || (pauseReason === 'Outro' && !pauseObs.trim())}
               className="h-10 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs shadow-lg shadow-amber-950/50 flex items-center justify-center gap-1.5 w-full sm:w-auto"
             >
               {isPauseSubmitting ? (
@@ -1968,7 +2032,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
                   {cell('Pausas', fmtMs(st.pauseMs), 'text-amber-300')}
                 </div>
                 <div className="flex flex-wrap gap-1.5 text-[10px]">
-                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Amostras: <strong>{st.samples || '—'}</strong>{st.rejected > 0 && <span className="text-orange-300"> · {st.rejected} reprovada(s)</span>}</span>
+                  <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Amostras: <strong>{st.samples || '—'}</strong>{st.rejected > 0 && <span className="text-orange-300"> · {st.rejected} reprovada(s)</span>}{st.corrected > 0 && <span className="text-lime-300"> · {st.corrected} aprovada(s) c/ correção</span>}</span>
                   <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Turno: <strong>{historyOp.finishedShift || historyOp.scheduledShift || '—'}</strong></span>
                   {historyOp.industria && <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Indústria: <strong>{historyOp.industria}</strong></span>}
                   <span className="px-2 py-0.5 rounded-md bg-[#121215] border border-[#27272a] text-[#d4d4d8]">Conferida: <strong>{conf ? `${conf.conferidoNome || '—'} · ${new Date(conf.conferidoEm).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : 'não registrada'}</strong></span>

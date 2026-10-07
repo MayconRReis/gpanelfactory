@@ -5447,6 +5447,7 @@ export const MANIP_PHASE_REASONS = {
   aguardandoAmostragem: 'Aguardando amostragem',
   aguardandoCq: 'Aguardando CQ',
   emAjuste: 'Em ajuste',
+  emCorrecao: 'Em correção',
   aguardandoDrenagem: 'Aguardando drenagem',
 } as const;
 
@@ -5458,6 +5459,7 @@ export type ManipPhase =
   | 'aguardando_amostragem'
   | 'aguardando_cq'
   | 'em_ajuste'
+  | 'em_correcao'
   | 'aguardando_drenagem'
   | 'drenando'
   | 'drenagem_pausada'
@@ -5471,6 +5473,7 @@ export const MANIP_PHASE_LABELS: Record<ManipPhase, string> = {
   aguardando_amostragem: 'Aguardando amostragem',
   aguardando_cq: 'Aguardando CQ',
   em_ajuste: 'Em ajuste',
+  em_correcao: 'Aprovado c/ correção',
   aguardando_drenagem: 'Liberado p/ drenagem',
   drenando: 'Drenando',
   drenagem_pausada: 'Drenagem pausada',
@@ -5482,6 +5485,7 @@ const MANIP_PHASE_BY_REASON: Record<string, ManipPhase> = {
   [MANIP_PHASE_REASONS.aguardandoAmostragem]: 'aguardando_amostragem',
   [MANIP_PHASE_REASONS.aguardandoCq]: 'aguardando_cq',
   [MANIP_PHASE_REASONS.emAjuste]: 'em_ajuste',
+  [MANIP_PHASE_REASONS.emCorrecao]: 'em_correcao',
   [MANIP_PHASE_REASONS.aguardandoDrenagem]: 'aguardando_drenagem',
 };
 
