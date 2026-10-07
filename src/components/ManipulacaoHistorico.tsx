@@ -14,6 +14,7 @@ import {
   Droplets,
   ClipboardCheck,
   FlaskConical,
+  RotateCcw,
 } from 'lucide-react';
 import { ProductionEvent, ProductionLine, ProductionOrder, UserProfile } from '../types';
 import { getAllUsers, MANIP_PHASE_REASONS, ManipConferencia } from '../services/db';
@@ -24,7 +25,7 @@ import { getAllUsers, MANIP_PHASE_REASONS, ManipConferencia } from '../services/
  * conclusão. Filtros por período, reator, OSM e tipo de ação.
  */
 
-type Kind = 'conferencia' | 'inicio' | 'resfriamento' | 'analise' | 'reprovado' | 'correcao' | 'aprovado'
+type Kind = 'conferencia' | 'inicio' | 'resfriamento' | 'analise' | 'reprovado' | 'reprocesso' | 'correcao' | 'aprovado'
   | 'manip_fim' | 'pausa' | 'retomada' | 'drenagem' | 'conclusao' | 'cancelado';
 
 const KIND_META: Record<Kind, { label: string; badge: string; Icon: any }> = {
@@ -33,6 +34,7 @@ const KIND_META: Record<Kind, { label: string; badge: string; Icon: any }> = {
   manip_fim: { label: 'Manipulação finalizada', badge: 'bg-zinc-900 text-zinc-200 border-zinc-700', Icon: FlaskConical },
   resfriamento: { label: 'Resfriamento', badge: 'bg-blue-950/70 text-blue-200 border-blue-800/50', Icon: Snowflake },
   analise: { label: 'Análise', badge: 'bg-sky-950/70 text-sky-300 border-sky-800/50', Icon: TestTube },
+  reprocesso: { label: 'Reprocesso', badge: 'bg-rose-950/70 text-rose-300 border-rose-800/50', Icon: RotateCcw },
   reprovado: { label: 'CQ reprovado', badge: 'bg-rose-950/70 text-rose-300 border-rose-800/50', Icon: ThumbsDown },
   correcao: { label: 'CQ aprovado c/ correção', badge: 'bg-lime-950/70 text-lime-300 border-lime-800/50', Icon: Wrench },
   aprovado: { label: 'CQ aprovado', badge: 'bg-emerald-950/70 text-emerald-300 border-emerald-800/50', Icon: ThumbsUp },
@@ -119,6 +121,7 @@ export function ManipulacaoHistorico({ ops, events, reactors, conferencias }: Pr
       const list = (byOp.get(String(op.id)) || []).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
       let manipFinished = false;
       let inDrain = false;
+      let reproPending = false;
       for (const e of list) {
         const who = userName(e.leaderId, e.leaderName);
         const reactorId = e.lineId || op.lineId || null;
@@ -128,7 +131,8 @@ export function ManipulacaoHistorico({ ops, events, reactors, conferencias }: Pr
         else if (e.type === 'CANCELLED') { manipFinished = false; inDrain = false; push('cancelado', 'Início cancelado (iniciada por engano)', e.observation); }
         else if (e.type === 'PAUSED') {
           const r = e.reason || '';
-          if (r === MANIP_PHASE_REASONS.resfriamento) { manipFinished = true; push('resfriamento', 'Manipulação finalizada · resfriamento iniciado'); }
+          if (r === MANIP_PHASE_REASONS.reprocesso) { manipFinished = false; inDrain = false; reproPending = true; push('reprocesso', e.observation || 'CQ: reprovado · reprocesso iniciado'); }
+          else if (r === MANIP_PHASE_REASONS.resfriamento) { manipFinished = true; push('resfriamento', 'Manipulação finalizada · resfriamento iniciado'); }
           else if (r === MANIP_PHASE_REASONS.aguardandoCq) { const first = !manipFinished; manipFinished = true; push('analise', e.observation || 'Amostra enviada para análise', first ? 'Manipulação finalizada' : undefined); }
           else if (r === MANIP_PHASE_REASONS.emAjuste) { manipFinished = true; push('reprovado', e.observation || 'CQ: não aprovado · em ajuste'); }
           else if (r === MANIP_PHASE_REASONS.emCorrecao) { manipFinished = true; push('correcao', e.observation || 'CQ: aprovado com correção'); }
@@ -136,7 +140,8 @@ export function ManipulacaoHistorico({ ops, events, reactors, conferencias }: Pr
           else if (r === MANIP_PHASE_REASONS.aguardandoAmostragem) { manipFinished = true; push('manip_fim', e.observation || 'Manipulação finalizada'); }
           else if (!phaseReasons.has(r)) push('pausa', `${inDrain ? 'Drenagem pausada' : 'Manipulação pausada'}${r ? ` — ${r}` : ''}`, e.observation);
         } else if (e.type === 'RESUMED') {
-          if (manipFinished && !inDrain) { inDrain = true; push('drenagem', 'Drenagem iniciada'); }
+          if (reproPending) { reproPending = false; push('retomada', 'Reprocesso iniciado — voltou para a manipulação'); }
+          else if (manipFinished && !inDrain) { inDrain = true; push('drenagem', 'Drenagem iniciada'); }
           else push('retomada', inDrain ? 'Drenagem retomada' : 'Manipulação retomada');
         } else if (e.type === 'FINISHED') {
           push('conclusao', `Drenagem finalizada${e.quantity ? ` · ${Number(e.quantity).toLocaleString('pt-BR')} kg` : ''} — OSM concluída`, e.observation);
@@ -171,7 +176,7 @@ export function ManipulacaoHistorico({ ops, events, reactors, conferencias }: Pr
         const num = r.opNumber.toLowerCase().replace(/[\s/]/g, '-');
         if (!num.includes(q) && !r.product.toLowerCase().includes(search.trim().toLowerCase()) && !r.who.toLowerCase().includes(search.trim().toLowerCase())) return false;
       }
-      if (kindFilter === 'cq' && !['analise', 'reprovado', 'correcao', 'aprovado'].includes(r.kind)) return false;
+      if (kindFilter === 'cq' && !['analise', 'reprovado', 'reprocesso', 'correcao', 'aprovado'].includes(r.kind)) return false;
       if (kindFilter === 'pausas' && !['pausa', 'retomada'].includes(r.kind)) return false;
       if (!['todas', 'cq', 'pausas'].includes(kindFilter) && r.kind !== kindFilter) return false;
       return true;

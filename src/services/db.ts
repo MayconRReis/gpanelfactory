@@ -5448,6 +5448,7 @@ export const MANIP_PHASE_REASONS = {
   aguardandoCq: 'Aguardando CQ',
   emAjuste: 'Em ajuste',
   emCorrecao: 'Em correção',
+  reprocesso: 'Reprocesso',
   aguardandoDrenagem: 'Aguardando drenagem',
 } as const;
 
@@ -5486,6 +5487,9 @@ const MANIP_PHASE_BY_REASON: Record<string, ManipPhase> = {
   [MANIP_PHASE_REASONS.aguardandoCq]: 'aguardando_cq',
   [MANIP_PHASE_REASONS.emAjuste]: 'em_ajuste',
   [MANIP_PHASE_REASONS.emCorrecao]: 'em_correcao',
+  // Reprocesso: a OSM volta a ser manipulada; se o "retomar" não chegou a
+  // gravar, ela aparece como pausada (botão Retomar manipulação).
+  [MANIP_PHASE_REASONS.reprocesso]: 'pausada',
   [MANIP_PHASE_REASONS.aguardandoDrenagem]: 'aguardando_drenagem',
 };
 
@@ -5516,9 +5520,13 @@ export interface ManipPhaseInfo {
 export function getManipPhase(op: ProductionOrder, events: ProductionEvent[]): ManipPhaseInfo {
   const evs = getManipOpEvents(op.id, events);
   const samples = evs.filter(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.aguardandoCq).length;
-  // Manipulação encerrada = já existe qualquer evento de fase (Análise/CQ/ajuste)
-  const manipFinished = evs.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason));
-  const manipKg = manipFinished && manipFinished.quantity != null ? Number(manipFinished.quantity) : (Number(op.producedQuantity) || null);
+  // Manipulação encerrada = já existe evento de fase (Análise/CQ/ajuste)
+  // DEPOIS do último reprocesso (o reprocesso devolve a OSM à manipulação).
+  const lastReproIdx = evs.map(e => e.type === 'PAUSED' && e.reason === MANIP_PHASE_REASONS.reprocesso).lastIndexOf(true);
+  const evsSinceRepro = lastReproIdx >= 0 ? evs.slice(lastReproIdx + 1) : evs;
+  const manipFinished = evsSinceRepro.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason));
+  const firstManipEnd = evs.find(e => e.type === 'PAUSED' && isManipPhaseReason(e.reason) && e.reason !== MANIP_PHASE_REASONS.reprocesso);
+  const manipKg = firstManipEnd && firstManipEnd.quantity != null ? Number(firstManipEnd.quantity) : (Number(op.producedQuantity) || null);
   const last = evs.length > 0 ? evs[evs.length - 1] : null;
   const since = last?.createdAt || null;
 
@@ -5761,4 +5769,85 @@ export const convertPartialToTotal = async (
   }
   markOpAsSleeve(op.id, false);
   return { ok: true };
+};
+
+// ---------------- EXCLUSÃO DE APONTAMENTO (coordenação / ADM) ----------------
+/**
+ * Apaga um apontamento de quantidade lançado errado. Além de apagar o evento
+ * (nas duas tabelas de eventos), desconta a quantidade:
+ *  - do total da OP (produced_quantity);
+ *  - das pausas/conclusão registradas DEPOIS dele (elas guardam o total
+ *    acumulado da OP — sem isso o dashboard "devolveria" a quantidade).
+ * Guarda uma cópia em apontamentos_excluidos (quem lançou, quem apagou,
+ * quando e por quê). Requer sql/excluir_apontamentos.sql.
+ */
+export const deleteQuantityReport = async (
+  ev: ProductionEvent,
+  op: ProductionOrder | undefined,
+  actor: { uid: string; name: string },
+  motivo: string,
+  reportedByName?: string
+): Promise<{ ok: true } | { ok: false; error: string }> => {
+  if (!ev || ev.type !== 'QUANTITY_REPORTED' || !ev.opId) return { ok: false, error: 'Só apontamentos de quantidade podem ser apagados.' };
+  const qty = Number(ev.quantity) || 0;
+  try {
+    // 1) Cópia de auditoria
+    const audit = await supabase.from('apontamentos_excluidos').insert({
+      event_id: String(ev.id),
+      op_id: String(ev.opId),
+      op_number: op?.number || ev.opNumber || '',
+      product: op?.product || '',
+      line_id: ev.lineId || op?.lineId || null,
+      quantity: qty,
+      reported_at: ev.createdAt,
+      reported_by: ev.leaderId || null,
+      reported_by_name: reportedByName || '',
+      deleted_by: actor.uid,
+      deleted_by_name: actor.name,
+      motivo,
+    });
+    if (audit.error) {
+      return { ok: false, error: /apontamentos_excluidos|does not exist|relation/i.test(audit.error.message)
+        ? 'Rode o sql/excluir_apontamentos.sql no Supabase antes de apagar apontamentos.'
+        : audit.error.message };
+    }
+
+    // 2) Apaga o evento nas duas tabelas (a cópia de production_events tem
+    // outro id, mas o mesmo op/tipo/instante)
+    const delA = await supabase.from('events').delete()
+      .eq('op_id', ev.opId).eq('type', 'QUANTITY_REPORTED').eq('created_at', ev.createdAt).select('id');
+    const delB = await supabase.from('production_events').delete()
+      .eq('op_id', ev.opId).eq('type', 'QUANTITY_REPORTED').eq('created_at', ev.createdAt).select('id');
+    const deleted = (delA.data?.length || 0) + (delB.data?.length || 0);
+    if (deleted === 0) {
+      return { ok: false, error: 'O banco não apagou o apontamento (sem permissão). Rode o sql/excluir_apontamentos.sql no Supabase.' };
+    }
+
+    if (qty > 0) {
+      // 3) Pausas/conclusão depois dele (até a próxima conclusão) guardam o acumulado
+      const fixLater = async (table: 'events' | 'production_events', qCol: 'quantity_reported' | 'quantity') => {
+        const { data } = await supabase.from(table)
+          .select(`id, type, created_at, ${qCol}`)
+          .eq('op_id', ev.opId).gt('created_at', ev.createdAt).in('type', ['PAUSED', 'FINISHED'])
+          .order('created_at', { ascending: true });
+        for (const row of (data || []) as any[]) {
+          const q = row[qCol];
+          if (q !== null && q !== undefined && !isNaN(Number(q))) {
+            await supabase.from(table).update({ [qCol]: Math.max(0, Number(q) - qty) }).eq('id', row.id);
+          }
+          if (row.type === 'FINISHED') break;
+        }
+      };
+      await fixLater('events', 'quantity_reported');
+      await fixLater('production_events', 'quantity');
+
+      // 4) Total da OP
+      if (op) {
+        await updateOP(String(op.id), { producedQuantity: Math.max(0, (Number(op.producedQuantity) || 0) - qty) });
+      }
+    }
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'Erro ao apagar o apontamento.' };
+  }
 };

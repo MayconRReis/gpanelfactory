@@ -759,7 +759,13 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               {/* Rendimento + Disponibilidade */}
               <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
                 <div className="text-[9.5px] font-black uppercase tracking-wider text-[#475569]">Rendimento do Envase</div>
-                <div className="text-[22px] font-black leading-tight" style={{ color: tone(indicators.rendDia, 95, 85) }}>{pctf(indicators.rendDia)}</div>
+                {indicators.rendDia !== null ? (
+                  <div className="text-[22px] font-black leading-tight" style={{ color: tone(indicators.rendDia, 95, 85) }}>{pctf(indicators.rendDia)}</div>
+                ) : (
+                  // Rendimento só existe quando a OP é CONCLUÍDA (produzido ÷ esperado);
+                  // num dia em que nenhuma OP de Envase fechou, não há o que calcular.
+                  <div className="text-[12px] font-bold leading-tight text-[#64748b] py-1.5">Nenhuma OP de Envase concluída no dia</div>
+                )}
                 <div className="text-[10px] text-[#475569]">Mês: <strong>{pctf(indicators.rendMes)}</strong></div>
                 <div className="text-[9.5px] text-[#64748b] mt-0.5">produzido ÷ esperado das OPs concluídas</div>
               </div>
