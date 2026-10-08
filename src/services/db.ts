@@ -301,7 +301,52 @@ export function toLocalDateStr(value?: string | null): string {
  * dia em que foi criada. Sempre no fuso local.
  */
 export function getOpReferenceDateStr(op: ProductionOrder): string {
+  const manipStart = getManipulacaoStartCredit(op);
+  if (manipStart) return toLocalDateStr(manipStart.at);
   return toLocalDateStr(op.completedAt || op.scheduledDate || op.createdAt);
+}
+
+// ---------------- MANIPULAÇÃO: CRÉDITO NO INÍCIO ----------------
+// Regra da Manipulação: a OSM finalizada conta no dia em que foi INICIADA no
+// reator e para o manipulador que a iniciou — não no dia/quem finalizou.
+// O início é o primeiro STARTED depois do último cancelamento de início.
+// Sem esse evento (histórico importado), vale a data/quem da conclusão.
+export const isManipulacaoOp = (op: ProductionOrder) =>
+  op.setor === 'Manipulação' || (op.setor !== 'Pesagem' && !!op.lineId && /reator/i.test(op.lineId));
+
+let manipStartCache: { events: ProductionEvent[]; map: Map<string, { at: string; by: string | null }> } | null = null;
+
+function getManipStartMap(): Map<string, { at: string; by: string | null }> {
+  const events = trainingModeActive ? trainingEvents : inMemoryEvents;
+  if (manipStartCache && manipStartCache.events === events) return manipStartCache.map;
+  const lastCancel = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== 'CANCELLED' || !e.opId) continue;
+    const t = new Date(e.createdAt).getTime();
+    if (t > (lastCancel.get(String(e.opId)) ?? -Infinity)) lastCancel.set(String(e.opId), t);
+  }
+  const map = new Map<string, { at: string; by: string | null }>();
+  for (const e of events) {
+    if (e.type !== 'STARTED' || !e.opId) continue;
+    const id = String(e.opId);
+    const t = new Date(e.createdAt).getTime();
+    if (isNaN(t) || t <= (lastCancel.get(id) ?? -Infinity)) continue;
+    const cur = map.get(id);
+    if (!cur || t < new Date(cur.at).getTime()) map.set(id, { at: e.createdAt, by: e.leaderId || null });
+  }
+  manipStartCache = { events, map };
+  return map;
+}
+
+/** Início (quando e quem) que credita uma OSM de Manipulação FINALIZADA; null para as demais. */
+export function getManipulacaoStartCredit(op: ProductionOrder): { at: string; by: string | null } | null {
+  if (op.status !== 'completed' || op.isPartialRecord || !isManipulacaoOp(op)) return null;
+  return getManipStartMap().get(String(op.id)) || null;
+}
+
+/** Quem leva o crédito da OP: na Manipulação finalizada, quem iniciou; senão, o líder da OP. */
+export function getOpCreditedUserId(op: ProductionOrder): string | null {
+  return getManipulacaoStartCredit(op)?.by || op.leaderId || null;
 }
 
 // ---------------- STATUS DO GRANEL (Separado → Manipulando → Manipulado) ----------------

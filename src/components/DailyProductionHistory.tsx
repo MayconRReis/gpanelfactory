@@ -39,7 +39,7 @@ import {
   Legend
 } from 'recharts';
 import { ProductionOrder, ProductionLine, UserProfile, MonthlyGoal, ProductionEvent, LineChangeover } from '../types';
-import { buildPartialProductionRecords, getChangeovers } from '../services/db';
+import { buildPartialProductionRecords, getChangeovers, getManipulacaoStartCredit, getOpCreditedUserId } from '../services/db';
 import { SetupHistory } from './SetupHistory';
 import { StaffOccurrencesSummary } from './StaffOccurrences';
 
@@ -77,6 +77,9 @@ export function isPesagemOp(op: ProductionOrder): boolean {
 export function getOpDateString(op: ProductionOrder): string {
   // Sempre no dia LOCAL: completedAt/createdAt são gravados em UTC, e
   // `split('T')[0]` jogava toda OP fechada depois das 21h pro dia seguinte.
+  // Manipulação: a OSM finalizada conta no dia em que foi iniciada.
+  const manipStart = getManipulacaoStartCredit(op);
+  if (manipStart) return isoToLocalDate(manipStart.at);
   if (op.completedAt) {
     return isoToLocalDate(op.completedAt);
   }
@@ -707,7 +710,7 @@ export function DailyProductionHistory({
       op.unidade || 'Un',
       op.plannedQuantity,
       op.isPartialRecord ? 'parcial' : op.status,
-      `"${op.leaderId ? (leaderMap.get(op.leaderId) || op.leaderId) : '-'}"`,
+      `"${getOpCreditedUserId(op) ? (leaderMap.get(getOpCreditedUserId(op) as string) || getOpCreditedUserId(op)) : '-'}"`,
       `"${op.observation || ''}"`,
     ]);
 
@@ -1758,7 +1761,8 @@ export function DailyProductionHistory({
                     : (produced > 0 ? 100 : null);
                   const shift = op.finishedShift || op.scheduledShift || 'Manhã';
                   const isShift2 = shift.toLowerCase().includes('2') || shift.toLowerCase().includes('tarde');
-                  const leaderName = op.leaderId ? (leaderMap.get(op.leaderId) || 'Líder') : 'Não atribuído';
+                  const creditedId = getOpCreditedUserId(op);
+                  const leaderName = creditedId ? (leaderMap.get(creditedId) || 'Líder') : 'Não atribuído';
                   const lineName = op.lineId ? (lineMap.get(op.lineId) || op.lineId) : (op.setor || 'Geral');
 
                   return (
