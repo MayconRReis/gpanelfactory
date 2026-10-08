@@ -94,6 +94,7 @@ import {
   Legend,
 } from 'recharts';
 import { calculateProductionRatePerHour, getAutoShiftNow } from '../lib/productionTime';
+import { isCoffeeBreakDue, COFFEE_PAUSE_REASON, COFFEE_AUTO_OBSERVATION } from '../lib/coffeeBreak';
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
 
@@ -628,6 +629,25 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     setPauseObs('');
     await fetchData(true);
   };
+
+  // Pausa automática do café (só a saída) — ver lib/coffeeBreak. Roda na tela
+  // da linha aberta: no horário do café, se a OP estiver rodando, pausa com o
+  // motivo "Café". Tenta uma vez por linha/dia (a ref evita repetir enquanto
+  // os dados recarregam).
+  const coffeeTriedRef = useRef<string | null>(null);
+  const currentMinute = Math.floor(currentTime.getTime() / 60000);
+  useEffect(() => {
+    if (!currentLine || !activeOp || !profile || activeOp.status !== 'in_progress') return;
+    const now = new Date(currentMinute * 60000);
+    if (!isCoffeeBreakDue(currentLine, recentEvents, now)) return;
+    const key = `${currentLine.id}|${toLocalDateStr(now.toISOString())}`;
+    if (coffeeTriedRef.current === key) return;
+    coffeeTriedRef.current = key;
+    (async () => {
+      await pauseOP(activeOp.id, currentLine.id, profile.uid, COFFEE_PAUSE_REASON, COFFEE_AUTO_OBSERVATION);
+      await fetchData(true);
+    })();
+  }, [currentMinute, currentLine, activeOp, profile, recentEvents]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleResume = async () => {
     if (!currentLine || !activeOp || !profile) return;
