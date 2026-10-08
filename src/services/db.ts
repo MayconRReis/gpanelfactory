@@ -5379,6 +5379,46 @@ const mapStaffOccurrenceRow = (r: any): StaffOccurrence => ({
 let trainingStaffOccurrences: StaffOccurrence[] = [];
 
 /** Ocorrências entre duas datas ('AAAA-MM-DD', inclusivo). */
+/** Colaborador da relação da fábrica (tabela colaboradores — sql/add_colaboradores.sql). */
+export interface Colaborador {
+  nome: string;
+  funcao?: string | null;
+  turno?: string | null;
+}
+
+let colaboradoresCache: Promise<Colaborador[]> | null = null;
+
+/**
+ * Relação de colaboradores ATIVOS, para sugerir nomes. Busca uma vez por
+ * sessão (a lista muda pouco); se a tabela não existir ainda, devolve vazio
+ * e o campo segue funcionando só com os nomes já lançados.
+ */
+export const getColaboradores = (): Promise<Colaborador[]> => {
+  if (trainingModeActive) return Promise.resolve([]);
+  if (!colaboradoresCache) {
+    colaboradoresCache = (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('colaboradores')
+          .select('nome, funcao, turno')
+          .eq('ativo', true)
+          .order('nome', { ascending: true });
+        if (error) {
+          console.warn('[getColaboradores] Não foi possível ler colaboradores (rodou sql/add_colaboradores.sql?):', error.message);
+          colaboradoresCache = null; // tenta de novo na próxima vez
+          return [];
+        }
+        return (data || []).filter(r => r?.nome).map(r => ({ nome: String(r.nome), funcao: r.funcao, turno: r.turno }));
+      } catch (err) {
+        console.warn('[getColaboradores]', err);
+        colaboradoresCache = null;
+        return [];
+      }
+    })();
+  }
+  return colaboradoresCache;
+};
+
 export const getStaffOccurrences = async (fromDate: string, toDate: string): Promise<{ list: StaffOccurrence[]; error: string | null }> => {
   if (trainingModeActive) {
     return { list: trainingStaffOccurrences.filter(o => o.date >= fromDate && o.date <= toDate), error: null };

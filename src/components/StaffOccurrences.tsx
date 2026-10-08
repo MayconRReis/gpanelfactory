@@ -11,6 +11,7 @@ import {
   STAFF_OCCURRENCE_LABELS,
   toLocalDateStr,
 } from '../services/db';
+import { EmployeeNameInput } from './EmployeeNameInput';
 
 /**
  * OCORRÊNCIAS DE PESSOAL — faltas, atrasos, atestados, saídas antecipadas,
@@ -177,16 +178,13 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
                 </div>
                 <div className={`grid gap-2 ${type === 'free_balde' ? 'grid-cols-[1fr_90px]' : 'grid-cols-1'}`}>
                   <div>
-                    <input
-                      list={`staff-names-${lineId}`}
+                    <EmployeeNameInput
                       value={employeeName}
-                      onChange={e => setEmployeeName(e.target.value)}
+                      onChange={setEmployeeName}
+                      extraNames={names}
                       placeholder={needsName ? 'Nome do colaborador *' : 'Nome (opcional)'}
                       className={input}
                     />
-                    <datalist id={`staff-names-${lineId}`}>
-                      {names.map(n => <option key={n} value={n} />)}
-                    </datalist>
                   </div>
                   {type === 'free_balde' && (
                     <input
@@ -694,9 +692,8 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
               )}
               <div className={`grid gap-2 ${isTimed ? 'grid-cols-[1fr_100px]' : 'grid-cols-1'}`}>
                 <div>
-                  <input list="staff-names-page" value={employeeName} onChange={e => setEmployeeName(e.target.value)}
+                  <EmployeeNameInput value={employeeName} onChange={setEmployeeName} extraNames={names}
                     placeholder={needsName ? 'Nome do colaborador *' : 'Nome (opcional)'} className={input} />
-                  <datalist id="staff-names-page">{names.map(n => <option key={n} value={n} />)}</datalist>
                 </div>
                 {isTimed && (
                   <input type="time" value={occTime} onChange={e => setOccTime(e.target.value)}
