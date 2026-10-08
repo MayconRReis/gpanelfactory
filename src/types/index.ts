@@ -247,7 +247,7 @@ export type StaffOccurrenceType =
 export interface StaffOccurrence {
   id: string;
   date: string; // 'AAAA-MM-DD'
-  lineId: string; // linha ou setor (ex.: line-1, setor-manipulacao, setor-pesagem, setor-estoque-mepa, setor-estoque-mp)
+  lineId: string; // linha ou setor (ex.: line-1, setor-manipulacao, setor-pesagem, setor-estoque-mepa, setor-estoque-mp, setor-datacao, setor-separacao, setor-outro)
   type: StaffOccurrenceType;
   employeeName: string;
   quantity: number; // normalmente 1; "free do balde" pode lançar vários de uma vez

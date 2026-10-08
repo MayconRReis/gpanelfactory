@@ -458,7 +458,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
   }, [monthOccurrences, monthReports, manual, monthStart, selectedDate]);
 
   const occLineName = (id: string) =>
-    id === 'setor-manipulacao' ? 'Manipulação' : id === 'setor-pesagem' ? 'Pesagem' : id === 'setor-estoque-mepa' ? 'Estoque ME/PA' : id === 'setor-estoque-mp' ? 'Estoque MP' : id === 'setor-estoque' ? 'Estoque' : lines.find(l => l.id === id)?.name || id;
+    id === 'setor-manipulacao' ? 'Manipulação' : id === 'setor-pesagem' ? 'Pesagem' : id === 'setor-estoque-mepa' ? 'Estoque ME/PA' : id === 'setor-estoque-mp' ? 'Estoque MP' : id === 'setor-estoque' ? 'Estoque' : id === 'setor-datacao' ? 'Datação' : id === 'setor-separacao' ? 'Separação' : id === 'setor-outro' ? 'Outro' : lines.find(l => l.id === id)?.name || id;
   const safetyOcc = dayOccurrences.filter(o => o.type === 'acidente' || o.type === 'incidente');
 
   const filledPontos = manual.pontos.filter(p => p.texto.trim());
