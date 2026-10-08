@@ -2153,6 +2153,9 @@ export const createOP = async (newOpData: {
   producedQuantity?: number;
   status?: 'pending' | 'in_progress' | 'paused' | 'completed';
   leaderId?: string;
+  /** Só para OP já criada concluída: quando foi concluída (padrão: agora). */
+  completedAt?: string;
+  finishedShift?: 'Manhã' | 'Tarde';
 }, options: { reuseExisting?: boolean; verify?: boolean } = {}): Promise<ProductionOrder> => {
   const tipoDoc = newOpData.tipoDocumento || getTipoDocumento(newOpData.setor);
 
@@ -2179,7 +2182,8 @@ export const createOP = async (newOpData: {
       plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
       tipoDocumento: tipoDoc,
       industria: newOpData.industria || undefined,
-      completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
+      completedAt: newOpData.status === 'completed' ? (newOpData.completedAt || new Date().toISOString()) : undefined,
+      finishedShift: newOpData.status === 'completed' ? newOpData.finishedShift : undefined,
       createdAt: new Date().toISOString(),
     };
     trainingOps = [trainingOp, ...trainingOps];
@@ -2236,7 +2240,8 @@ export const createOP = async (newOpData: {
     plannedHours: newOpData.plannedHours != null ? Number(newOpData.plannedHours) : undefined,
     tipoDocumento: tipoDoc,
     industria: newOpData.industria || undefined,
-    completedAt: newOpData.status === 'completed' ? new Date().toISOString() : undefined,
+    completedAt: newOpData.status === 'completed' ? (newOpData.completedAt || new Date().toISOString()) : undefined,
+    finishedShift: newOpData.status === 'completed' ? newOpData.finishedShift : undefined,
     createdAt: new Date().toISOString(),
   };
 
@@ -2265,6 +2270,7 @@ export const createOP = async (newOpData: {
     created_at: newOp.createdAt,
   };
   if (newOp.completedAt) opsPayload.completed_at = newOp.completedAt;
+  if (newOp.finishedShift) opsPayload.finished_shift = newOp.finishedShift;
 
   // Com `verify`: se NENHUMA das duas tabelas aceitou a OP, lança erro em vez
   // de deixá-la só no cache local do aparelho.

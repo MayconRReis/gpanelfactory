@@ -102,6 +102,16 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   const [manualExitDate, setManualExitDate] = useState('');
   const [isManualExitSubmitting, setIsManualExitSubmitting] = useState(false);
 
+  // Modal "Já manipulada" — OSM que já foi manipulada fora do app (antes de a
+  // Manipulação usar o sistema) e ficou presa no estoque. Registra a OSM de
+  // Manipulação concluída no dia/turno informados, com os Kg — conta como
+  // produção da Manipulação nesse dia.
+  const [alreadyManipOp, setAlreadyManipOp] = useState<ProductionOrder | null>(null);
+  const [alreadyManipDate, setAlreadyManipDate] = useState('');
+  const [alreadyManipShift, setAlreadyManipShift] = useState<'Manhã' | 'Tarde'>('Manhã');
+  const [alreadyManipKg, setAlreadyManipKg] = useState('');
+  const [isAlreadyManipSubmitting, setIsAlreadyManipSubmitting] = useState(false);
+
   // Toast
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
@@ -125,7 +135,7 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
   // Abrir/fechar qualquer janela limpa o erro anterior
   useEffect(() => {
     setModalError(null);
-  }, [isModalOpen, deleteModalOp, manualExitOp]);
+  }, [isModalOpen, deleteModalOp, manualExitOp, alreadyManipOp]);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -645,6 +655,78 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
     }
   };
 
+  const handleOpenAlreadyManip = (op: ProductionOrder) => {
+    setAlreadyManipOp(op);
+    setAlreadyManipDate(todayStr);
+    setAlreadyManipShift('Manhã');
+    const kg = Number(op.producedQuantity) || Number(op.plannedQuantity) || 0;
+    setAlreadyManipKg(kg > 0 ? String(kg) : '');
+  };
+
+  const handleConfirmAlreadyManip = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profile || !alreadyManipOp) return;
+    const kg = Number(String(alreadyManipKg).replace(',', '.'));
+    if (!alreadyManipDate) {
+      showToast('Informe o dia em que foi manipulada.', 'error');
+      return;
+    }
+    if (alreadyManipDate > todayStr) {
+      showToast('O dia da manipulação não pode ser no futuro.', 'error');
+      return;
+    }
+    if (!(kg > 0)) {
+      showToast('Informe quantos Kg foram manipulados.', 'error');
+      return;
+    }
+
+    // Horário de referência dentro do turno (1º = manhã, 2º = tarde), no dia
+    // informado — é por ele que a produção cai no dia certo nos dashboards.
+    const completedAt = new Date(`${alreadyManipDate}T${alreadyManipShift === 'Manhã' ? '10:00' : '17:00'}:00`).toISOString();
+
+    setIsAlreadyManipSubmitting(true);
+    try {
+      await createOP({
+        tipoDocumento: 'OSM',
+        setor: 'Manipulação',
+        unidade: 'Kg',
+        number: alreadyManipOp.number,
+        product: alreadyManipOp.product,
+        lote: alreadyManipOp.lote,
+        plannedQuantity: kg,
+        producedQuantity: kg,
+        status: 'completed',
+        priority: 'Normal',
+        lineId: 'area-manipulacao',
+        scheduledShift: alreadyManipShift,
+        scheduledDate: alreadyManipDate,
+        finishedShift: alreadyManipShift,
+        completedAt,
+        industria: alreadyManipOp.industria,
+        granel: alreadyManipOp.granel || alreadyManipOp.observation,
+      }, { verify: true });
+
+      await recordHistory({
+        action: 'manual_exit',
+        op: alreadyManipOp,
+        details: { exitDate: alreadyManipDate, note: `Já manipulada fora do app · ${alreadyManipShift === 'Manhã' ? '1º' : '2º'} turno · ${kg.toLocaleString('pt-BR')} kg` },
+      });
+      showToast(`OSM ${alreadyManipOp.number} registrada como manipulada em ${alreadyManipDate.split('-').reverse().join('/')}.`, 'success');
+      setAlreadyManipOp(null);
+      await fetchData(true);
+    } catch (err: any) {
+      console.error('Erro ao registrar OSM já manipulada:', err);
+      showToast(
+        err?.isDuplicateOp
+          ? `A OSM ${alreadyManipOp.number} já está na Manipulação (fila de um reator). Finalize por lá.`
+          : (err?.message?.startsWith('O banco') ? err.message : 'Erro ao registrar a OSM como manipulada.'),
+        'error'
+      );
+    } finally {
+      setIsAlreadyManipSubmitting(false);
+    }
+  };
+
   return (
     <div className={embedded ? "w-full text-[#f4f4f5] flex flex-col font-sans space-y-4" : "min-h-screen bg-[#0a0a0c] text-[#f4f4f5] flex flex-col font-sans selection:bg-purple-500/30"}>
       {/* Toast Notification — renderizado direto no <body> (portal) e acima de
@@ -979,6 +1061,16 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                           <span>Dar Saída Manual</span>
                         </Button>
                       )}
+
+                      {/* Já manipulada fora do app — tira do estoque e conta a produção no dia certo */}
+                      <Button
+                        type="button"
+                        onClick={() => handleOpenAlreadyManip(op)}
+                        className="h-10 rounded-xl bg-[#121215] border border-cyan-800/70 hover:bg-cyan-950/60 text-cyan-300 font-bold text-xs flex items-center justify-center gap-1.5 transition-all transform active:scale-95"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Já manipulada</span>
+                      </Button>
                     </div>
                   );
                 })}
@@ -1327,6 +1419,119 @@ export function PesagemScreen({ embedded = false }: PesagemScreenProps = {}) {
                     <>
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Confirmar Saída</span>
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* MODAL: OSM JÁ MANIPULADA (FORA DO APP) */}
+      <Dialog open={!!alreadyManipOp} onOpenChange={(open) => !open && setAlreadyManipOp(null)}>
+        <DialogContent className="bg-[#18181b] border-[#27272a] text-[#f4f4f5] max-w-md w-full rounded-2xl shadow-2xl p-6">
+          <DialogHeader>
+            <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-300 mb-2">
+              <CheckCircle2 className="w-5 h-5" />
+            </div>
+            <DialogTitle className="text-lg font-bold text-white">
+              Já manipulada — OSM {alreadyManipOp?.number}
+            </DialogTitle>
+            <p className="text-xs text-[#a1a1aa]">
+              Para OSM que já foi manipulada fora do app. Ela sai do estoque e os Kg contam como produção da
+              Manipulação no dia e turno informados.
+            </p>
+          </DialogHeader>
+
+          {alreadyManipOp && (
+            <form onSubmit={handleConfirmAlreadyManip} className="space-y-4 mt-2">
+              <div className="bg-[#121215] border border-[#27272a] rounded-xl p-3 space-y-2">
+                <div>
+                  <div className="text-[11px] text-[#a1a1aa]">Produto / Granel</div>
+                  <div className="text-xs font-bold text-white mt-0.5">{alreadyManipOp.product}</div>
+                </div>
+                {alreadyManipOp.lote && (
+                  <div>
+                    <div className="text-[11px] text-[#a1a1aa]">Lote</div>
+                    <div className="text-xs font-mono font-bold text-white mt-0.5">{alreadyManipOp.lote}</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2 sm:col-span-1">
+                  <Label className="text-xs font-semibold text-[#d4d4d8] flex items-center gap-1.5 mb-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Dia da manipulação <span className="text-cyan-400">*</span></span>
+                  </Label>
+                  <Input
+                    type="date"
+                    value={alreadyManipDate}
+                    max={todayStr}
+                    onChange={(e) => setAlreadyManipDate(e.target.value)}
+                    required
+                    className="bg-[#121215] border-[#27272a] focus:border-cyan-500 text-white font-medium text-sm h-10 rounded-xl [color-scheme:dark]"
+                  />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <Label className="text-xs font-semibold text-[#d4d4d8] mb-1.5 block">Turno <span className="text-cyan-400">*</span></Label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(['Manhã', 'Tarde'] as const).map(s => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setAlreadyManipShift(s)}
+                        className={`h-10 rounded-xl text-xs font-bold border transition-all ${alreadyManipShift === s ? 'bg-cyan-600 border-cyan-500 text-white' : 'bg-[#121215] border-[#27272a] text-[#a1a1aa] hover:text-white'}`}
+                      >
+                        {s === 'Manhã' ? '1º turno' : '2º turno'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="col-span-2">
+                  <Label className="text-xs font-semibold text-[#d4d4d8] mb-1.5 block">Quantidade manipulada (Kg) <span className="text-cyan-400">*</span></Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step="any"
+                    value={alreadyManipKg}
+                    onChange={(e) => setAlreadyManipKg(e.target.value)}
+                    placeholder="Ex.: 1000"
+                    required
+                    autoFocus
+                    className="bg-[#121215] border-[#27272a] focus:border-cyan-500 text-white font-medium text-sm h-10 rounded-xl"
+                  />
+                </div>
+              </div>
+
+              {renderModalError()}
+
+              <DialogFooter className="pt-3 gap-2 flex-col sm:flex-row">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setAlreadyManipOp(null)}
+                  disabled={isAlreadyManipSubmitting}
+                  className="h-10 rounded-xl border-[#27272a] text-[#a1a1aa] hover:text-white hover:bg-[#27272a] w-full sm:w-auto"
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isAlreadyManipSubmitting}
+                  className="h-10 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 w-full sm:w-auto"
+                >
+                  {isAlreadyManipSubmitting ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Registrando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Confirmar</span>
                     </>
                   )}
                 </Button>
