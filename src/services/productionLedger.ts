@@ -1,5 +1,5 @@
 import { ProductionEvent, ProductionOrder } from '../types';
-import { toLocalDateStr, getOpReferenceDateStr, isReworkMarkerEvent, isSleeveLineId } from './db';
+import { toLocalDateStr, getOpReferenceDateStr, isReworkMarkerEvent, isSleeveLineId, getManipulacaoStartCredit, getOpCreditedUserId } from './db';
 
 /**
  * LIVRO DE PRODUÇÃO — fonte ÚNICA dos números de produção do Dashboard e do
@@ -12,7 +12,8 @@ import { toLocalDateStr, getOpReferenceDateStr, isReworkMarkerEvent, isSleeveLin
  *   ainda está em produção já soma o que foi envasado hoje. OP sem nenhum
  *   apontamento (histórico importado) conta no dia em que foi fechada.
  * - SLEEV: mesma regra, nas linhas do Sleev — métrica separada do Envase.
- * - MANIPULAÇÃO: Kg da OSM, no dia em que foi concluída.
+ * - MANIPULAÇÃO: Kg da OSM finalizada, no dia em que foi INICIADA e para
+ *   o manipulador que a iniciou.
  * - PESAGEM: cada OSM pesada (contagem) + o Kg da OSM, no dia de referência.
  *
  * Unidades nunca se misturam: Envase/Sleev em Un, Manipulação/Pesagem em Kg.
@@ -127,7 +128,7 @@ export function buildProductionLedger(ops: ProductionOrder[], events: Production
   }
   for (const e of acc.values()) if (e.qty !== 0) out.push(e);
 
-  // ---------- Manipulação: Kg da OSM no dia da conclusão ----------
+  // ---------- Manipulação: Kg da OSM no dia do início, para quem iniciou ----------
   for (const op of realOps) {
     if (op.setor !== 'Manipulação') continue;
     if (isSleeveLineId(op.lineId)) continue;
@@ -136,8 +137,8 @@ export function buildProductionLedger(ops: ProductionOrder[], events: Production
     const day = getOpReferenceDateStr(op);
     if (!day) continue;
     out.push({
-      key: `manip|${op.id}`, day, at: op.completedAt || `${day}T12:00:00`, sector: 'Manipulação', lineId: op.lineId || null,
-      opId: String(op.id), number: op.number, product: op.product, lote: op.lote, qty, unit: 'Kg', opStatus: op.status, leaderId: op.leaderId || null,
+      key: `manip|${op.id}`, day, at: getManipulacaoStartCredit(op)?.at || op.completedAt || `${day}T12:00:00`, sector: 'Manipulação', lineId: op.lineId || null,
+      opId: String(op.id), number: op.number, product: op.product, lote: op.lote, qty, unit: 'Kg', opStatus: op.status, leaderId: getOpCreditedUserId(op),
     });
   }
 

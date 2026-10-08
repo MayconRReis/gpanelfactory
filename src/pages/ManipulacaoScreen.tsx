@@ -65,6 +65,7 @@ import {
   getManipConferencias,
   addManipConferencia,
   deleteManipConferencia,
+  getManipulacaoStartCredit,
 } from '../services/db';
 import { ProductionOrder, ProductionLine, PauseReason, WorkSession, ProductionEvent } from '../types';
 import { ManipulacaoHistorico } from '../components/ManipulacaoHistorico';
@@ -529,7 +530,7 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
     })();
     const q = doneSearch.trim().toLowerCase();
     return completedManipulacaoOps.filter(op => {
-      const day = doneLocalDay(op.completedAt || op.createdAt);
+      const day = doneLocalDay(getManipulacaoStartCredit(op)?.at || op.completedAt || op.createdAt);
       if (donePeriod === 'hoje' && day !== today) return false;
       if (from && donePeriod !== 'hoje' && day < from) return false;
       if (doneReactor !== 'all' && op.lineId !== doneReactor) return false;
@@ -561,7 +562,9 @@ export function ManipulacaoScreen({ embedded = false }: ManipulacaoScreenProps =
           const d = new Date(v);
           return isNaN(d.getTime()) ? v.split('T')[0] : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         };
-        const opDate = op.completedAt ? toLocal(op.completedAt) : (op.scheduledDate || (op.createdAt ? toLocal(op.createdAt) : ''));
+        // OSM finalizada conta no dia em que foi INICIADA (regra da Manipulação)
+        const startAt = getManipulacaoStartCredit(op)?.at;
+        const opDate = startAt ? toLocal(startAt) : op.completedAt ? toLocal(op.completedAt) : (op.scheduledDate || (op.createdAt ? toLocal(op.createdAt) : ''));
         return opDate === todayStr;
       })
       .reduce((acc, op) => acc + (Number(op.producedQuantity) || 0 /* só o Kg realmente apontado — nunca o planejado */), 0);

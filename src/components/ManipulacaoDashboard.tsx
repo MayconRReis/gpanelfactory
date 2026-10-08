@@ -40,6 +40,7 @@ import {
   Legend
 } from 'recharts';
 import { ProductionOrder, UserProfile } from '../types';
+import { getManipulacaoStartCredit } from '../services/db';
 import { Button } from './ui/button';
 
 interface ManipulacaoDashboardProps {
@@ -75,6 +76,9 @@ function formatDateToIso(d: Date): string {
 
 // Helper para obter a data relevante da OP de manipulação
 function getOpDate(op: ProductionOrder): string {
+  // OSM finalizada conta no dia em que foi INICIADA (regra da Manipulação)
+  const start = getManipulacaoStartCredit(op);
+  if (start) return isoToLocalDate(start.at);
   // Dia LOCAL — completedAt/createdAt vêm em UTC (antes, OP fechada após as 21h caía no dia seguinte)
   if (op.completedAt) {
     return isoToLocalDate(op.completedAt);

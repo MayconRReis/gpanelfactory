@@ -10,7 +10,7 @@ import {
   ProductionOrder, ProductionLine, UserProfile, ProductionEvent, MonthlyGoal, FactoryMonthlyGoal,
   WorkSession, LineChangeover,
 } from '../types';
-import { getWorkSessions, getChangeovers, isSleeveLineId, toLocalDateStr, getFactoryMonthlyGoals, getMonthlyGoals, getLineDailyGoals } from '../services/db';
+import { getWorkSessions, getChangeovers, isSleeveLineId, toLocalDateStr, getFactoryMonthlyGoals, getMonthlyGoals, getLineDailyGoals, getOpReferenceDateStr } from '../services/db';
 import { buildProductionLedger, LedgerEntry, LedgerSector } from '../services/productionLedger';
 import { calculateProductionTime, formatMsToHoursMinutes, getScheduledWindow } from '../lib/productionTime';
 import { SetupHistory } from './SetupHistory';
@@ -249,7 +249,7 @@ export function DetailedDashboard({ ops, lines: allLines, events, users = [], go
     const doneByLine = new Map<string, number>();
     for (const o of ops) {
       if (o.status !== 'completed' || o.isPartialRecord || !o.lineId || !o.completedAt) continue;
-      if (!inRange(toLocalDateStr(o.completedAt))) continue;
+      if (!inRange(getOpReferenceDateStr(o))) continue;
       doneByLine.set(o.lineId, (doneByLine.get(o.lineId) || 0) + 1);
     }
     const order = (l: ProductionLine) => (/reator/i.test(l.id) ? 2 : isSleeveLineId(l.id) ? 1 : 0);
