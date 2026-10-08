@@ -75,6 +75,7 @@ import {
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
+import { PresenceIndicator, PresenceDot, useLinePresence } from '../components/PresenceIndicator';
 import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
@@ -368,6 +369,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const currentLine = useMemo(() => {
     return lines.find(l => l.id === selectedLineId) || lines[0] || null;
   }, [lines, selectedLineId]);
+
+  // Quem está com a tela de cada linha aberta agora (bolinha verde no cabeçalho e no seletor de linha)
+  const presenceByLine = useLinePresence(profile?.uid, profile?.name, currentLine?.id);
 
   // OPs válidas para as linhas de produção (Chão de Fábrica - Envase)
   // IMPORTANTE: Esta tela é exclusivamente o Chão de Fábrica de Envase.
@@ -1142,6 +1146,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </div>
               <ChevronRight className="w-3.5 h-3.5 text-[#52525b] group-hover:text-blue-400 group-hover:translate-x-0.5 transition-all ml-1 shrink-0" />
             </button>
+
+            {/* Quem está vendo esta linha agora */}
+            {currentLine && profile && (
+              <PresenceIndicator viewers={presenceByLine.get(currentLine.id) || []} selfUid={profile.uid} lineName={currentLine.name} />
+            )}
 
             {/* Relógio & Turno */}
             <div className="hidden sm:flex items-center gap-2 bg-[#121217] border border-[#22222a] px-3 py-1.5 rounded-xl text-xs font-mono text-[#a1a1aa]">
@@ -2545,6 +2554,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       <p className="text-[10px] text-[#71717a]">
                         {opCount} {opCount === 1 ? 'ordem ativa' : 'ordens ativas'}
                       </p>
+                      {(presenceByLine.get(l.id) || []).length > 0 && (
+                        <p className="text-[10px] text-emerald-300 flex items-center gap-1.5 mt-1">
+                          <PresenceDot />
+                          <span className="truncate">
+                            {(presenceByLine.get(l.id) || []).map(v => v.uid === profile?.uid ? `${v.name} (você)` : v.name).join(', ')}
+                          </span>
+                        </p>
+                      )}
                     </div>
                   </div>
 
