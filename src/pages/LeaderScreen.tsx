@@ -1145,6 +1145,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                   }`}>
                     {activeOp?.status === 'in_progress' ? 'Linha em Produção' :
                      activeOp?.status === 'paused' ? 'Linha Pausada' : 'Aguardando Início'}
+                    {activeOp?.status === 'paused' && activePauseEvent && (() => {
+                      const t = Math.max(0, Math.floor((currentTime.getTime() - new Date(activePauseEvent.createdAt).getTime()) / 1000));
+                      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+                      return <span className="ml-1.5 font-mono tabular-nums normal-case">{h > 0 ? `${h}:${String(m).padStart(2, '0')}` : String(m).padStart(2, '0')}:{String(sec).padStart(2, '0')}</span>;
+                    })()}
                   </span>
                 </div>
               </div>
@@ -1528,6 +1533,19 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                                       ? `Padrão de ${fmtLimit(st.standardMs)} encerrado — retorne até ${fmtLimit(st.limitMs)} (faltam ${mmss(st.limitMs - st.elapsedMs)}).`
                                       : `Padrão ${fmtLimit(st.standardMs)} + 5 min de tolerância · limite ${new Date(since.getTime() + st.limitMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
                                 </p>
+                              </div>
+                            )}
+                            {/* Demais pausas: cronômetro de quanto tempo a linha está parada */}
+                            {!st && (
+                              <div className="mt-2 mb-1 rounded-xl border px-3 py-2 bg-amber-950/20 border-amber-500/30">
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                                    <Clock className="w-3.5 h-3.5" /> Parado há
+                                  </span>
+                                  <span className="font-mono font-black text-2xl tabular-nums text-amber-100">
+                                    {mmss(Math.max(0, currentTime.getTime() - since.getTime()))}
+                                  </span>
+                                </div>
                               </div>
                             )}
                             <p className="text-[13px] font-semibold text-amber-100 mt-1 leading-snug">
