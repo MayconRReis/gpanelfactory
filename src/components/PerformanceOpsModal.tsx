@@ -32,7 +32,7 @@ export function PerformanceOpsModal({ ops, lines, periodLabel, onClose }: Props)
         <div className="p-4 border-b border-[#222228] flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-black text-orange-300 uppercase tracking-wider">Performance · OPs do período</h3>
-            <p className="text-[11px] text-[#71717a] mt-0.5">{periodLabel} · tempo esperado para o que foi produzido ÷ tempo trabalhado na OP</p>
+            <p className="text-[11px] text-[#71717a] mt-0.5">{periodLabel} · tempo esperado da OP ÷ tempo trabalhado na OP</p>
           </div>
           <button onClick={onClose} className="text-[#71717a] hover:text-white p-1.5 rounded-lg hover:bg-[#1f1f28]"><X className="w-5 h-5" /></button>
         </div>
@@ -111,7 +111,7 @@ export function PerformanceOpsModal({ ops, lines, periodLabel, onClose }: Props)
                 </table>
               </div>
             )}
-            <p className="text-[10px] text-[#71717a]">Esperado = tempo previsto da OP proporcional ao que já foi produzido. Trabalhado = tempo com a OP em produção (pausas não entram).</p>
+            <p className="text-[10px] text-[#71717a]">Esperado = tempo previsto da OP. Concluída: o tempo previsto inteiro. Conclusão parcial ou ainda em produção: proporcional à quantidade apontada. Trabalhado = tempo com a OP em produção (pausas não entram).</p>
           </section>
         </div>
       </div>

@@ -189,11 +189,13 @@ export function calculateOEE(
     }
 
     // 2. Performance por TEMPO = tempo esperado ÷ tempo produzido.
-    // Cada OP tem as "Horas planejadas" (tempo esperado para a quantidade
-    // planejada). O esperado é proporcional ao que já foi feito
-    // (horas planejadas × produzido ÷ quantidade da OP) e o produzido é o
-    // tempo realmente trabalhado na OP (sem pausas, noites e intervalos).
-    // Entram as OPs concluídas e as em produção/pausadas que já produziram.
+    // Cada OP tem as "Horas planejadas" (tempo esperado para a OP). OP
+    // concluída: o esperado é o tempo previsto inteiro (a quantidade final
+    // pode ficar abaixo do planejado por drenagem/amostra). Conclusão parcial
+    // ou OP ainda em produção: proporcional à quantidade apontada. O
+    // produzido é o tempo realmente trabalhado na OP (sem pausas, noites e
+    // intervalos). Entram as concluídas, as em produção/pausadas que já
+    // produziram e as que tiveram conclusão parcial.
     // Máximo de 100%. OP sem "Horas planejadas" fica de fora; se nenhuma OP
     // do período tiver, cai no cálculo antigo por quantidade.
     const partialQtyByOp = new Map<string, number>();
@@ -202,9 +204,13 @@ export function calculateOEE(
       const q = Number(ev.quantity) || 0;
       if (q > 0) partialQtyByOp.set(String(ev.opId), (partialQtyByOp.get(String(ev.opId)) || 0) + q);
     }
+    // Entram: concluídas, em produção/pausadas que já produziram e as que
+    // tiveram conclusão PARCIAL (o saldo voltou ao estoque).
     const perfCandidates = ops.filter(op =>
       !op.isPartialRecord && (op.plannedQuantity || 0) > 0 &&
-      (op.status === 'completed' || ((op.status === 'in_progress' || op.status === 'paused') && (op.producedQuantity || 0) > 0))
+      (op.status === 'completed' ||
+        ((op.status === 'in_progress' || op.status === 'paused') && (op.producedQuantity || 0) > 0) ||
+        (partialQtyByOp.get(String(op.id)) || 0) > 0)
     );
     const timedOps = perfCandidates.filter(op => (Number(op.plannedHours) || 0) > 0);
     let performance: number | null = null;
@@ -253,7 +259,15 @@ export function calculateOEE(
         const opQty = (op.plannedQuantity || 0) + partial;
         const produced = Math.max(0, (op.producedQuantity || 0) + partial);
         if (opQty <= 0 || produced <= 0) { perfOps.push(detail(op, { workedMs: worked, reason: 'Sem quantidade produzida' })); continue; }
-        const exp = (Number(op.plannedHours) || 0) * 3_600_000 * (produced / opQty);
+        // Tempo esperado:
+        // - OP CONCLUÍDA: o tempo previsto inteiro — a quantidade final pode
+        //   ficar abaixo do planejado (drenagem, amostra do laboratório), mas o
+        //   envase da OP foi feito por completo;
+        // - conclusão PARCIAL (saldo voltou ao estoque) ou OP ainda em
+        //   produção: proporcional à quantidade apontada até agora.
+        const exp = op.status === 'completed'
+          ? (Number(op.plannedHours) || 0) * 3_600_000
+          : (Number(op.plannedHours) || 0) * 3_600_000 * Math.min(1, produced / opQty);
         expectedMs += exp;
         workedMs += worked;
         counted += 1;
