@@ -105,6 +105,9 @@ import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } fr
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, Eye, FileText, ClipboardList } from 'lucide-react';
 import { DailyReport } from '../components/DailyReport';
 import { StaffOccurrencesPage } from '../components/StaffOccurrences';
+import { OpDetailsModal } from '../components/OpDetailsModal';
+import { OpTagBadges, OpTagPicker, useOpTags, refreshOpTags } from '../components/OpTags';
+import { setOpTags } from '../services/db';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -218,6 +221,10 @@ export function CoordinatorDashboard() {
   // Modal: Confirmação de Exclusão de OP
   const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
   const [isDeletingOp, setIsDeletingOp] = useState(false);
+
+  // Etiquetas da OP (Datado, Ag. datação…) escolhidas no Editar OP
+  const opTagsState = useOpTags();
+  const [editOpTags, setEditOpTags] = useState<string[]>([]);
 
   // Modal: "Mais informações" do card de OP no Estoque de OPs
   const [detailsModalOp, setDetailsModalOp] = useState<ProductionOrder | null>(null);
@@ -822,11 +829,13 @@ WHERE email IN (
     setNewOpScheduledEndDate(today);
     setNewOpScheduledDays('1');
     setNewOpScheduledShift('Integral');
+    setEditOpTags([]);
     setShowNewOpModal(true);
   };
 
   const handleOpenEditOPModal = (op: ProductionOrder) => {
     setEditingOp(op);
+    setEditOpTags(opTagsState.byOp.get(String(op.id)) || []);
     setNewOpNumber(op.number || '');
     setNewOpProduct(op.product || '');
     const currentSetor = op.setor || 'Envase';
@@ -927,9 +936,20 @@ WHERE email IN (
             if (res.error) { const m = `OP salva, mas NÃO ficou registrada no histórico da Pesagem (${res.error}).`; setTimeout(() => showToast(m, 'error'), 1200); }
           }
         }
+        const prevTags = opTagsState.byOp.get(String(editingOp.id)) || [];
+        if (!opTagsState.error && (prevTags.length !== editOpTags.length || prevTags.some(t => !editOpTags.includes(t)))) {
+          const tr = await setOpTags(editingOp.id, editOpTags, profile?.uid);
+          if (!tr.ok) setTimeout(() => showToast(`OP salva, mas as etiquetas não: ${tr.error}`, 'error'), 1200);
+          refreshOpTags();
+        }
         showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
       } else {
         const created = await createOP(opPayload, { verify: true });
+        if (created?.id && editOpTags.length > 0 && !opTagsState.error) {
+          const tr = await setOpTags(created.id, editOpTags, profile?.uid);
+          if (!tr.ok) setTimeout(() => showToast(`OP criada, mas as etiquetas não: ${tr.error}`, 'error'), 1200);
+          refreshOpTags();
+        }
         if (isPesagemOp) {
           const res = await logPesagemHistory({
             action: 'created',
@@ -1898,6 +1918,7 @@ WHERE email IN (
                             <span className="font-bold text-[#f4f4f5] text-xs truncate" title={op.product}>
                               {op.product}
                             </span>
+                            <OpTagBadges opId={op.id} />
                             {partialStockIds.has(op.id) && (
                               <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-amber-950/80 text-amber-300 border-amber-600/60 shadow-sm shrink-0" title="Teve conclusão parcial — o saldo voltou ao estoque">
                                 Parcial
@@ -2722,6 +2743,11 @@ WHERE email IN (
                 </div>
               </div>
 
+              <div className="space-y-1.5 pt-1">
+                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Etiquetas</Label>
+                <OpTagPicker selected={editOpTags} onChange={setEditOpTags} />
+              </div>
+
               {/* Setor, unidade, indústria, linha, horas de turno, embalagens e cronograma
                   saem deste modal — ficam com os valores padrão (Envase/Un/Ybera/Estoque Geral)
                   e são ajustados depois nas telas de Pesagem/Manipulação/Cronograma, ou nem
@@ -3012,139 +3038,16 @@ WHERE email IN (
         );
       })()}
 
-      {/* ---------------- MODAL: MAIS INFORMAÇÕES DA OP (Estoque de OPs) ---------------- */}
+      {/* ---------------- MODAL: DETALHES COMPLETOS DA OP (Estoque de OPs) ---------------- */}
       {detailsModalOp && (
-        <div
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setDetailsModalOp(null);
-          }}
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
-        >
-          <div className="bg-[#121216] border border-[#222228] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-
-            {/* Header */}
-            <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
-                  <Info className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                      Detalhes da OP
-                    </h3>
-                    <span className="text-[10px] bg-blue-950 text-blue-400 border border-blue-800/50 px-2 py-0.5 rounded-full font-mono font-bold">
-                      OP #{detailsModalOp.number}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#71717a] mt-0.5 truncate">
-                    {detailsModalOp.product}
-                  </p>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setDetailsModalOp(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo */}
-            <div className="p-5 space-y-3">
-              {(() => {
-                const op = detailsModalOp;
-                const assignedLine = lines.find(l => l.id === op.lineId);
-                const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
-                return (
-                  <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5 text-xs">
-
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Tipo / Setor</span>
-                      <span className="font-semibold text-[#f4f4f5] text-right">
-                        {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
-                        {op.setor ? ` · ${op.setor}` : ''}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Prioridade</span>
-                      <span className="font-semibold text-[#f4f4f5]">{op.priority}</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1e1e24]">
-                      <div>
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Planejada</span>
-                        <span className="font-mono font-bold text-[#f4f4f5] text-[11px]">
-                          {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Produzida</span>
-                        <span className="font-mono font-bold text-emerald-400 text-[11px]">
-                          {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} {op.producedQuantity > 0 ? `(${progress}%)` : ''}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Granel</span>
-                      {op.granel ? (
-                        <span className="font-mono font-semibold text-amber-300 text-[11px]">{op.granel}</span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Granel</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Linha Destino</span>
-                      {assignedLine ? (
-                        <span className="font-semibold text-[#d4d4d8] flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-                          {assignedLine.name}
-                        </span>
-                      ) : (
-                        <span className="text-[#71717a] text-[11px] italic">Disponível no Estoque</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Data Cronograma</span>
-                      {op.scheduledDate ? (
-                        <span className="font-semibold text-[#f4f4f5] flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                          {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-                          {op.scheduledShift ? ` · ${op.scheduledShift}` : ''}
-                        </span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Data Prevista</span>
-                      )}
-                    </div>
-
-                    {op.setor === 'Pesagem' && op.status === 'completed' && (
-                      <div className="pt-2 border-t border-[#1e1e24]">
-                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
-                          Pronta p/ Manipulação
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div className="px-5 pb-5 flex items-center justify-end">
-              <button
-                type="button"
-                onClick={() => setDetailsModalOp(null)}
-                className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
-              >
-                Fechar
-              </button>
-            </div>
-          </div>
-        </div>
+        <OpDetailsModal
+          op={ops.find(o => o.id === detailsModalOp.id) || detailsModalOp}
+          ops={ops}
+          events={events}
+          lines={lines}
+          users={allUsers}
+          onClose={() => setDetailsModalOp(null)}
+        />
       )}
 
       {/* MODAL CADASTRAR NOVO LÍDER */}

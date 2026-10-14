@@ -5572,6 +5572,73 @@ export const deleteStaffOccurrence = async (id: string): Promise<{ ok: boolean; 
   }
 };
 
+// ---------------- ETIQUETAS DAS OPS (sql/add_op_tags.sql) ----------------
+export interface OpTagType {
+  id: string;
+  name: string;
+  color: string;
+  sort: number;
+}
+
+const OP_TAGS_SQL_HINT = 'Falta criar as etiquetas no banco — rode sql/add_op_tags.sql no Supabase.';
+const opTagsSqlMissing = (msg: string) => /op_tag|relation|does not exist|schema cache/i.test(msg);
+
+/** Tipos de etiqueta + etiquetas de todas as OPs (opId → ids das etiquetas). */
+export const getOpTagsData = async (): Promise<{ types: OpTagType[]; byOp: Map<string, string[]>; error: string | null }> => {
+  const empty = { types: [] as OpTagType[], byOp: new Map<string, string[]>() };
+  if (trainingModeActive) return { ...empty, error: null };
+  try {
+    const [t, a] = await Promise.all([
+      supabase.from('op_tag_types').select('id, name, color, sort').order('sort', { ascending: true }).order('name', { ascending: true }),
+      supabase.from('op_tags').select('op_id, tag_id'),
+    ]);
+    const err = t.error?.message || a.error?.message || null;
+    if (err) return { ...empty, error: opTagsSqlMissing(err) ? OP_TAGS_SQL_HINT : err };
+    const byOp = new Map<string, string[]>();
+    for (const r of a.data || []) {
+      const k = String(r.op_id);
+      byOp.set(k, [...(byOp.get(k) || []), String(r.tag_id)]);
+    }
+    return {
+      types: (t.data || []).map(r => ({ id: String(r.id), name: String(r.name), color: String(r.color || 'slate'), sort: Number(r.sort) || 0 })),
+      byOp,
+      error: null,
+    };
+  } catch (err: any) {
+    return { ...empty, error: String(err?.message || err) };
+  }
+};
+
+export const addOpTagType = async (name: string, color: string, sort: number): Promise<{ ok: boolean; error?: string }> => {
+  const n = name.trim();
+  if (!n) return { ok: false, error: 'Informe o nome da etiqueta.' };
+  const { data, error } = await supabase.from('op_tag_types').insert({ name: n, color, sort }).select('id');
+  if (error) return { ok: false, error: /duplicate|unique/i.test(error.message) ? 'Já existe uma etiqueta com esse nome.' : opTagsSqlMissing(error.message) ? OP_TAGS_SQL_HINT : error.message };
+  if (!data?.length) return { ok: false, error: 'O banco não gravou (sem permissão).' };
+  return { ok: true };
+};
+
+export const deleteOpTagType = async (id: string): Promise<{ ok: boolean; error?: string }> => {
+  const { data, error } = await supabase.from('op_tag_types').delete().eq('id', id).select('id');
+  if (error) return { ok: false, error: error.message };
+  if (!data?.length) return { ok: false, error: 'O banco não excluiu (sem permissão).' };
+  return { ok: true };
+};
+
+/** Troca as etiquetas de uma OP pelas informadas. */
+export const setOpTags = async (opId: string, tagIds: string[], userId?: string | null): Promise<{ ok: boolean; error?: string }> => {
+  const del = await supabase.from('op_tags').delete().eq('op_id', opId);
+  if (del.error) return { ok: false, error: opTagsSqlMissing(del.error.message) ? OP_TAGS_SQL_HINT : del.error.message };
+  if (tagIds.length === 0) return { ok: true };
+  const { data, error } = await supabase
+    .from('op_tags')
+    .insert(tagIds.map(tag_id => ({ op_id: opId, tag_id, created_by: userId && isUUID(userId) ? userId : null })))
+    .select('op_id');
+  if (error) return { ok: false, error: error.message };
+  if (!data?.length) return { ok: false, error: 'O banco não gravou as etiquetas (sem permissão).' };
+  return { ok: true };
+};
+
 /** Soma das quantidades por tipo. */
 export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurrenceType, number> {
   const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, retorno: 0, ferias: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;

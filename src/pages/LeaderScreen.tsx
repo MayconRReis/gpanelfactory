@@ -76,6 +76,7 @@ import {
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
 import { OpCountdown } from '../components/OpCountdown';
+import { OpTagBadges } from '../components/OpTags';
 import { parseHoursHHMM, formatHoursHHMM } from '../lib/hours';
 import { PresenceIndicator, PresenceDot, useLinePresence } from '../components/PresenceIndicator';
 import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
@@ -1445,6 +1446,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     {!isActiveRework && (activeOp.status === 'in_progress' || activeOp.status === 'paused') && Number(activeOp.plannedHours) > 0 && (
                       <OpCountdown expectedMs={Number(activeOp.plannedHours) * 3600000} workingMs={activeOpWorkingMs} />
                     )}
+
+                    {/* Etiquetas da OP (Datado, Ag. datação…) — definidas pela Coordenação */}
+                    <OpTagBadges opId={activeOp.id} size="md" />
 
                     {/* Badge Sleev se a OP veio do envase com acabamento para Sleev */}
                     {activeOp.isSleeve && (
