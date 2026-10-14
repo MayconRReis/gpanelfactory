@@ -14,6 +14,7 @@ import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyG
 import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../services/productionLedger';
 import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
+import { PerformanceOpsModal } from './PerformanceOpsModal';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -144,12 +145,19 @@ const OEE_SECTORS: { key: OeeSectorKey; label: string; ready: boolean }[] = [
   { key: 'datacao', label: 'Datação', ready: false },
 ];
 
-function OeeDonut({ label, pct, color, glow, border, desc }: { label: string; pct: number | null; color: string; glow: string; border: string; desc: string }) {
+function OeeDonut({ label, pct, color, glow, border, desc, onClick, hint }: { label: string; pct: number | null; color: string; glow: string; border: string; desc: string; onClick?: () => void; hint?: string }) {
   const r = 42;
   const c = 2 * Math.PI * r;
   const v = Math.min(100, Math.max(0, pct ?? 0));
   return (
-    <div className={`bg-[#18181b] border ${border} rounded-2xl p-4 flex flex-col items-center text-center`}>
+    <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+      title={onClick ? hint : undefined}
+      className={`bg-[#18181b] border ${border} rounded-2xl p-4 flex flex-col items-center text-center ${onClick ? 'cursor-pointer hover:bg-[#1d1d22] transition-colors' : ''}`}
+    >
       <span className="text-[11px] font-black uppercase tracking-wider flex items-center gap-1.5 self-start" style={{ color }}>
         <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ background: color, boxShadow: `0 0 8px ${glow}` }} />
         {label}
@@ -168,6 +176,7 @@ function OeeDonut({ label, pct, color, glow, border, desc }: { label: string; pc
         </div>
       </div>
       <p className="text-[10px] text-[#71717a] leading-snug">{desc}</p>
+      {onClick && hint && <span className="text-[10px] font-bold mt-1.5" style={{ color }}>{hint} →</span>}
     </div>
   );
 }
@@ -846,6 +855,7 @@ export function HomeDashboard({
     const m = Math.round(h * 60);
     return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
   };
+  const [showPerfOps, setShowPerfOps] = useState(false);
   const performanceDesc = oeeMetrics.performanceBasis === 'tempo'
     ? `Tempo esperado ${fmtH(oeeMetrics.expectedHours)} ÷ tempo produzido ${fmtH(oeeMetrics.workedHours)}`
       + (oeeMetrics.opsWithoutTime > 0 ? ` · ${oeeMetrics.opsWithoutTime} OP(s) sem horas planejadas fora do cálculo` : '')
@@ -1454,7 +1464,9 @@ export function HomeDashboard({
             <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
               desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
             <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
-              desc={performanceDesc} />
+              desc={performanceDesc}
+              onClick={(oeeMetrics.perfOps?.length || 0) > 0 ? () => setShowPerfOps(true) : undefined}
+              hint="Ver OPs do cálculo" />
             <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
               desc="(Produzido − rejeitado) ÷ produzido" />
             <GoalGauge
@@ -1531,6 +1543,14 @@ export function HomeDashboard({
 
   return (
     <div className="space-y-6 pb-16 animate-in fade-in duration-200 selection:bg-blue-600 selection:text-white">
+      {showPerfOps && (
+        <PerformanceOpsModal
+          ops={oeeMetrics.perfOps || []}
+          lines={lines}
+          periodLabel={PERIOD_LABELS[dashboardPeriod]}
+          onClose={() => setShowPerfOps(false)}
+        />
+      )}
       
       {/* ========================================================================= */}
       {/* NOVO PAINEL DE CONTROLE DE PRODUÇÃO (REFERÊNCIA PCP / OEE) */}
