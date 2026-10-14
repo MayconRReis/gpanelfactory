@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { OpTagBadges, OpTagManagerButton } from './OpTags';
 import { Layers, Plus, GripVertical, Package, AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Lock, Search, X, Printer } from 'lucide-react';
 import { ProductionLine, ProductionOrder } from '../types';
 import { GranelBadge } from './GranelBadge';
@@ -566,6 +567,7 @@ export function CronogramaBoard({
                 Retrabalho
               </span>
             )}
+            <OpTagBadges opId={op.id} />
             {columnId !== BACKLOG_COLUMN_ID && isOverdue(op) && (
               <span
                 className="text-[9px] font-black px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-700/60 uppercase"
@@ -734,6 +736,7 @@ export function CronogramaBoard({
           >
             <Printer className="w-3.5 h-3.5" /> Imprimir semana
           </button>
+          {!readOnly && <OpTagManagerButton />}
           {printError && <span className="text-[10px] text-rose-300 normal-case">{printError}</span>}
         </div>
       </div>

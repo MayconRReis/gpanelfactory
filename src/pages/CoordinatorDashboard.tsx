@@ -106,8 +106,8 @@ import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar,
 import { DailyReport } from '../components/DailyReport';
 import { StaffOccurrencesPage } from '../components/StaffOccurrences';
 import { OpDetailsModal } from '../components/OpDetailsModal';
-import { buildOpHistory } from '../lib/opHistory';
-import { formatMsToHoursMinutes as fmtHMs } from '../lib/productionTime';
+import { OpTagBadges, OpTagPicker, useOpTags, refreshOpTags } from '../components/OpTags';
+import { setOpTags } from '../services/db';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -221,6 +221,10 @@ export function CoordinatorDashboard() {
   // Modal: Confirmação de Exclusão de OP
   const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
   const [isDeletingOp, setIsDeletingOp] = useState(false);
+
+  // Etiquetas da OP (Datado, Ag. datação…) escolhidas no Editar OP
+  const opTagsState = useOpTags();
+  const [editOpTags, setEditOpTags] = useState<string[]>([]);
 
   // Modal: "Mais informações" do card de OP no Estoque de OPs
   const [detailsModalOp, setDetailsModalOp] = useState<ProductionOrder | null>(null);
@@ -825,11 +829,13 @@ WHERE email IN (
     setNewOpScheduledEndDate(today);
     setNewOpScheduledDays('1');
     setNewOpScheduledShift('Integral');
+    setEditOpTags([]);
     setShowNewOpModal(true);
   };
 
   const handleOpenEditOPModal = (op: ProductionOrder) => {
     setEditingOp(op);
+    setEditOpTags(opTagsState.byOp.get(String(op.id)) || []);
     setNewOpNumber(op.number || '');
     setNewOpProduct(op.product || '');
     const currentSetor = op.setor || 'Envase';
@@ -930,9 +936,20 @@ WHERE email IN (
             if (res.error) { const m = `OP salva, mas NÃO ficou registrada no histórico da Pesagem (${res.error}).`; setTimeout(() => showToast(m, 'error'), 1200); }
           }
         }
+        const prevTags = opTagsState.byOp.get(String(editingOp.id)) || [];
+        if (!opTagsState.error && (prevTags.length !== editOpTags.length || prevTags.some(t => !editOpTags.includes(t)))) {
+          const tr = await setOpTags(editingOp.id, editOpTags, profile?.uid);
+          if (!tr.ok) setTimeout(() => showToast(`OP salva, mas as etiquetas não: ${tr.error}`, 'error'), 1200);
+          refreshOpTags();
+        }
         showToast(`${docLabel} ${newOpNumber} atualizada com sucesso!`);
       } else {
         const created = await createOP(opPayload, { verify: true });
+        if (created?.id && editOpTags.length > 0 && !opTagsState.error) {
+          const tr = await setOpTags(created.id, editOpTags, profile?.uid);
+          if (!tr.ok) setTimeout(() => showToast(`OP criada, mas as etiquetas não: ${tr.error}`, 'error'), 1200);
+          refreshOpTags();
+        }
         if (isPesagemOp) {
           const res = await logPesagemHistory({
             action: 'created',
@@ -1296,18 +1313,6 @@ WHERE email IN (
 
   // OPs com conclusão parcial que voltaram ao estoque aguardando o restante
   const partialStockIds = new Set(getPartialOpsInStock(ops, events).map(o => o.id));
-
-  // Eventos agrupados por OP — base dos números dos cards do Estoque (tempo de envase, pausas, ocioso)
-  const eventsByOpId = React.useMemo(() => {
-    const m = new Map<string, ProductionEvent[]>();
-    for (const e of events) {
-      if (!e.opId) continue;
-      const k = String(e.opId);
-      const l = m.get(k);
-      if (l) l.push(e); else m.set(k, [e]);
-    }
-    return m;
-  }, [events]);
 
   // Regra de cada filtro do Estoque de OPs (usada na lista e nos contadores)
   const matchesStockFilter = (op: ProductionOrder, filter: string) => {
@@ -1913,6 +1918,7 @@ WHERE email IN (
                             <span className="font-bold text-[#f4f4f5] text-xs truncate" title={op.product}>
                               {op.product}
                             </span>
+                            <OpTagBadges opId={op.id} />
                             {partialStockIds.has(op.id) && (
                               <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded border bg-amber-950/80 text-amber-300 border-amber-600/60 shadow-sm shrink-0" title="Teve conclusão parcial — o saldo voltou ao estoque">
                                 Parcial
@@ -1956,47 +1962,6 @@ WHERE email IN (
                             )}
                           </div>
                         </div>
-
-                        {/* Produção e tempos (quando a OP já rodou) */}
-                        {(() => {
-                          const opEvents = eventsByOpId.get(String(op.id));
-                          if (!opEvents?.length && !(op.producedQuantity > 0)) return null;
-                          const hist = opEvents?.length ? buildOpHistory(op, opEvents) : null;
-                          const pct = op.plannedQuantity > 0 ? Math.min(100, Math.round((op.producedQuantity / op.plannedQuantity) * 100)) : 0;
-                          return (
-                            <div className="pt-2 border-t border-[#1e1e24] space-y-1.5">
-                              <div className="flex items-center justify-between text-[11px]">
-                                <span className="text-[#a1a1aa]">
-                                  <strong className="text-white font-mono">{op.producedQuantity.toLocaleString('pt-BR')}</strong> / {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
-                                </span>
-                                <span className="font-mono font-bold text-emerald-400">{pct}%</span>
-                              </div>
-                              <div className="h-1.5 bg-[#0e0e12] rounded-full overflow-hidden">
-                                <div className="h-full rounded-full bg-emerald-500" style={{ width: `${pct}%` }} />
-                              </div>
-                              {hist && (
-                                <div className="flex flex-wrap gap-1 text-[10px] font-bold">
-                                  <span className="px-1.5 py-0.5 rounded border bg-[#16161e] border-[#26262f] text-[#d4d4d8]" title="Tempo de envase (trabalhado)">
-                                    ⏱ {fmtHMs(hist.workingMs)}{Number(op.plannedHours) > 0 ? <span className="text-[#71717a] font-normal"> / {fmtHMs(Number(op.plannedHours) * 3600000)}</span> : null}
-                                  </span>
-                                  <span className="px-1.5 py-0.5 rounded border bg-[#16161e] border-[#26262f] text-[#d4d4d8]" title="Pausas">
-                                    ⏸ {hist.pauses.length}
-                                  </span>
-                                  {hist.idleMs >= 60000 && (
-                                    <span className="px-1.5 py-0.5 rounded border bg-amber-950/40 border-amber-800/40 text-amber-300" title="Tempo ocioso">
-                                      ocioso {fmtHMs(hist.idleMs)}
-                                    </span>
-                                  )}
-                                  {hist.justifications.length > 0 && (
-                                    <span className="px-1.5 py-0.5 rounded border bg-rose-950/40 border-rose-800/40 text-rose-300" title="Atrasos/tempos excedidos justificados">
-                                      {hist.justifications.length} justificativa{hist.justifications.length > 1 ? 's' : ''}
-                                    </span>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
 
                         {/* Ações */}
                         <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
@@ -2776,6 +2741,11 @@ WHERE email IN (
                     })()}
                   </p>
                 </div>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Etiquetas</Label>
+                <OpTagPicker selected={editOpTags} onChange={setEditOpTags} />
               </div>
 
               {/* Setor, unidade, indústria, linha, horas de turno, embalagens e cronograma
