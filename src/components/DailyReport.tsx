@@ -853,7 +853,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                 )}
               </tbody>
             </table>
-            <p className="text-[9.5px] text-[#64748b] mt-1">Disponibilidade = trabalhado ÷ (trabalhado + ocioso). Ociosidade é o complemento. Intervalos tolerados não contam: almoço até 1h e café até 15 min, com 5 min de tolerância no retorno. Passou da tolerância, todo o tempo acima do padrão conta como ocioso.</p>
+            <p className="text-[9.5px] text-[#64748b] mt-1">Disponibilidade = trabalhado ÷ (trabalhado + ocioso). Ociosidade é o complemento. Intervalos não contam: almoço de 1h e café de 15 min. O tempo acima do padrão conta como ocioso.</p>
 
             {/* 3. Paradas */}
             <div className={h2}>{num(3)} Paradas do Envase {pauseTotalMs > 0 && <span className="ml-auto text-[10px] font-semibold normal-case tracking-normal text-[#64748b]">total {formatMsToHoursMinutes(pauseTotalMs)}</span>}</div>
