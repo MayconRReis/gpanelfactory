@@ -75,6 +75,7 @@ import {
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
+import { OpCountdown } from '../components/OpCountdown';
 import { PresenceIndicator, PresenceDot, useLinePresence } from '../components/PresenceIndicator';
 import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
@@ -1011,7 +1012,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     for (const ev of sorted) {
       const t = new Date(ev.createdAt).getTime();
       if (isNaN(t)) continue;
-      if (ev.type === 'STARTED' || ev.type === 'RESUMED') {
+      if (ev.type === 'CANCELLED') {
+        // início cancelado (feito por engano): descarta o que foi contado
+        workingMs = 0;
+        currentStart = null;
+      } else if (ev.type === 'STARTED' || ev.type === 'RESUMED') {
         currentStart = t;
       } else if ((ev.type === 'PAUSED' || ev.type === 'FINISHED') && currentStart !== null) {
         workingMs += Math.max(0, t - currentStart);
@@ -1594,6 +1599,21 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     />
                   </div>
                 </div>
+
+                {/* Cronômetro da OP: tempo previsto (cadastro da OP) − tempo trabalhado */}
+                {!isActiveRework && (activeOp.status === 'in_progress' || activeOp.status === 'paused') && (
+                  Number(activeOp.plannedHours) > 0 ? (
+                    <OpCountdown
+                      expectedMs={Number(activeOp.plannedHours) * 3600000}
+                      workingMs={activeOpWorkingMs}
+                      running={activeOp.status === 'in_progress'}
+                    />
+                  ) : (
+                    <p className="text-[11px] text-[#71717a] px-1">
+                      Esta OP não tem <strong className="text-[#a1a1aa]">tempo previsto</strong> cadastrado — o cronômetro aparece quando a Coordenação preencher as horas da OP.
+                    </p>
+                  )
+                )}
 
                 {/* Retrabalho: OP já envasada, voltou do estoque só para o acabamento */}
                 {isActiveRework && activeRework && (
