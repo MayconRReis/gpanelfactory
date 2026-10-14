@@ -15,6 +15,7 @@ import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../servi
 import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import { PerformanceOpsModal } from './PerformanceOpsModal';
+import { OpDetailsModal } from './OpDetailsModal';
 import { LastUpdatedBadge } from './LastUpdatedBadge';
 import {
   ResponsiveContainer,
@@ -881,6 +882,7 @@ export function HomeDashboard({
     return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
   };
   const [showPerfOps, setShowPerfOps] = useState(false);
+  const [perfDetailOpId, setPerfDetailOpId] = useState<string | null>(null);
   const performanceDesc = oeeMetrics.performanceBasis === 'tempo'
     ? `Tempo esperado ${fmtH(oeeMetrics.expectedHours)} ÷ tempo produzido ${fmtH(oeeMetrics.workedHours)}`
       + (oeeMetrics.opsWithoutTime > 0 ? ` · ${oeeMetrics.opsWithoutTime} OP(s) sem horas planejadas fora do cálculo` : '')
@@ -1575,8 +1577,15 @@ export function HomeDashboard({
           lines={lines}
           periodLabel={PERIOD_LABELS[dashboardPeriod]}
           onClose={() => setShowPerfOps(false)}
+          onOpenOp={setPerfDetailOpId}
         />
       )}
+      {perfDetailOpId && (() => {
+        const detailOp = ops.find(o => String(o.id) === perfDetailOpId);
+        return detailOp ? (
+          <OpDetailsModal op={detailOp} ops={ops} events={events} lines={lines} users={allUsers} onClose={() => setPerfDetailOpId(null)} />
+        ) : null;
+      })()}
       
       {/* ========================================================================= */}
       {/* NOVO PAINEL DE CONTROLE DE PRODUÇÃO (REFERÊNCIA PCP / OEE) */}
