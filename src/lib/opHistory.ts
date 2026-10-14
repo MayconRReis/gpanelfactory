@@ -1,5 +1,6 @@
 import { ProductionEvent, ProductionOrder } from '../types';
-import { getBreakAllowanceMs, isBreakPauseReason, BREAK_RETURN_GRACE_MS } from './productionTime';
+import { getBreakAllowanceMs, isBreakPauseReason, BREAK_RETURN_GRACE_MS, splitWorkingAcrossDays } from './productionTime';
+import { WorkSession } from '../types';
 import { extractJustification, JUSTIFICATION_TAG } from './tolerances';
 
 /**
@@ -66,7 +67,12 @@ function pauseIdleMs(reason: string | undefined, durationMs: number): number {
   return durationMs <= allowance + BREAK_RETURN_GRACE_MS ? 0 : durationMs - allowance;
 }
 
-export function buildOpHistory(op: ProductionOrder, allEvents: ProductionEvent[], nowMs: number = Date.now()): OpHistory {
+export function buildOpHistory(
+  op: ProductionOrder,
+  allEvents: ProductionEvent[],
+  nowMs: number = Date.now(),
+  workSessions: WorkSession[] = []
+): OpHistory {
   const events = allEvents
     .filter(e => String(e.opId) === String(op.id) && !isNaN(ms(e)))
     .sort((a, b) => ms(a) - ms(b));
@@ -87,6 +93,14 @@ export function buildOpHistory(op: ProductionOrder, allEvents: ProductionEvent[]
   };
 
   let workStart: number | null = null;
+  let workLine: string | undefined = op.lineId || undefined;
+  // Trecho em produção: se atravessou a noite (OP esquecida "em produção", sem
+  // pausar/encerrar o expediente), só conta dentro da jornada/expediente de
+  // cada dia — a mesma regra do dashboard (splitWorkingAcrossDays).
+  const addWork = (a: number, b: number) => {
+    if (!(b > a)) return;
+    for (const [x, y] of splitWorkingAcrossDays(a, b, workLine, workSessions)) out.workingMs += y - x;
+  };
   let openPause: OpPause | null = null;
   const lines = new Set<string>();
 
@@ -125,15 +139,17 @@ export function buildOpHistory(op: ProductionOrder, allEvents: ProductionEvent[]
         if (out.startedAt === null) { out.startedAt = t; out.startedBy = ev.leaderId; }
         closePause(t, ev);
         workStart = t;
+        workLine = ev.lineId || workLine;
         break;
       }
       case 'RESUMED': {
         closePause(t, ev);
         workStart = t;
+        workLine = ev.lineId || workLine;
         break;
       }
       case 'PAUSED': {
-        if (workStart !== null) { out.workingMs += Math.max(0, t - workStart); workStart = null; }
+        if (workStart !== null) { addWork(workStart, t); workStart = null; }
         if (!openPause) {
           openPause = {
             reason: ev.reason || 'Sem motivo',
@@ -146,7 +162,7 @@ export function buildOpHistory(op: ProductionOrder, allEvents: ProductionEvent[]
         break;
       }
       case 'FINISHED': {
-        if (workStart !== null) { out.workingMs += Math.max(0, t - workStart); workStart = null; }
+        if (workStart !== null) { addWork(workStart, t); workStart = null; }
         closePause(t, ev);
         const obs = String(ev.observation || '').trim();
         if (/^envase parcial/i.test(obs)) {
@@ -166,7 +182,7 @@ export function buildOpHistory(op: ProductionOrder, allEvents: ProductionEvent[]
   }
 
   // OP ainda aberta: conta até agora
-  if (workStart !== null && op.status === 'in_progress') out.workingMs += Math.max(0, nowMs - workStart);
+  if (workStart !== null && op.status === 'in_progress') addWork(workStart, nowMs);
   if (openPause && op.status === 'paused') {
     const p = openPause as OpPause;
     p.durationMs = Math.max(0, nowMs - p.startMs);
