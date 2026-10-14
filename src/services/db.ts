@@ -75,6 +75,25 @@ export function calculateTotalPauseHours(events: ProductionEvent[]): number {
  * Retorna null para cada componente quando não há dados suficientes.
  */
 /** Detalhe da Performance por TEMPO (horas esperadas × horas produzidas). */
+export interface PerfOpDetail {
+  opId: string;
+  number: string;
+  product: string;
+  lineId: string | null;
+  status: ProductionOrder['status'];
+  /** Horas previstas da OP inteira */
+  plannedHours: number;
+  /** Esperado proporcional ao produzido (ms) */
+  expectedMs: number;
+  /** Tempo trabalhado na OP (ms) */
+  workedMs: number;
+  produced: number;
+  planned: number;
+  included: boolean;
+  /** Por que ficou fora do cálculo */
+  reason?: string;
+}
+
 export interface OEEPerformanceTime {
   /** 'tempo' = horas planejadas das OPs; 'quantidade' = nenhuma OP do período tem horas planejadas (cálculo antigo). */
   performanceBasis: 'tempo' | 'quantidade' | null;
@@ -86,6 +105,8 @@ export interface OEEPerformanceTime {
   opsWithTime: number;
   /** OPs do período sem "Horas planejadas" (ficam fora da Performance) */
   opsWithoutTime: number;
+  /** OP a OP: as que entraram no cálculo e as que ficaram de fora (com o motivo) */
+  perfOps?: PerfOpDetail[];
 }
 export interface OEEResult extends OEEPerformanceTime {
   disponibilidade: number | null;
@@ -187,7 +208,15 @@ export function calculateOEE(
     );
     const timedOps = perfCandidates.filter(op => (Number(op.plannedHours) || 0) > 0);
     let performance: number | null = null;
-    let perfTime: OEEPerformanceTime = { ...EMPTY_PERF_TIME, opsWithoutTime: perfCandidates.length - timedOps.length };
+    let perfTime: OEEPerformanceTime = {
+      ...EMPTY_PERF_TIME,
+      opsWithoutTime: perfCandidates.length - timedOps.length,
+      perfOps: perfCandidates.filter(op => !((Number(op.plannedHours) || 0) > 0)).map(op => ({
+        opId: String(op.id), number: op.number, product: op.product, lineId: op.lineId || null, status: op.status,
+        plannedHours: 0, expectedMs: 0, workedMs: 0, produced: Number(op.producedQuantity) || 0, planned: Number(op.plannedQuantity) || 0,
+        included: false, reason: 'Sem tempo previsto',
+      })),
+    };
 
     if (timedOps.length > 0) {
       const timedIds = new Set(timedOps.map(o => String(o.id)));
@@ -209,16 +238,26 @@ export function calculateOEE(
       let expectedMs = 0;
       let workedMs = 0;
       let counted = 0;
-      for (const op of timedOps) {
+      const perfOps: PerfOpDetail[] = [];
+      const detail = (op: ProductionOrder, extra: Partial<PerfOpDetail>): PerfOpDetail => ({
+        opId: String(op.id), number: op.number, product: op.product, lineId: op.lineId || null, status: op.status,
+        plannedHours: Number(op.plannedHours) || 0, expectedMs: 0, workedMs: 0,
+        produced: Number(op.producedQuantity) || 0, planned: Number(op.plannedQuantity) || 0, included: false, ...extra,
+      });
+      for (const op of perfCandidates) {
+        if (!((Number(op.plannedHours) || 0) > 0)) { perfOps.push(detail(op, { reason: 'Sem tempo previsto' })); continue; }
         const worked = workedByOp.get(String(op.id)) || 0;
-        if (worked <= 0) continue; // sem apontamentos de tempo (ex.: histórico importado)
+        // sem apontamentos de tempo (ex.: histórico importado)
+        if (worked <= 0) { perfOps.push(detail(op, { reason: 'Sem tempo trabalhado registrado' })); continue; }
         const partial = partialQtyByOp.get(String(op.id)) || 0;
         const opQty = (op.plannedQuantity || 0) + partial;
         const produced = Math.max(0, (op.producedQuantity || 0) + partial);
-        if (opQty <= 0 || produced <= 0) continue;
-        expectedMs += (Number(op.plannedHours) || 0) * 3_600_000 * (produced / opQty);
+        if (opQty <= 0 || produced <= 0) { perfOps.push(detail(op, { workedMs: worked, reason: 'Sem quantidade produzida' })); continue; }
+        const exp = (Number(op.plannedHours) || 0) * 3_600_000 * (produced / opQty);
+        expectedMs += exp;
         workedMs += worked;
         counted += 1;
+        perfOps.push(detail(op, { expectedMs: exp, workedMs: worked, produced, planned: opQty, included: true }));
       }
       perfTime = {
         performanceBasis: counted > 0 ? 'tempo' : null,
@@ -226,6 +265,7 @@ export function calculateOEE(
         workedHours: workedMs / 3_600_000,
         opsWithTime: counted,
         opsWithoutTime: perfCandidates.length - counted,
+        perfOps,
       };
       if (workedMs > 0) performance = Math.max(0, Math.min(1, expectedMs / workedMs));
     }
