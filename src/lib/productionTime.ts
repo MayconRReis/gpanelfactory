@@ -46,12 +46,16 @@ export interface LineTimeMetrics {
  */
 /**
  * Pausas toleradas (não contam como ociosidade até o limite, por pausa):
- * - INTERVALO (almoço): até 1h
- * - CAFÉ: até 15min
- * O que passar do limite numa mesma pausa volta a contar como ocioso.
+ * - INTERVALO (almoço): padrão 1h
+ * - CAFÉ: padrão 15min
+ * + TOLERÂNCIA DE RETORNO de 5 min: voltando até o padrão + 5 min (1h05 /
+ *   20 min), a pausa inteira é tolerada. Passou disso, TODO o tempo acima do
+ *   padrão conta como ocioso (ex.: café de 25 min = 10 min ociosos) e o líder
+ *   precisa justificar ao retomar.
  */
 export const BREAK_ALLOWANCE_MS = 60 * 60 * 1000;
 export const COFFEE_ALLOWANCE_MS = 15 * 60 * 1000;
+export const BREAK_RETURN_GRACE_MS = 5 * 60 * 1000;
 export function isCoffeePauseReason(reason?: string | null): boolean {
   return /^\s*caf[eé]/i.test(String(reason || ''));
 }
@@ -63,6 +67,17 @@ export function getBreakAllowanceMs(reason?: string | null): number {
   if (isCoffeePauseReason(reason)) return COFFEE_ALLOWANCE_MS;
   if (/^\s*intervalo/i.test(String(reason || ''))) return BREAK_ALLOWANCE_MS;
   return 0;
+}
+/** Limite da pausa com a tolerância de retorno (padrão + 5 min); 0 quando não é café/almoço. */
+export function getBreakLimitMs(reason?: string | null): number {
+  const a = getBreakAllowanceMs(reason);
+  return a > 0 ? a + BREAK_RETURN_GRACE_MS : 0;
+}
+/** Tempo acima do padrão que conta como ocioso (0 se voltou dentro da tolerância). */
+export function getBreakExcessMs(reason: string | null | undefined, durationMs: number): number {
+  const a = getBreakAllowanceMs(reason);
+  if (a <= 0) return 0;
+  return durationMs > a + BREAK_RETURN_GRACE_MS ? durationMs - a : 0;
 }
 
 export const WORK_SCHEDULE: Record<number, { start: number; end: number } | null> = {
@@ -522,7 +537,7 @@ export function calculateProductionTime(
     });
   };
 
-  // Trechos de INTERVALO dentro da tolerância (até 1h por pausa), por linha —
+  // Trechos de INTERVALO/CAFÉ dentro da tolerância (padrão + 5 min), por linha —
   // não são ociosidade e, com expediente, também saem da base do expediente.
   const breakRangesByLine = new Map<string, Array<[number, number]>>();
   const pushPause = (
@@ -539,7 +554,10 @@ export function calculateProductionTime(
       return;
     }
     const allowanceMs = getBreakAllowanceMs(reason);
-    const allowanceEnd = Math.min(endMs, startMs + allowanceMs);
+    // Voltou dentro da tolerância de retorno (padrão + 5 min): tudo tolerado.
+    // Passou disso: tolera só o padrão e o resto inteiro vira ocioso.
+    const withinGrace = endMs - startMs <= allowanceMs + BREAK_RETURN_GRACE_MS;
+    const allowanceEnd = withinGrace ? endMs : Math.min(endMs, startMs + allowanceMs);
     // parte tolerada: guarda (recortada pelo filtro de data / agora) sem contar como ocioso
     let a = startMs;
     let b = Math.min(allowanceEnd, refTime);
@@ -554,7 +572,7 @@ export function calculateProductionTime(
     }
     // o que passar do limite conta como ociosidade normal
     if (endMs > allowanceEnd) {
-      pushInterval('IDLE', allowanceEnd, endMs, opId, lineId, `${reason} (acima de ${allowanceMs >= 3600000 ? '1h' : '15min'})`, observation, resourceKey);
+      pushInterval('IDLE', allowanceEnd, endMs, opId, lineId, `${reason} (excedido — acima de ${allowanceMs >= 3600000 ? '1h' : '15min'})`, observation, resourceKey);
     }
   };
 
@@ -1051,7 +1069,7 @@ export function calculateProductionTime(
       // O trabalho fora do expediente registrado também é coberto (conta como trabalhado, nunca como ocioso)
       const coverage = mergeRanges([...explicitUnion, ...autoRanges, ...Array.from(implicitByDay.values()), ...workingUnion]);
 
-      // Intervalo tolerado (até 1h) não é ocioso nem conta na base do expediente
+      // Intervalo tolerado (almoço/café dentro da tolerância) não é ocioso nem conta na base do expediente
       // Reatores: almoço (12h–13h) e janta (20h–21h) são pausas automáticas —
       // o que não foi trabalhado nesses horários não é ocioso.
       const mealBreaks = isReactorLineId(lId) && coverage.length > 0

@@ -96,6 +96,14 @@ import {
 } from 'recharts';
 import { calculateProductionRatePerHour, getAutoShiftNow } from '../lib/productionTime';
 import { isCoffeeBreakDue, COFFEE_PAUSE_REASON, COFFEE_AUTO_OBSERVATION } from '../lib/coffeeBreak';
+import {
+  getLateStart,
+  getBreakOverrun,
+  getBreakStatus,
+  buildJustificationObservation,
+  PendingJustification,
+  TOLERANCE_KIND_LABEL,
+} from '../lib/tolerances';
 
 type LeaderTab = 'operation' | 'daily_dash' | 'monthly_dash';
 
@@ -207,6 +215,10 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const [isChangeoverBusy, setIsChangeoverBusy] = useState(false);
   const [changeoverError, setChangeoverError] = useState<string | null>(null);
   const [isSetupDialogOpen, setIsSetupDialogOpen] = useState(false);
+  // Justificativa de tempo excedido (atraso no início / café ou almoço acima da tolerância)
+  const [justifyDialog, setJustifyDialog] = useState<{ items: PendingJustification[]; actionLabel: string; run: (obs: string) => Promise<void> } | null>(null);
+  const [justifyText, setJustifyText] = useState('');
+  const [justifyBusy, setJustifyBusy] = useState(false);
 
   // Relógio em tempo real
   useEffect(() => {
@@ -436,6 +448,14 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       .sort(compareQueue);
   }, [lineOps, activeOp]);
 
+  // Pausa em andamento da OP ativa (motivo e desde quando)
+  const activePauseEvent = useMemo(() => {
+    if (!activeOp || activeOp.status !== 'paused') return null;
+    return recentEvents
+      .filter(e => String(e.opId) === String(activeOp.id) && e.type === 'PAUSED')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] || null;
+  }, [recentEvents, activeOp]);
+
   // Eventos da linha atual
   const lineEvents = useMemo(() => {
     if (!currentLine) return [];
@@ -598,13 +618,36 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     if (res.error) console.warn('[LeaderScreen] Não foi possível encerrar o setup:', res.error);
   };
 
+  // Pede a justificativa antes de executar a ação quando houve atraso/excesso
+  const withJustification = async (items: PendingJustification[], actionLabel: string, run: (obs?: string) => Promise<void>) => {
+    if (items.length === 0) { await run(); return; }
+    setJustifyText('');
+    setJustifyDialog({ items, actionLabel, run: (obs: string) => run(obs) });
+  };
+  const confirmJustification = async () => {
+    if (!justifyDialog || justifyText.trim().length < 5 || justifyBusy) return;
+    setJustifyBusy(true);
+    try {
+      await justifyDialog.run(buildJustificationObservation(justifyDialog.items, justifyText));
+      setJustifyDialog(null);
+      setJustifyText('');
+    } finally {
+      setJustifyBusy(false);
+    }
+  };
+
   const handleStart = async () => {
     if (!currentLine || !activeOp || !profile) return;
-    await ensureShiftOpen();
-    // Iniciar a próxima OP encerra a troca de produto aberta
-    if (openChangeover) await handleEndChangeover(activeOp.id);
-    await startOP(activeOp.id, currentLine.id, profile.uid);
-    await fetchData(true);
+    const op = activeOp;
+    const line = currentLine;
+    const late = getLateStart(line, recentEvents, Date.now(), changeovers);
+    await withJustification(late ? [late] : [], 'Iniciar produção', async (obs) => {
+      await ensureShiftOpen();
+      // Iniciar a próxima OP encerra a troca de produto aberta
+      if (openChangeover) await handleEndChangeover(op.id);
+      await startOP(op.id, line.id, profile.uid, obs);
+      await fetchData(true);
+    });
   };
 
   // "Outro" sem descrição não diz nada no relatório — a observação passa a ser obrigatória
@@ -655,9 +698,21 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
   const handleResume = async () => {
     if (!currentLine || !activeOp || !profile) return;
-    await ensureShiftOpen();
-    await resumeOP(activeOp.id, currentLine.id, profile.uid);
-    await fetchData(true);
+    const op = activeOp;
+    const line = currentLine;
+    const now = Date.now();
+    const items: PendingJustification[] = [];
+    const late = getLateStart(line, recentEvents, now, changeovers);
+    if (late) items.push(late);
+    if (activePauseEvent) {
+      const over = getBreakOverrun(activePauseEvent.reason, new Date(activePauseEvent.createdAt).getTime(), now);
+      if (over) items.push(over);
+    }
+    await withJustification(items, 'Retomar produção', async (obs) => {
+      await ensureShiftOpen();
+      await resumeOP(op.id, line.id, profile.uid, obs);
+      await fetchData(true);
+    });
   };
 
   const handleReport = async (qtyToReport?: number) => {
@@ -1368,6 +1423,23 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                   </h3>
                 </div>
 
+                {/* Linha ainda não começou a produzir depois da tolerância de início (jornada + 10 min) */}
+                {activeOp.status !== 'in_progress' && currentLine && (() => {
+                  const late = getLateStart(currentLine, recentEvents, currentTime.getTime(), changeovers);
+                  if (!late) return null;
+                  return (
+                    <div className="bg-rose-950/40 border border-rose-500/50 rounded-2xl p-4 flex items-start gap-3 animate-in fade-in">
+                      <Clock className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                      <div>
+                        <h4 className="text-xs font-bold text-rose-300 uppercase tracking-wider">Início da produção atrasado · {late.excessMin} min</h4>
+                        <p className="text-[12px] text-rose-100/90 mt-1 leading-snug">
+                          A jornada começou às 07:00 e a tolerância é de 10 min. O tempo parado já conta como ocioso — ao iniciar, informe a justificativa.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Se estiver pausada, mostra banner com motivo */}
                 {activeOp.status === 'paused' && (
                   <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-start gap-3 animate-in fade-in">
@@ -1378,13 +1450,44 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       </h4>
                       {(() => {
                         // Última pausa desta OP: motivo e o que o líder escreveu
-                        const lastPause = recentEvents
-                          .filter(e => String(e.opId) === String(activeOp.id) && e.type === 'PAUSED')
-                          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+                        const lastPause = activePauseEvent;
                         if (!lastPause) return null;
                         const since = new Date(lastPause.createdAt);
+                        // Café/almoço: cronômetro com o limite (padrão + 5 min de tolerância)
+                        const st = getBreakStatus(lastPause.reason, since.getTime(), currentTime.getTime());
+                        const mmss = (ms: number) => {
+                          const t = Math.floor(ms / 1000);
+                          const h = Math.floor(t / 3600);
+                          const m = Math.floor((t % 3600) / 60);
+                          const sec = t % 60;
+                          return `${h > 0 ? `${h}:${String(m).padStart(2, '0')}` : String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+                        };
+                        const fmtLimit = (ms: number) => (ms >= 3600000 ? `${Math.floor(ms / 3600000)}h${ms % 3600000 ? String(Math.round((ms % 3600000) / 60000)).padStart(2, '0') : ''}` : `${Math.round(ms / 60000)} min`);
                         return (
                           <>
+                            {st && (
+                              <div className={`mt-2 mb-1 rounded-xl border px-3 py-2 ${st.level === 'excedido' ? 'bg-rose-950/50 border-rose-500/60 animate-pulse' : st.level === 'tolerancia' ? 'bg-orange-950/40 border-orange-500/50' : 'bg-amber-950/20 border-amber-500/30'}`}>
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className={`text-[10px] font-black uppercase tracking-wider ${st.level === 'excedido' ? 'text-rose-300' : st.level === 'tolerancia' ? 'text-orange-300' : 'text-amber-300'}`}>
+                                    {st.level === 'excedido'
+                                      ? `${st.kind === 'cafe' ? 'Café' : 'Almoço'} excedido`
+                                      : st.level === 'tolerancia'
+                                        ? 'Tolerância de retorno'
+                                        : st.kind === 'cafe' ? 'Café' : 'Almoço'}
+                                  </span>
+                                  <span className={`font-mono font-black text-2xl tabular-nums ${st.level === 'excedido' ? 'text-rose-200' : st.level === 'tolerancia' ? 'text-orange-200' : 'text-amber-100'}`}>
+                                    {mmss(st.elapsedMs)}
+                                  </span>
+                                </div>
+                                <p className={`text-[11px] mt-0.5 ${st.level === 'excedido' ? 'text-rose-200' : 'text-amber-200/70'}`}>
+                                  {st.level === 'excedido'
+                                    ? `Passou ${Math.ceil((st.elapsedMs - st.limitMs) / 60000)} min do limite (${fmtLimit(st.limitMs)}). ${Math.round(st.excessMs / 60000)} min já contam como ociosos — ao retomar, informe a justificativa.`
+                                    : st.level === 'tolerancia'
+                                      ? `Padrão de ${fmtLimit(st.standardMs)} encerrado — retorne até ${fmtLimit(st.limitMs)} (faltam ${mmss(st.limitMs - st.elapsedMs)}).`
+                                      : `Padrão ${fmtLimit(st.standardMs)} + 5 min de tolerância · limite ${new Date(since.getTime() + st.limitMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
+                                </p>
+                              </div>
+                            )}
                             <p className="text-[13px] font-semibold text-amber-100 mt-1 leading-snug">
                               <span className="text-amber-300/70 font-normal">Motivo:</span> {lastPause.reason || 'Sem motivo informado'}
                               <span className="text-amber-300/50 font-normal"> · desde {since.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
@@ -1900,12 +2003,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </Select>
               {/^\s*intervalo/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
-                  Intervalos de até 1 hora não serão contabilizados como ociosidade. Caso ultrapasse 1 hora, somente o período excedente será contabilizado como ociosidade.
+                  Almoço de 1 hora, com 5 minutos de tolerância no retorno (até 1h05), não conta como ociosidade. Passou disso, todo o tempo acima de 1 hora conta como ocioso e será pedida uma justificativa ao retomar.
                 </p>
               )}
               {/^\s*caf[eé]/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
-                  Cafés de até 15 minutos não serão contabilizados como ociosidade. Caso ultrapasse 15 minutos, somente o período excedente será contabilizado como ociosidade.
+                  Café de 15 minutos, com 5 minutos de tolerância no retorno (até 20 min), não conta como ociosidade. Passou disso, todo o tempo acima de 15 minutos conta como ocioso e será pedida uma justificativa ao retomar.
                 </p>
               )}
             </div>
@@ -2584,6 +2687,55 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
       </Dialog>
 
       {/* MODAL 5: VINCULAR OP DO ESTOQUE À LINHA */}
+      {/* Justificativa de tempo excedido (atraso no início / café ou almoço acima da tolerância) */}
+      <Dialog open={!!justifyDialog} onOpenChange={(o) => { if (!o && !justifyBusy) { setJustifyDialog(null); setJustifyText(''); } }}>
+        <DialogContent className="bg-[#131318] border-rose-900/60 text-[#f4f4f5] max-w-md rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-rose-400 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5" />
+              Tempo excedido — justifique
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {justifyDialog?.items.map((it, i) => (
+              <div key={i} className="rounded-xl border border-rose-800/50 bg-rose-950/30 px-3 py-2">
+                <p className="text-[11px] font-black uppercase tracking-wider text-rose-300">{TOLERANCE_KIND_LABEL[it.kind]} · {it.excessMin} min</p>
+                <p className="text-xs text-[#d4d4d8] mt-0.5 leading-snug">{it.summary}</p>
+              </div>
+            ))}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">O que aconteceu? *</Label>
+              <textarea
+                autoFocus
+                value={justifyText}
+                onChange={(e) => setJustifyText(e.target.value)}
+                rows={3}
+                placeholder="Ex.: aguardando liberação do granel pela manipulação"
+                className="w-full rounded-xl bg-[#0f0f14] border border-[#2c2c3c] focus:border-rose-500/60 outline-none px-3 py-2 text-sm text-white placeholder:text-[#52525b] resize-none"
+              />
+              <p className="text-[10px] text-[#71717a]">A justificativa fica registrada no histórico e no Relatório do Dia. O tempo excedido conta como ocioso.</p>
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              disabled={justifyBusy}
+              onClick={() => { setJustifyDialog(null); setJustifyText(''); }}
+              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={confirmJustification}
+              disabled={justifyBusy || justifyText.trim().length < 5}
+              className="bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-wider"
+            >
+              {justifyBusy ? 'Gravando...' : `Justificar e ${justifyDialog?.actionLabel.toLowerCase() || 'continuar'}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {isAssignStockOpen && currentLine && (
         <AssignStockOpToLineModal
           isOpen={isAssignStockOpen}
@@ -2592,17 +2744,21 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           ops={allOps}
           onAssignAndStart={async (opId, lineId) => {
             const today = getLocalDateStr();
-            await updateOP(opId, {
-              lineId,
-              scheduledDate: today,
-              scheduledEndDate: today,
-              scheduledDays: 1,
-            });
-            if (profile) {
-              await startOP(opId, lineId, profile.uid);
-            }
+            const targetLine = lines.find(l => l.id === lineId) || currentLine;
+            const late = targetLine ? getLateStart(targetLine, recentEvents, Date.now(), changeovers) : null;
             setIsAssignStockOpen(false);
-            await fetchData(true);
+            await withJustification(late ? [late] : [], 'Iniciar produção', async (obs) => {
+              await updateOP(opId, {
+                lineId,
+                scheduledDate: today,
+                scheduledEndDate: today,
+                scheduledDays: 1,
+              });
+              if (profile) {
+                await startOP(opId, lineId, profile.uid, obs);
+              }
+              await fetchData(true);
+            });
           }}
           onAssignToQueue={async (opId, lineId) => {
             const today = getLocalDateStr();

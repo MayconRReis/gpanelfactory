@@ -4095,7 +4095,7 @@ function restoreLocalState(snap: { ops: ProductionOrder[]; lines: ProductionLine
   persistEvents();
 }
 
-export const startOP = async (opId: string, lineId: string, leaderId: string) => {
+export const startOP = async (opId: string, lineId: string, leaderId: string, observation?: string) => {
   if (trainingModeActive) {
     const currentOp = trainingOps.find(op => op.id === opId);
     const currentLine = trainingLines.find(l => l.id === lineId);
@@ -4109,6 +4109,7 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
       lineName: currentLine?.name || lineId,
       leaderId,
       type: 'STARTED',
+      ...(observation ? { observation } : {}),
       createdAt: new Date().toISOString(),
     }, ...trainingEvents];
     return;
@@ -4132,6 +4133,7 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
     lineName: currentLine?.name || lineId,
     leaderId,
     type: 'STARTED',
+      ...(observation ? { observation } : {}),
     createdAt: new Date().toISOString(),
   };
   inMemoryEvents = [newEvent, ...inMemoryEvents];
@@ -4154,6 +4156,7 @@ export const startOP = async (opId: string, lineId: string, leaderId: string) =>
       lineId,
       leaderId,
       type: 'STARTED',
+      ...(observation ? { observation } : {}),
       createdAt: newEvent.createdAt,
     });
   } catch (error) {
@@ -4264,7 +4267,7 @@ export const pauseOP = async (
   return { ok: true as const };
 };
 
-export const resumeOP = async (opId: string, lineId: string, leaderId: string) => {
+export const resumeOP = async (opId: string, lineId: string, leaderId: string, observation?: string) => {
   if (trainingModeActive) {
     const currentOp = trainingOps.find(op => op.id === opId);
     const currentLine = trainingLines.find(l => l.id === lineId);
@@ -4278,6 +4281,7 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
       lineName: currentLine?.name || lineId,
       leaderId,
       type: 'RESUMED',
+      ...(observation ? { observation } : {}),
       createdAt: new Date().toISOString(),
     }, ...trainingEvents];
     return;
@@ -4301,6 +4305,7 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
     lineName: currentLine?.name || lineId,
     leaderId,
     type: 'RESUMED',
+      ...(observation ? { observation } : {}),
     createdAt: new Date().toISOString(),
   };
   inMemoryEvents = [newEvent, ...inMemoryEvents];
@@ -4323,6 +4328,7 @@ export const resumeOP = async (opId: string, lineId: string, leaderId: string) =
       lineId,
       leaderId,
       type: 'RESUMED',
+      ...(observation ? { observation } : {}),
       createdAt: newEvent.createdAt,
     });
   } catch (error) {
