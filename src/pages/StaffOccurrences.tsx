@@ -41,6 +41,7 @@ const TYPE_STYLE: Record<StaffOccurrenceType, string> = {
   incidente: 'bg-yellow-950/60 text-yellow-300 border-yellow-800/50',
   hora_extra: 'bg-violet-950/60 text-violet-300 border-violet-800/50',
   retorno: 'bg-teal-950/60 text-teal-300 border-teal-800/50',
+  ferias: 'bg-indigo-950/60 text-indigo-300 border-indigo-800/50',
   free_balde: 'bg-emerald-950/60 text-emerald-300 border-emerald-800/50',
 };
 
@@ -53,6 +54,7 @@ const REASON_PLACEHOLDER: Record<StaffOccurrenceType, string> = {
   incidente: 'O que aconteceu (quase acidente, derramamento etc.)',
   hora_extra: 'Ex.: das 17:00 às 19:00',
   retorno: 'Ex.: voltou da consulta',
+  ferias: 'Ex.: férias de 15 dias',
   free_balde: 'Ex.: lavagem de baldes — 4h',
 };
 

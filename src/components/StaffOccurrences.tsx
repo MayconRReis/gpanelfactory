@@ -10,6 +10,7 @@ import {
   sumStaffOccurrences,
   STAFF_OCCURRENCE_LABELS,
   toLocalDateStr,
+  countPeriodDays,
 } from '../services/db';
 import { EmployeeNameInput } from './EmployeeNameInput';
 
@@ -23,8 +24,37 @@ import { EmployeeNameInput } from './EmployeeNameInput';
 // Tipos do formulário/filtros. "Free do balde" foi descontinuado (os
 // lançamentos antigos continuam aparecendo na lista).
 export const STAFF_TYPES: StaffOccurrenceType[] = [
-  'falta', 'atraso', 'atestado', 'saida_antecipada', 'retorno', 'acidente', 'incidente', 'hora_extra',
+  'falta', 'atraso', 'atestado', 'ferias', 'saida_antecipada', 'retorno', 'acidente', 'incidente', 'hora_extra',
 ];
+
+/** Tipos que podem ter vários dias (pedem o último dia fora) */
+const PERIOD_TYPES: StaffOccurrenceType[] = ['atestado', 'ferias'];
+
+const fmtDayMonth = (d: string) => d.split('-').reverse().slice(0, 2).join('/');
+
+/** "5 dias · de 14/10 a 18/10 · volta 19/10" — resumo do período escolhido no formulário */
+function periodSummary(start: string, end: string): string | null {
+  if (!start || !end || end < start) return null;
+  const n = countPeriodDays(start, end);
+  if (n <= 1) return null;
+  return `${n} dias fora · de ${fmtDayMonth(start)} a ${fmtDayMonth(end)} · volta ${fmtDayMonth(addDays(end, 1))}`;
+}
+
+/** Atestado/férias de vários dias: "dia 2 de 5 · até 18/10" */
+export function StaffPeriodTag({ o }: { o: StaffOccurrence }) {
+  const start = o.startDate || o.date;
+  if (!o.endDate || o.endDate <= start) return null;
+  const n = countPeriodDays(start, o.endDate);
+  const i = countPeriodDays(start, o.date);
+  return (
+    <span className="block text-[10px] font-bold text-sky-300">
+      dia {i} de {n} · fora até {fmtDayMonth(o.endDate)} · volta {fmtDayMonth(addDays(o.endDate, 1))}
+    </span>
+  );
+}
+
+/** Na exclusão, o lançamento real (um período inteiro conta como um só) */
+const occurrenceSourceId = (o: StaffOccurrence) => o.sourceId || o.id;
 
 /** Tipos que pedem o horário em que aconteceu */
 const TIMED_TYPES: StaffOccurrenceType[] = ['saida_antecipada', 'retorno'];
@@ -42,6 +72,7 @@ const TYPE_STYLE: Record<StaffOccurrenceType, string> = {
   incidente: 'bg-yellow-950/60 text-yellow-300 border-yellow-800/50',
   hora_extra: 'bg-violet-950/60 text-violet-300 border-violet-800/50',
   retorno: 'bg-teal-950/60 text-teal-300 border-teal-800/50',
+  ferias: 'bg-indigo-950/60 text-indigo-300 border-indigo-800/50',
   free_balde: 'bg-emerald-950/60 text-emerald-300 border-emerald-800/50',
 };
 
@@ -54,6 +85,7 @@ const REASON_PLACEHOLDER: Record<StaffOccurrenceType, string> = {
   incidente: 'O que aconteceu (quase acidente, derramamento etc.)',
   hora_extra: 'Ex.: das 17:00 às 19:00',
   retorno: 'Ex.: voltou da consulta',
+  ferias: 'Ex.: férias de 15 dias',
   free_balde: 'Ex.: lavagem de baldes — 4h',
 };
 
@@ -85,6 +117,9 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
   const [employeeName, setEmployeeName] = useState('');
   const [quantity, setQuantity] = useState('1');
   const [reason, setReason] = useState('');
+  const [until, setUntil] = useState(today);
+  const isPeriod = PERIOD_TYPES.includes(type);
+  useEffect(() => { if (until < today) setUntil(today); }, [until, today]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -106,7 +141,7 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
     setError(null);
     setSaving(true);
     const res = await addStaffOccurrence(
-      { date: today, lineId, type, employeeName, quantity: type === 'free_balde' ? Math.max(1, parseInt(quantity, 10) || 1) : 1, reason },
+      { date: today, lineId, type, employeeName, quantity: type === 'free_balde' ? Math.max(1, parseInt(quantity, 10) || 1) : 1, reason, endDate: isPeriod ? until : null },
       userId
     );
     setSaving(false);
@@ -114,12 +149,14 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
     setEmployeeName('');
     setReason('');
     setQuantity('1');
+    setUntil(today);
     load();
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (o: StaffOccurrence) => {
     setError(null);
-    const res = await deleteStaffOccurrence(id);
+    if (o.endDate && !window.confirm(`Excluir ${STAFF_OCCURRENCE_LABELS[o.type].toLowerCase()} de ${o.employeeName || '—'} — o período inteiro (${fmtDayMonth(o.startDate || o.date)} a ${fmtDayMonth(o.endDate)})?`)) return;
+    const res = await deleteStaffOccurrence(occurrenceSourceId(o));
     if (!res.ok) { setError(res.error || 'Não foi possível excluir.'); return; }
     load();
   };
@@ -198,6 +235,13 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
                     />
                   )}
                 </div>
+                {isPeriod && (
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-[#71717a]">Último dia fora (de hoje até)</label>
+                    <input type="date" value={until} min={today} onChange={e => setUntil(e.target.value || today)} className={input + ' mt-1 [color-scheme:dark]'} />
+                    {periodSummary(today, until) && <p className="text-[10px] text-sky-300 font-bold mt-1">{periodSummary(today, until)}</p>}
+                  </div>
+                )}
                 <input
                   value={reason}
                   onChange={e => setReason(e.target.value)}
@@ -238,6 +282,7 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
                           <p className="text-white font-semibold truncate">
                             {o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}
                           </p>
+                          <StaffPeriodTag o={o} />
                           {o.reason && <p className="text-[#a1a1aa] text-[11px]">{o.reason}</p>}
                         </div>
                         <span className="text-[10px] text-[#52525b] font-mono shrink-0">
@@ -245,7 +290,7 @@ export function StaffOccurrencesButton({ lineId, lineName, userId, className }: 
                         </span>
                         <button
                           type="button"
-                          onClick={() => handleDelete(o.id)}
+                          onClick={() => handleDelete(o)}
                           className="p-1 rounded text-[#52525b] hover:text-rose-400 hover:bg-rose-950/40 shrink-0"
                           title="Excluir (lançado por engano)"
                         >
@@ -357,7 +402,7 @@ export function StaffOccurrencesSummary({ rangeStart, rangeEnd, periodLabel, lin
                   <td className="py-2 pr-3 text-white">
                     {o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}
                   </td>
-                  <td className="py-2 text-[#a1a1aa]">{o.reason || '—'}</td>
+                  <td className="py-2 text-[#a1a1aa]"><StaffPeriodTag o={o} />{o.reason || (o.endDate ? '' : '—')}</td>
                 </tr>
               ))}
             </tbody>
@@ -483,10 +528,14 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
   const [quantity, setQuantity] = useState('1');
   const [reason, setReason] = useState('');
   const [occTime, setOccTime] = useState(nowHHMM());
+  const [fUntil, setFUntil] = useState(today);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formOk, setFormOk] = useState<string | null>(null);
   const isTimed = TIMED_TYPES.includes(type);
+  const isPeriod = PERIOD_TYPES.includes(type);
+  // o último dia nunca fica antes do primeiro
+  useEffect(() => { if (fUntil < fDate) setFUntil(fDate); }, [fDate, fUntil]);
 
   // Ao trocar para saída/retorno, sugere o horário de agora
   useEffect(() => { if (TIMED_TYPES.includes(type)) setOccTime(nowHHMM()); }, [type]);
@@ -520,20 +569,22 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
   }, [myTargets, fTarget]);
 
   const needsName = type !== 'free_balde';
-  const canSubmit = !!fTarget && (!needsName || !!employeeName.trim()) && !!fDate && fDate <= today && (!isTimed || /^\d{2}:\d{2}$/.test(occTime));
+  // Férias podem ser lançadas antes (data futura); o resto, só até hoje
+  const canSubmit = !!fTarget && (!needsName || !!employeeName.trim()) && !!fDate && (fDate <= today || type === 'ferias') && (!isTimed || /^\d{2}:\d{2}$/.test(occTime)) && (!isPeriod || fUntil >= fDate);
 
   const handleAdd = async () => {
     setFormError(null); setFormOk(null);
     if (!myTargets.some(t => t.id === fTarget)) { setFormError('Você só pode lançar ocorrências na sua área.'); return; }
     setSaving(true);
     const res = await addStaffOccurrence(
-      { date: fDate, lineId: fTarget, type, employeeName, quantity: 1, reason, occurredTime: isTimed ? occTime : null },
+      { date: fDate, lineId: fTarget, type, employeeName, quantity: 1, reason, occurredTime: isTimed ? occTime : null, endDate: isPeriod ? fUntil : null },
       profile?.uid || null
     );
     setSaving(false);
     if (!res.ok) { setFormError(res.error || 'Não foi possível registrar.'); return; }
-    setFormOk(`Registrado: ${STAFF_OCCURRENCE_LABELS[type]}${employeeName.trim() ? ` — ${employeeName.trim()}` : ''} (${targetName(fTarget)}, ${fmtDate(fDate)}${isTimed ? ` às ${occTime}` : ''}).`);
-    setEmployeeName(''); setReason(''); setQuantity('1');
+    const periodTxt = isPeriod ? periodSummary(fDate, fUntil) : null;
+    setFormOk(`Registrado: ${STAFF_OCCURRENCE_LABELS[type]}${employeeName.trim() ? ` — ${employeeName.trim()}` : ''} (${targetName(fTarget)}, ${periodTxt || fmtDate(fDate)}${isTimed ? ` às ${occTime}` : ''}).`);
+    setEmployeeName(''); setReason(''); setQuantity('1'); setFUntil(fDate);
     // se lançou fora do período em tela, mostra o dia lançado
     if (fDate < rangeStart || fDate > rangeEnd) {
       if (fDate === today) setPeriod('hoje');
@@ -546,8 +597,9 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
 
   const handleDelete = async (o: StaffOccurrence) => {
     if (!canDelete(o)) return;
-    if (!window.confirm(`Excluir ${STAFF_OCCURRENCE_LABELS[o.type].toLowerCase()} de ${o.employeeName || '—'} (${fmtDate(o.date)})?`)) return;
-    const res = await deleteStaffOccurrence(o.id);
+    const what = o.endDate ? `o período inteiro, ${fmtDate(o.startDate || o.date)} a ${fmtDate(o.endDate)}` : fmtDate(o.date);
+    if (!window.confirm(`Excluir ${STAFF_OCCURRENCE_LABELS[o.type].toLowerCase()} de ${o.employeeName || '—'} (${what})?`)) return;
+    const res = await deleteStaffOccurrence(occurrenceSourceId(o));
     if (!res.ok) { setLoadError(res.error || 'Não foi possível excluir.'); return; }
     setReloadKey(k => k + 1);
   };
@@ -566,9 +618,12 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
 
   const ranking = useMemo(() => {
     const map = new Map<string, { name: string; total: number; byType: Partial<Record<StaffOccurrenceType, number>>; lines: Set<string> }>();
+    const seen = new Set<string>(); // atestado de vários dias conta uma vez só
     for (const o of filtered) {
       const name = o.employeeName.trim();
-      if (!name || o.type === 'free_balde' || o.type === 'hora_extra' || o.type === 'retorno') continue;
+      if (!name || o.type === 'free_balde' || o.type === 'hora_extra' || o.type === 'retorno' || o.type === 'ferias') continue;
+      if (seen.has(occurrenceSourceId(o))) continue;
+      seen.add(occurrenceSourceId(o));
       const key = name.toLowerCase();
       const row = map.get(key) || { name, total: 0, byType: {}, lines: new Set<string>() };
       row.total += 1;
@@ -584,7 +639,7 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
   const exportCsv = () => {
     const esc = (v: string) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const rows = [
-      ['Data', 'Hora do lançamento', 'Horário (saída/retorno)', 'Linha / setor', 'Tipo', 'Colaborador', 'Quantidade', 'Motivo / detalhe'].map(esc).join(';'),
+      ['Data', 'Hora do lançamento', 'Horário (saída/retorno)', 'Linha / setor', 'Tipo', 'Colaborador', 'Quantidade', 'Motivo / detalhe', 'Período (início)', 'Período (último dia)'].map(esc).join(';'),
       ...filtered.map(o => [
         fmtDate(o.date),
         new Date(o.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
@@ -594,6 +649,8 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
         o.employeeName,
         String(o.quantity),
         o.reason,
+        o.endDate ? fmtDate(o.startDate || o.date) : '',
+        o.endDate ? fmtDate(o.endDate) : '',
       ].map(esc).join(';')),
     ];
     const blob = new Blob(['﻿' + rows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
@@ -644,8 +701,8 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
             <>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] font-bold uppercase tracking-wider text-[#71717a]">Data</label>
-                  <input type="date" value={fDate} max={today} onChange={e => setFDate(e.target.value)} className={input + ' mt-1 [color-scheme:dark]'} />
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-[#71717a]">{isPeriod ? 'Primeiro dia fora' : 'Data'}</label>
+                  <input type="date" value={fDate} max={type === 'ferias' ? undefined : today} onChange={e => setFDate(e.target.value)} className={input + ' mt-1 [color-scheme:dark]'} />
                 </div>
                 <div>
                   <label className="text-[10px] font-bold uppercase tracking-wider text-[#71717a]">Linha / setor</label>
@@ -701,6 +758,17 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
                     className={input + ' [color-scheme:dark] font-mono'} />
                 )}
               </div>
+              {isPeriod && (
+                <div className="bg-[#0f141c] border border-sky-900/50 rounded-lg p-2.5 space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-sky-300">
+                    {type === 'ferias' ? 'Férias' : 'Atestado'}: último dia fora
+                  </label>
+                  <input type="date" value={fUntil} min={fDate} onChange={e => setFUntil(e.target.value || fDate)} className={input + ' [color-scheme:dark]'} />
+                  <p className="text-[10px] text-[#a1a1aa]">
+                    {periodSummary(fDate, fUntil) || `Só ${fmtDate(fDate)}. Para mais dias, escolha o último dia fora.`}
+                  </p>
+                </div>
+              )}
               <input value={reason} onChange={e => setReason(e.target.value)} placeholder={`Motivo / detalhe — ${REASON_PLACEHOLDER[type]}`} className={input} />
 
               <button type="button" onClick={handleAdd} disabled={saving || !canSubmit}
@@ -796,7 +864,7 @@ export function StaffOccurrencesPage({ lines, profile }: PageProps) {
                           <td className="py-2 pr-3 text-white">
                             {o.employeeName || '—'}{o.type === 'free_balde' && o.quantity > 1 ? ` · ${o.quantity} pessoas` : ''}
                           </td>
-                          <td className="py-2 pr-3 text-[#a1a1aa]">{o.reason || '—'}</td>
+                          <td className="py-2 pr-3 text-[#a1a1aa]"><StaffPeriodTag o={o} />{o.reason || (o.endDate ? '' : '—')}</td>
                           <td className="py-2">
                             {canDelete(o) && (
                               <button onClick={() => handleDelete(o)} title="Excluir (lançado por engano)"

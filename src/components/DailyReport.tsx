@@ -565,6 +565,11 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
   const thc = th.replace('text-left', 'text-center');
   const td = 'px-2 py-1.5 text-[#1f2937] border-b border-[#e5e7eb]';
   const tdc = td + ' text-center';
+  // Ocorrências de pessoal: tabela compacta (com muitas ocorrências o relatório não passa de uma folha)
+  const occTh = 'px-1.5 py-0.5 text-left text-[7.5px] font-bold uppercase tracking-wide text-[#475569] border-b border-[#cbd5e1]';
+  const occThc = occTh.replace('text-left', 'text-center');
+  const occTd = 'px-1.5 py-0.5 text-[#1f2937] border-b border-[#eef0f3]';
+  const occTdc = occTd + ' text-center';
   const h2 = 'flex items-center gap-2 text-[12px] font-black uppercase tracking-wider text-[#0f172a] mt-5 mb-2 pb-1 border-b border-[#e2e8f0]';
   const num = (n: number) => <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-[#0f172a] text-white text-[10px] font-black">{n}</span>;
 
@@ -902,16 +907,19 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               ))}
             </div>
             {dayOccurrences.length > 0 && (
-              <table className="w-full border-collapse mt-2">
-                <thead><tr><th className={th}>Linha / setor</th><th className={th}>Tipo</th><th className={thc}>Hora</th><th className={th}>Colaborador</th><th className={th}>Motivo / detalhe</th></tr></thead>
+              <table className="w-full border-collapse mt-2 text-[8.5px] leading-tight">
+                <thead><tr><th className={occTh}>Linha / setor</th><th className={occTh}>Tipo</th><th className={occThc}>Hora</th><th className={occTh}>Colaborador</th><th className={occTh}>Motivo / detalhe</th></tr></thead>
                 <tbody>
                   {dayOccurrences.map(o => (
                     <tr key={o.id}>
-                      <td className={td}>{occLineName(o.lineId)}</td>
-                      <td className={td + ' font-semibold'}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
-                      <td className={tdc}>{o.occurredTime || '—'}</td>
-                      <td className={td}>{o.employeeName || '—'}</td>
-                      <td className={td + ' text-[#475569]'}>{o.reason || '—'}</td>
+                      <td className={occTd}>{occLineName(o.lineId)}</td>
+                      <td className={occTd + ' font-semibold'}>
+                        {STAFF_OCCURRENCE_LABELS[o.type]}
+                        {o.endDate && <span className="block text-[7.5px] font-normal text-[#475569]">até {o.endDate.split('-').reverse().slice(0, 2).join('/')}</span>}
+                      </td>
+                      <td className={occTdc}>{o.occurredTime || '—'}</td>
+                      <td className={occTd}>{o.employeeName || '—'}</td>
+                      <td className={occTd + ' text-[#475569]'}>{o.reason || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -986,10 +994,6 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
               ))}
             </div>
 
-            <div className="mt-6 pt-2 border-t border-[#e2e8f0] flex justify-between text-[9.5px] text-[#64748b]">
-              <span className="italic font-semibold">Elaborado pela Coordenação</span>
-              <span>Painel Industrial · dados dos registros do app</span>
-            </div>
           </div>
         </div>
       </div>

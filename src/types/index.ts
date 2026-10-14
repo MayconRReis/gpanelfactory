@@ -241,6 +241,7 @@ export type StaffOccurrenceType =
   | 'incidente'
   | 'hora_extra'
   | 'retorno'
+  | 'ferias'
   /** descontinuado (não aparece mais no formulário) — mantido p/ o histórico */
   | 'free_balde';
 
@@ -254,6 +255,14 @@ export interface StaffOccurrence {
   reason: string;
   /** Horário em que aconteceu ('HH:MM') — saída antecipada e retorno */
   occurredTime?: string | null;
+  /**
+   * Atestado/férias de vários dias: último dia fora ('AAAA-MM-DD'). Na
+   * leitura, o lançamento aparece uma vez em CADA dia do período (`date` =
+   * o dia), com `startDate` = 1º dia e `sourceId` = id do lançamento real.
+   */
+  endDate?: string | null;
+  startDate?: string;
+  sourceId?: string;
   createdBy?: string | null;
   createdAt: string;
 }
