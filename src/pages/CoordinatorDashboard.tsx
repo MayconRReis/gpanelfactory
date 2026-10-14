@@ -2692,7 +2692,13 @@ WHERE email IN (
                   <Input
                     placeholder="Ex: LT-24-101"
                     value={newOpLote}
-                    onChange={(e) => setNewOpLote(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      // O granel quase sempre tem o mesmo lote do acabado: acompanha o
+                      // lote enquanto o granel estiver vazio ou igual ao lote anterior.
+                      if (!newOpGranel.trim() || newOpGranel === newOpLote) setNewOpGranel(v);
+                      setNewOpLote(v);
+                    }}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-emerald-400"
                   />
                 </div>
@@ -2700,11 +2706,16 @@ WHERE email IN (
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">OP Granel</Label>
                   <Input
-                    placeholder="Ex: GR-SH-910"
+                    placeholder="Mesmo do lote"
                     value={newOpGranel}
                     onChange={(e) => setNewOpGranel(e.target.value)}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-amber-400"
                   />
+                  <p className="text-[9px] text-[#71717a] leading-tight">
+                    {newOpGranel.trim() && newOpGranel.trim() === newOpLote.trim()
+                      ? 'Igual ao lote do produto — altere só se o granel for diferente.'
+                      : 'Preenchido com o lote do produto; altere se o granel for diferente.'}
+                  </p>
                 </div>
               </div>
 
