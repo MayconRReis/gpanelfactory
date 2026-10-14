@@ -5366,6 +5366,7 @@ export const STAFF_OCCURRENCE_LABELS: Record<StaffOccurrenceType, string> = {
   incidente: 'Incidente',
   hora_extra: 'Hora extra',
   retorno: 'Retorno',
+  ferias: 'Férias',
   free_balde: 'Free do balde',
 };
 
@@ -5378,9 +5379,43 @@ const mapStaffOccurrenceRow = (r: any): StaffOccurrence => ({
   quantity: Math.max(1, Number(r.quantity) || 1),
   reason: String(r.reason || ''),
   occurredTime: r.occurred_time ? String(r.occurred_time).slice(0, 5) : null,
+  endDate: r.end_date ? String(r.end_date).slice(0, 10) : null,
   createdBy: r.created_by || null,
   createdAt: r.created_at,
 });
+
+const addDaysStr = (day: string, n: number) => {
+  const [y, m, d] = day.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+};
+
+/** Nº de dias de um período (inclusivo). */
+export const countPeriodDays = (start: string, end: string) =>
+  Math.round((new Date(`${end}T12:00:00`).getTime() - new Date(`${start}T12:00:00`).getTime()) / 86400000) + 1;
+
+/**
+ * Abre atestado/férias de vários dias em um item por dia, só dentro de
+ * [from, to] — assim "Hoje", o relatório do dia e os totais contam a pessoa
+ * fora em cada dia do período.
+ */
+function expandOccurrencePeriods(list: StaffOccurrence[], from: string, to: string): StaffOccurrence[] {
+  const out: StaffOccurrence[] = [];
+  for (const o of list) {
+    const end = o.endDate && o.endDate > o.date ? o.endDate : null;
+    if (!end) {
+      if (o.date >= from && o.date <= to) out.push(o);
+      continue;
+    }
+    let day = o.date < from ? from : o.date;
+    const last = end > to ? to : end;
+    while (day <= last) {
+      out.push({ ...o, id: `${o.id}@${day}`, sourceId: o.id, startDate: o.date, date: day });
+      day = addDaysStr(day, 1);
+    }
+  }
+  return out;
+}
 
 let trainingStaffOccurrences: StaffOccurrence[] = [];
 
@@ -5427,31 +5462,38 @@ export const getColaboradores = (): Promise<Colaborador[]> => {
 
 export const getStaffOccurrences = async (fromDate: string, toDate: string): Promise<{ list: StaffOccurrence[]; error: string | null }> => {
   if (trainingModeActive) {
-    return { list: trainingStaffOccurrences.filter(o => o.date >= fromDate && o.date <= toDate), error: null };
+    return { list: expandOccurrencePeriods(trainingStaffOccurrences, fromDate, toDate), error: null };
   }
-  try {
+  // withPeriods: também traz atestado/férias que começaram antes de `fromDate`
+  // e ainda cobrem o período (coluna end_date — sql/add_ocorrencias_periodo.sql).
+  const fetchRows = async (withPeriods: boolean) => {
     const PAGE_SIZE = 1000;
     const rows: any[] = [];
     let offset = 0;
     while (true) {
-      const { data, error } = await supabase
-        .from('staff_occurrences')
-        .select('*')
-        .gte('occurred_on', fromDate)
-        .lte('occurred_on', toDate)
+      let q = supabase.from('staff_occurrences').select('*').lte('occurred_on', toDate);
+      q = withPeriods ? q.or(`occurred_on.gte.${fromDate},end_date.gte.${fromDate}`) : q.gte('occurred_on', fromDate);
+      const { data, error } = await q
         .order('occurred_on', { ascending: true })
         .order('created_at', { ascending: true })
         .range(offset, offset + PAGE_SIZE - 1);
-      if (error) {
-        console.warn('[getStaffOccurrences] Não foi possível ler staff_occurrences (rodou sql/add_staff_occurrences.sql?):', error.message);
-        return { list: [], error: error.message };
-      }
+      if (error) return { rows, error: error.message };
       if (!data || data.length === 0) break;
       rows.push(...data);
       if (data.length < PAGE_SIZE) break;
       offset += PAGE_SIZE;
     }
-    return { list: rows.map(mapStaffOccurrenceRow), error: null };
+    return { rows, error: null as string | null };
+  };
+  try {
+    let res = await fetchRows(true);
+    // Banco ainda sem a coluna end_date: lê do jeito antigo (sem períodos)
+    if (res.error && /end_date/i.test(res.error)) res = await fetchRows(false);
+    if (res.error) {
+      console.warn('[getStaffOccurrences] Não foi possível ler staff_occurrences (rodou sql/add_staff_occurrences.sql?):', res.error);
+      return { list: [], error: res.error };
+    }
+    return { list: expandOccurrencePeriods(res.rows.map(mapStaffOccurrenceRow), fromDate, toDate), error: null };
   } catch (err: any) {
     return { list: [], error: String(err?.message || err) };
   }
@@ -5459,7 +5501,7 @@ export const getStaffOccurrences = async (fromDate: string, toDate: string): Pro
 
 /** Registra uma ocorrência e confere se o banco gravou. */
 export const addStaffOccurrence = async (
-  occ: Omit<StaffOccurrence, 'id' | 'createdAt' | 'createdBy'>,
+  occ: Omit<StaffOccurrence, 'id' | 'createdAt' | 'createdBy' | 'startDate' | 'sourceId'>,
   userId?: string | null
 ): Promise<{ ok: boolean; error?: string }> => {
   const name = String(occ.employeeName || '').trim();
@@ -5468,8 +5510,11 @@ export const addStaffOccurrence = async (
   if (!name && occ.type !== 'free_balde') return { ok: false, error: 'Informe o nome do colaborador.' };
   const occurredTime = /^\d{2}:\d{2}$/.test(String(occ.occurredTime || '')) ? String(occ.occurredTime) : null;
   if (occ.type === 'retorno' && !occurredTime) return { ok: false, error: 'Informe o horário do retorno.' };
+  const endDate = occ.endDate && /^\d{4}-\d{2}-\d{2}$/.test(occ.endDate) ? occ.endDate : null;
+  if (endDate && endDate < occ.date) return { ok: false, error: 'O último dia não pode ser antes do primeiro.' };
+  const periodEnd = endDate && endDate > occ.date ? endDate : null;
   if (trainingModeActive) {
-    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, occurredTime, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
+    trainingStaffOccurrences.push({ ...occ, employeeName: name, reason, quantity, occurredTime, endDate: periodEnd, id: `sim-so-${Date.now()}`, createdAt: new Date().toISOString(), createdBy: userId || null });
     return { ok: true };
   }
   try {
@@ -5483,11 +5528,15 @@ export const addStaffOccurrence = async (
       created_by: userId && isUUID(userId) ? userId : null,
     };
     if (occurredTime) payload.occurred_time = occurredTime;
+    if (periodEnd) payload.end_date = periodEnd;
     const { data, error } = await supabase
       .from('staff_occurrences')
       .insert(payload)
       .select('id');
     if (error) {
+      if ((periodEnd && /end_date/i.test(error.message)) || (occ.type === 'ferias' && /staff_occurrences_type_check|check constraint/i.test(error.message))) {
+        return { ok: false, error: 'Falta atualizar o banco para períodos e férias — rode sql/add_ocorrencias_periodo.sql no Supabase.' };
+      }
       if (/occurred_time|staff_occurrences_type_check|check constraint/i.test(error.message)) {
         return { ok: false, error: 'Falta atualizar o banco para o "Retorno" — rode sql/add_staff_occurrence_retorno.sql no Supabase.' };
       }
@@ -5519,7 +5568,7 @@ export const deleteStaffOccurrence = async (id: string): Promise<{ ok: boolean; 
 
 /** Soma das quantidades por tipo. */
 export function sumStaffOccurrences(list: StaffOccurrence[]): Record<StaffOccurrenceType, number> {
-  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, retorno: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
+  const out = { falta: 0, atraso: 0, atestado: 0, saida_antecipada: 0, acidente: 0, incidente: 0, hora_extra: 0, retorno: 0, ferias: 0, free_balde: 0 } as Record<StaffOccurrenceType, number>;
   for (const o of list) if (o.type in out) out[o.type] += o.quantity || 1;
   return out;
 }

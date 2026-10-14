@@ -908,7 +908,10 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                   {dayOccurrences.map(o => (
                     <tr key={o.id}>
                       <td className={td}>{occLineName(o.lineId)}</td>
-                      <td className={td + ' font-semibold'}>{STAFF_OCCURRENCE_LABELS[o.type]}</td>
+                      <td className={td + ' font-semibold'}>
+                        {STAFF_OCCURRENCE_LABELS[o.type]}
+                        {o.endDate && <span className="block text-[9px] font-normal text-[#475569]">até {o.endDate.split('-').reverse().slice(0, 2).join('/')}</span>}
+                      </td>
                       <td className={tdc}>{o.occurredTime || '—'}</td>
                       <td className={td}>{o.employeeName || '—'}</td>
                       <td className={td + ' text-[#475569]'}>{o.reason || '—'}</td>
