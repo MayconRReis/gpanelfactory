@@ -105,6 +105,9 @@ import { CronogramaBoard, BACKLOG_COLUMN_ID as CRONOGRAMA_BACKLOG_COLUMN_ID } fr
 import { LayoutDashboard, CalendarDays, CalendarClock, CalendarCheck2, Calendar, BarChart3, Scale, Eye, FileText, ClipboardList } from 'lucide-react';
 import { DailyReport } from '../components/DailyReport';
 import { StaffOccurrencesPage } from '../components/StaffOccurrences';
+import { OpDetailsModal } from '../components/OpDetailsModal';
+import { buildOpHistory } from '../lib/opHistory';
+import { formatMsToHoursMinutes as fmtHMs } from '../lib/productionTime';
 
 // "Hoje" em data local (YYYY-MM-DD), NUNCA usar `new Date().toISOString()` para
 // isso: toISOString() converte para UTC, então entre ~21h e 23h59 (horário de
@@ -1294,6 +1297,18 @@ WHERE email IN (
   // OPs com conclusão parcial que voltaram ao estoque aguardando o restante
   const partialStockIds = new Set(getPartialOpsInStock(ops, events).map(o => o.id));
 
+  // Eventos agrupados por OP — base dos números dos cards do Estoque (tempo de envase, pausas, ocioso)
+  const eventsByOpId = React.useMemo(() => {
+    const m = new Map<string, ProductionEvent[]>();
+    for (const e of events) {
+      if (!e.opId) continue;
+      const k = String(e.opId);
+      const l = m.get(k);
+      if (l) l.push(e); else m.set(k, [e]);
+    }
+    return m;
+  }, [events]);
+
   // Regra de cada filtro do Estoque de OPs (usada na lista e nos contadores)
   const matchesStockFilter = (op: ProductionOrder, filter: string) => {
     if (filter === 'completed') return isOpFinalizada(op);
@@ -1941,6 +1956,47 @@ WHERE email IN (
                             )}
                           </div>
                         </div>
+
+                        {/* Produção e tempos (quando a OP já rodou) */}
+                        {(() => {
+                          const opEvents = eventsByOpId.get(String(op.id));
+                          if (!opEvents?.length && !(op.producedQuantity > 0)) return null;
+                          const hist = opEvents?.length ? buildOpHistory(op, opEvents) : null;
+                          const pct = op.plannedQuantity > 0 ? Math.min(100, Math.round((op.producedQuantity / op.plannedQuantity) * 100)) : 0;
+                          return (
+                            <div className="pt-2 border-t border-[#1e1e24] space-y-1.5">
+                              <div className="flex items-center justify-between text-[11px]">
+                                <span className="text-[#a1a1aa]">
+                                  <strong className="text-white font-mono">{op.producedQuantity.toLocaleString('pt-BR')}</strong> / {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
+                                </span>
+                                <span className="font-mono font-bold text-emerald-400">{pct}%</span>
+                              </div>
+                              <div className="h-1.5 bg-[#0e0e12] rounded-full overflow-hidden">
+                                <div className="h-full rounded-full bg-emerald-500" style={{ width: `${pct}%` }} />
+                              </div>
+                              {hist && (
+                                <div className="flex flex-wrap gap-1 text-[10px] font-bold">
+                                  <span className="px-1.5 py-0.5 rounded border bg-[#16161e] border-[#26262f] text-[#d4d4d8]" title="Tempo de envase (trabalhado)">
+                                    ⏱ {fmtHMs(hist.workingMs)}{Number(op.plannedHours) > 0 ? <span className="text-[#71717a] font-normal"> / {fmtHMs(Number(op.plannedHours) * 3600000)}</span> : null}
+                                  </span>
+                                  <span className="px-1.5 py-0.5 rounded border bg-[#16161e] border-[#26262f] text-[#d4d4d8]" title="Pausas">
+                                    ⏸ {hist.pauses.length}
+                                  </span>
+                                  {hist.idleMs >= 60000 && (
+                                    <span className="px-1.5 py-0.5 rounded border bg-amber-950/40 border-amber-800/40 text-amber-300" title="Tempo ocioso">
+                                      ocioso {fmtHMs(hist.idleMs)}
+                                    </span>
+                                  )}
+                                  {hist.justifications.length > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded border bg-rose-950/40 border-rose-800/40 text-rose-300" title="Atrasos/tempos excedidos justificados">
+                                      {hist.justifications.length} justificativa{hist.justifications.length > 1 ? 's' : ''}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
 
                         {/* Ações */}
                         <div className="flex items-center gap-1.5 pt-2 border-t border-[#1e1e24]">
@@ -3012,139 +3068,16 @@ WHERE email IN (
         );
       })()}
 
-      {/* ---------------- MODAL: MAIS INFORMAÇÕES DA OP (Estoque de OPs) ---------------- */}
+      {/* ---------------- MODAL: DETALHES COMPLETOS DA OP (Estoque de OPs) ---------------- */}
       {detailsModalOp && (
-        <div
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setDetailsModalOp(null);
-          }}
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
-        >
-          <div className="bg-[#121216] border border-[#222228] w-full max-w-md rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-
-            {/* Header */}
-            <div className="p-5 border-b border-[#222228] bg-blue-950/20 flex items-center justify-between">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
-                  <Info className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-sm font-bold text-[#f4f4f5] uppercase tracking-wide">
-                      Detalhes da OP
-                    </h3>
-                    <span className="text-[10px] bg-blue-950 text-blue-400 border border-blue-800/50 px-2 py-0.5 rounded-full font-mono font-bold">
-                      OP #{detailsModalOp.number}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#71717a] mt-0.5 truncate">
-                    {detailsModalOp.product}
-                  </p>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setDetailsModalOp(null)}
-                className="text-[#71717a] hover:text-white p-2 rounded-lg hover:bg-[#1f1f28] transition-colors shrink-0"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Conteúdo */}
-            <div className="p-5 space-y-3">
-              {(() => {
-                const op = detailsModalOp;
-                const assignedLine = lines.find(l => l.id === op.lineId);
-                const progress = op.plannedQuantity > 0 ? Math.min(Math.round((op.producedQuantity / op.plannedQuantity) * 100), 100) : 0;
-                return (
-                  <div className="bg-[#0b0b0e] border border-[#222228] rounded-xl p-3.5 space-y-2.5 text-xs">
-
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Tipo / Setor</span>
-                      <span className="font-semibold text-[#f4f4f5] text-right">
-                        {op.tipoDocumento || (op.setor === 'Pesagem' || op.setor === 'Manipulação' ? 'OSM' : 'OP')}
-                        {op.setor ? ` · ${op.setor}` : ''}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Prioridade</span>
-                      <span className="font-semibold text-[#f4f4f5]">{op.priority}</span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#1e1e24]">
-                      <div>
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Planejada</span>
-                        <span className="font-mono font-bold text-[#f4f4f5] text-[11px]">
-                          {op.plannedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'}
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[10px] text-[#71717a] uppercase font-bold block">Quantidade Produzida</span>
-                        <span className="font-mono font-bold text-emerald-400 text-[11px]">
-                          {op.producedQuantity.toLocaleString('pt-BR')} {op.unidade || 'un'} {op.producedQuantity > 0 ? `(${progress}%)` : ''}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Granel</span>
-                      {op.granel ? (
-                        <span className="font-mono font-semibold text-amber-300 text-[11px]">{op.granel}</span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Granel</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Linha Destino</span>
-                      {assignedLine ? (
-                        <span className="font-semibold text-[#d4d4d8] flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-                          {assignedLine.name}
-                        </span>
-                      ) : (
-                        <span className="text-[#71717a] text-[11px] italic">Disponível no Estoque</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#1e1e24]">
-                      <span className="text-[10px] text-[#71717a] uppercase font-bold">Data Cronograma</span>
-                      {op.scheduledDate ? (
-                        <span className="font-semibold text-[#f4f4f5] flex items-center gap-1.5">
-                          <Calendar className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                          {new Date(op.scheduledDate + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-                          {op.scheduledShift ? ` · ${op.scheduledShift}` : ''}
-                        </span>
-                      ) : (
-                        <span className="text-[#52525b] text-[11px] italic">Sem Data Prevista</span>
-                      )}
-                    </div>
-
-                    {op.setor === 'Pesagem' && op.status === 'completed' && (
-                      <div className="pt-2 border-t border-[#1e1e24]">
-                        <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border bg-amber-950/70 text-amber-300 border-amber-500/40">
-                          Pronta p/ Manipulação
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div className="px-5 pb-5 flex items-center justify-end">
-              <button
-                type="button"
-                onClick={() => setDetailsModalOp(null)}
-                className="h-9 px-4 bg-[#181822] hover:bg-[#222230] border border-[#2e2e3e] text-[#a1a1aa] hover:text-[#f4f4f5] text-xs font-bold rounded-xl transition-colors"
-              >
-                Fechar
-              </button>
-            </div>
-          </div>
-        </div>
+        <OpDetailsModal
+          op={ops.find(o => o.id === detailsModalOp.id) || detailsModalOp}
+          ops={ops}
+          events={events}
+          lines={lines}
+          users={allUsers}
+          onClose={() => setDetailsModalOp(null)}
+        />
       )}
 
       {/* MODAL CADASTRAR NOVO LÍDER */}
