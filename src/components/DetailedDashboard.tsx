@@ -15,6 +15,7 @@ import { buildProductionLedger, LedgerEntry, LedgerSector } from '../services/pr
 import { calculateProductionTime, formatMsToHoursMinutes, getScheduledWindow } from '../lib/productionTime';
 import { SetupHistory } from './SetupHistory';
 import { ApontamentosHistorico } from './ApontamentosHistorico';
+import { ToleranceReport } from './ToleranceReport';
 import { StaffOccurrencesSummary } from './StaffOccurrences';
 
 /**
@@ -677,6 +678,14 @@ export function DetailedDashboard({ ops, lines: allLines, events, users = [], go
               </tbody>
             </table>
           </div>
+
+          {sector !== 'Manipulação' && sector !== 'Pesagem' && (
+            <div className={`${card} p-4`}>
+              <h3 className="text-xs font-black uppercase tracking-wider text-white mb-0.5 flex items-center gap-2"><Clock className="w-4 h-4 text-rose-400" /> Atrasos e tempos excedidos</h3>
+              <p className="text-[10px] text-[#71717a] mb-3">Início da produção depois de 07:10 (tolerância de 10 min) e café/almoço acima do padrão + 5 min, com a justificativa do líder. O tempo excedido conta como ocioso.</p>
+              <ToleranceReport events={events} lines={lines} rangeStart={rangeStart} rangeEnd={rangeEnd} changeovers={changeovers} users={users} nowMs={nowTick} />
+            </div>
+          )}
 
           <div className={`${card} p-4`}>
             <h3 className="text-xs font-black uppercase tracking-wider text-white mb-0.5">Principais motivos de parada</h3>
