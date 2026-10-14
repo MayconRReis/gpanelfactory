@@ -75,6 +75,8 @@ import {
 } from '../services/db';
 import { AssignStockOpToLineModal } from '../components/AssignStockOpToLineModal';
 import { GranelBadge } from '../components/GranelBadge';
+import { OpCountdown } from '../components/OpCountdown';
+import { parseHoursHHMM, formatHoursHHMM } from '../lib/hours';
 import { PresenceIndicator, PresenceDot, useLinePresence } from '../components/PresenceIndicator';
 import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
@@ -636,10 +638,46 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     }
   };
 
+  // ---------------- TEMPO PREVISTO DA OP ----------------
+  // Antes de iniciar uma OP SEM tempo previsto, o líder preenche o tempo para
+  // terminar o envase — base do cronômetro da OP. Depois de preenchido, o
+  // líder não muda mais: só a Coordenação/ADM, pelo "Editar OP".
+  const [expectedDialog, setExpectedDialog] = useState<{ op: ProductionOrder; next: () => Promise<void> } | null>(null);
+  const [expectedText, setExpectedText] = useState('');
+  const [expectedBusy, setExpectedBusy] = useState(false);
+  const [expectedError, setExpectedError] = useState<string | null>(null);
+  const askExpectedTime = (op: ProductionOrder, next: () => Promise<void>) => {
+    // Já tem tempo previsto: segue direto (o líder não pode alterar)
+    if (Number(op.plannedHours) > 0) { next(); return; }
+    setExpectedText('');
+    setExpectedError(null);
+    setExpectedDialog({ op, next });
+  };
+  const confirmExpectedTime = async () => {
+    if (!expectedDialog || expectedBusy) return;
+    const hours = parseHoursHHMM(expectedText);
+    if (!hours) { setExpectedError('Informe o tempo no formato horas:minutos — ex.: 2:30 ou 0:45.'); return; }
+    setExpectedBusy(true);
+    try {
+      const { op, next } = expectedDialog;
+      await updateOP(op.id, { plannedHours: hours }, { verify: true });
+      setExpectedDialog(null);
+      await next();
+    } catch (err: any) {
+      setExpectedError(err?.message || 'Não foi possível salvar o tempo previsto.');
+    } finally {
+      setExpectedBusy(false);
+    }
+  };
+
   const handleStart = async () => {
     if (!currentLine || !activeOp || !profile) return;
     const op = activeOp;
     const line = currentLine;
+    askExpectedTime(op, () => startWithJustification(op, line));
+  };
+  const startWithJustification = async (op: ProductionOrder, line: ProductionLine) => {
+    if (!profile) return;
     const late = getLateStart(line, recentEvents, Date.now(), changeovers);
     await withJustification(late ? [late] : [], 'Iniciar produção', async (obs) => {
       await ensureShiftOpen();
@@ -1011,7 +1049,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     for (const ev of sorted) {
       const t = new Date(ev.createdAt).getTime();
       if (isNaN(t)) continue;
-      if (ev.type === 'STARTED' || ev.type === 'RESUMED') {
+      if (ev.type === 'CANCELLED') {
+        // início cancelado (feito por engano): descarta o que foi contado
+        workingMs = 0;
+        currentStart = null;
+      } else if (ev.type === 'STARTED' || ev.type === 'RESUMED') {
         currentStart = t;
       } else if ((ev.type === 'PAUSED' || ev.type === 'FINISHED') && currentStart !== null) {
         workingMs += Math.max(0, t - currentStart);
@@ -1103,6 +1145,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                   }`}>
                     {activeOp?.status === 'in_progress' ? 'Linha em Produção' :
                      activeOp?.status === 'paused' ? 'Linha Pausada' : 'Aguardando Início'}
+                    {activeOp?.status === 'paused' && activePauseEvent && (() => {
+                      const t = Math.max(0, Math.floor((currentTime.getTime() - new Date(activePauseEvent.createdAt).getTime()) / 1000));
+                      const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+                      return <span className="ml-1.5 font-mono tabular-nums normal-case">{h > 0 ? `${h}:${String(m).padStart(2, '0')}` : String(m).padStart(2, '0')}:{String(sec).padStart(2, '0')}</span>;
+                    })()}
                   </span>
                 </div>
               </div>
@@ -1488,6 +1535,19 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                                 </p>
                               </div>
                             )}
+                            {/* Demais pausas: cronômetro de quanto tempo a linha está parada */}
+                            {!st && (
+                              <div className="mt-2 mb-1 rounded-xl border px-3 py-2 bg-amber-950/20 border-amber-500/30">
+                                <div className="flex items-center justify-between gap-3">
+                                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                                    <Clock className="w-3.5 h-3.5" /> Parado há
+                                  </span>
+                                  <span className="font-mono font-black text-2xl tabular-nums text-amber-100">
+                                    {mmss(Math.max(0, currentTime.getTime() - since.getTime()))}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
                             <p className="text-[13px] font-semibold text-amber-100 mt-1 leading-snug">
                               <span className="text-amber-300/70 font-normal">Motivo:</span> {lastPause.reason || 'Sem motivo informado'}
                               <span className="text-amber-300/50 font-normal"> · desde {since.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
@@ -1594,6 +1654,21 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     />
                   </div>
                 </div>
+
+                {/* Cronômetro da OP: tempo previsto (cadastro da OP) − tempo trabalhado */}
+                {!isActiveRework && (activeOp.status === 'in_progress' || activeOp.status === 'paused') && (
+                  Number(activeOp.plannedHours) > 0 ? (
+                    <OpCountdown
+                      expectedMs={Number(activeOp.plannedHours) * 3600000}
+                      workingMs={activeOpWorkingMs}
+                      running={activeOp.status === 'in_progress'}
+                    />
+                  ) : (
+                    <p className="text-[11px] text-[#71717a] px-1">
+                      Esta OP não tem <strong className="text-[#a1a1aa]">tempo previsto</strong> — o cronômetro aparece quando o tempo for preenchido (ao iniciar a OP ou pela Coordenação em Editar OP).
+                    </p>
+                  )
+                )}
 
                 {/* Retrabalho: OP já envasada, voltou do estoque só para o acabamento */}
                 {isActiveRework && activeRework && (
@@ -2688,6 +2763,50 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
 
       {/* MODAL 5: VINCULAR OP DO ESTOQUE À LINHA */}
       {/* Justificativa de tempo excedido (atraso no início / café ou almoço acima da tolerância) */}
+      {/* TEMPO PREVISTO — pedido ao iniciar uma OP */}
+      <Dialog open={!!expectedDialog} onOpenChange={(o) => { if (!o && !expectedBusy) setExpectedDialog(null); }}>
+        <DialogContent className="bg-[#131318] border-[#272733] text-[#f4f4f5] max-w-sm rounded-3xl p-6">
+          <DialogHeader>
+            <DialogTitle className="uppercase tracking-wider text-sm font-black text-white flex items-center gap-2">
+              <Clock className="w-5 h-5 text-blue-400" /> Tempo previsto da OP
+            </DialogTitle>
+          </DialogHeader>
+          {expectedDialog && (
+            <div className="space-y-3 py-1">
+              <p className="text-xs text-[#a1a1aa]">
+                OP <strong className="text-white">{expectedDialog.op.number}</strong> · {expectedDialog.op.product}
+                <span className="block mt-0.5">{Number(expectedDialog.op.plannedQuantity || 0).toLocaleString('pt-BR')} {expectedDialog.op.unidade || 'un'}</span>
+              </p>
+              <div>
+                <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">Tempo previsto para finalizar o envase (h:mm)</Label>
+                <Input
+                  autoFocus
+                  inputMode="numeric"
+                  placeholder="Ex.: 2:30"
+                  value={expectedText}
+                  onChange={(e) => { setExpectedText(e.target.value.replace(/[^\d:]/g, '').slice(0, 6)); setExpectedError(null); }}
+                  onBlur={() => { const h = parseHoursHHMM(expectedText); if (h) setExpectedText(formatHoursHHMM(h)); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') confirmExpectedTime(); }}
+                  className="mt-1 h-12 bg-[#0b0b0e] border-[#25252c] text-2xl font-mono font-black text-center text-orange-300"
+                />
+                <p className="text-[10px] text-[#71717a] mt-1">
+                  É a base do cronômetro da OP (só conta o tempo trabalhado). <strong className="text-amber-300">Depois de confirmado, só a Coordenação pode alterar</strong> (Editar OP).
+                </p>
+              </div>
+              {expectedError && <p className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/50 rounded-lg px-3 py-2">{expectedError}</p>}
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setExpectedDialog(null)} disabled={expectedBusy}
+              className="border-[#2c2c3c] hover:bg-[#1f1f2a] text-[#a1a1aa] rounded-xl text-xs font-bold">Cancelar</Button>
+            <Button onClick={confirmExpectedTime} disabled={expectedBusy || !parseHoursHHMM(expectedText)}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black uppercase tracking-wider">
+              {expectedBusy ? 'Salvando…' : 'Confirmar e iniciar'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={!!justifyDialog} onOpenChange={(o) => { if (!o && !justifyBusy) { setJustifyDialog(null); setJustifyText(''); } }}>
         <DialogContent className="bg-[#131318] border-rose-900/60 text-[#f4f4f5] max-w-md rounded-3xl p-6">
           <DialogHeader>
@@ -2745,8 +2864,10 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
           onAssignAndStart={async (opId, lineId) => {
             const today = getLocalDateStr();
             const targetLine = lines.find(l => l.id === lineId) || currentLine;
-            const late = targetLine ? getLateStart(targetLine, recentEvents, Date.now(), changeovers) : null;
             setIsAssignStockOpen(false);
+            const stockOp = allOps.find(o => o.id === opId);
+            const go = async () => {
+            const late = targetLine ? getLateStart(targetLine, recentEvents, Date.now(), changeovers) : null;
             await withJustification(late ? [late] : [], 'Iniciar produção', async (obs) => {
               await updateOP(opId, {
                 lineId,
@@ -2759,6 +2880,9 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               }
               await fetchData(true);
             });
+            };
+            if (stockOp) askExpectedTime(stockOp, go);
+            else await go();
           }}
           onAssignToQueue={async (opId, lineId) => {
             const today = getLocalDateStr();
