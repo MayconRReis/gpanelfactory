@@ -110,7 +110,7 @@ export function getLateStart(
   return {
     kind: 'inicio',
     excessMin: lateMin,
-    summary: `Início da produção às ${hhmm(nowMs)} — ${lateMin} min depois do início da jornada (${hhmm(start)}; tolerância de 10 min).`,
+    summary: `Início da produção às ${hhmm(nowMs)} — ${lateMin} min depois do início da jornada (${hhmm(start)}).`,
   };
 }
 
@@ -125,7 +125,7 @@ export function getBreakOverrun(reason: string | null | undefined, sinceMs: numb
   return {
     kind,
     excessMin: minutes(excess),
-    summary: `${kind === 'cafe' ? 'Café' : 'Almoço'} das ${hhmm(sinceMs)} às ${hhmm(nowMs)}: ${minutes(dur)} min (padrão ${std >= 60 ? '1h' : `${std} min`} + 5 min de tolerância). ${minutes(excess)} min contam como ociosos.`,
+    summary: `${kind === 'cafe' ? 'Café' : 'Almoço'} das ${hhmm(sinceMs)} às ${hhmm(nowMs)}: ${minutes(dur)} min (padrão ${std >= 60 ? '1h' : `${std} min`}). ${minutes(excess)} min contam como ociosos.`,
   };
 }
 

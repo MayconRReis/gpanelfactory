@@ -74,7 +74,7 @@ export function ToleranceReport(props: Props) {
           </tbody>
         </table>
         <p className="text-[9.5px] text-[#64748b] mt-1">
-          Total excedido: <strong>{totalMin} min</strong> (conta como ocioso){pending > 0 ? ` · ${pending} sem justificativa` : ''}. Tolerâncias: início 10 min após a jornada; retorno do café/almoço 5 min.
+          Total excedido: <strong>{totalMin} min</strong> (conta como ocioso){pending > 0 ? ` · ${pending} sem justificativa` : ''}.
         </p>
       </div>
     );

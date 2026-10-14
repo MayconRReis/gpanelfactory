@@ -1489,7 +1489,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                       <div>
                         <h4 className="text-xs font-bold text-rose-300 uppercase tracking-wider">Início da produção atrasado · {late.excessMin} min</h4>
                         <p className="text-[12px] text-rose-100/90 mt-1 leading-snug">
-                          A jornada começou às 07:00 e a tolerância é de 10 min. O tempo parado já conta como ocioso — ao iniciar, informe a justificativa.
+                          A jornada começou às 07:00. O tempo parado conta como ocioso — ao iniciar, informe a justificativa.
                         </p>
                       </div>
                     </div>
@@ -1509,7 +1509,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                         const lastPause = activePauseEvent;
                         if (!lastPause) return null;
                         const since = new Date(lastPause.createdAt);
-                        // Café/almoço: cronômetro com o limite (padrão + 5 min de tolerância)
+                        // Café/almoço: cronômetro com o padrão (a tolerância de retorno NÃO aparece para o líder)
                         const st = getBreakStatus(lastPause.reason, since.getTime(), currentTime.getTime());
                         const mmss = (ms: number) => {
                           const t = Math.floor(ms / 1000);
@@ -1522,25 +1522,21 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                         return (
                           <>
                             {st && (
-                              <div className={`mt-2 mb-1 rounded-xl border px-3 py-2 ${st.level === 'excedido' ? 'bg-rose-950/50 border-rose-500/60 animate-pulse' : st.level === 'tolerancia' ? 'bg-orange-950/40 border-orange-500/50' : 'bg-amber-950/20 border-amber-500/30'}`}>
+                              <div className={`mt-2 mb-1 rounded-xl border px-3 py-2 ${st.level !== 'ok' ? 'bg-rose-950/50 border-rose-500/60' : 'bg-amber-950/20 border-amber-500/30'}`}>
                                 <div className="flex items-center justify-between gap-3">
-                                  <span className={`text-[10px] font-black uppercase tracking-wider ${st.level === 'excedido' ? 'text-rose-300' : st.level === 'tolerancia' ? 'text-orange-300' : 'text-amber-300'}`}>
-                                    {st.level === 'excedido'
-                                      ? `${st.kind === 'cafe' ? 'Café' : 'Almoço'} excedido`
-                                      : st.level === 'tolerancia'
-                                        ? 'Tolerância de retorno'
-                                        : st.kind === 'cafe' ? 'Café' : 'Almoço'}
+                                  <span className={`text-[10px] font-black uppercase tracking-wider ${st.level !== 'ok' ? 'text-rose-300' : 'text-amber-300'}`}>
+                                    {st.level !== 'ok'
+                                      ? `${st.kind === 'cafe' ? 'Café' : 'Almoço'} acima do padrão`
+                                      : st.kind === 'cafe' ? 'Café' : 'Almoço'}
                                   </span>
-                                  <span className={`font-mono font-black text-2xl tabular-nums ${st.level === 'excedido' ? 'text-rose-200' : st.level === 'tolerancia' ? 'text-orange-200' : 'text-amber-100'}`}>
+                                  <span className={`font-mono font-black text-2xl tabular-nums ${st.level !== 'ok' ? 'text-rose-200' : 'text-amber-100'}`}>
                                     {mmss(st.elapsedMs)}
                                   </span>
                                 </div>
-                                <p className={`text-[11px] mt-0.5 ${st.level === 'excedido' ? 'text-rose-200' : 'text-amber-200/70'}`}>
-                                  {st.level === 'excedido'
-                                    ? `Passou ${Math.ceil((st.elapsedMs - st.limitMs) / 60000)} min do limite (${fmtLimit(st.limitMs)}). ${Math.round(st.excessMs / 60000)} min já contam como ociosos — ao retomar, informe a justificativa.`
-                                    : st.level === 'tolerancia'
-                                      ? `Padrão de ${fmtLimit(st.standardMs)} encerrado — retorne até ${fmtLimit(st.limitMs)} (faltam ${mmss(st.limitMs - st.elapsedMs)}).`
-                                      : `Padrão ${fmtLimit(st.standardMs)} + 5 min de tolerância · limite ${new Date(since.getTime() + st.limitMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
+                                <p className={`text-[11px] mt-0.5 ${st.level !== 'ok' ? 'text-rose-200' : 'text-amber-200/70'}`}>
+                                  {st.level !== 'ok'
+                                    ? `Passou ${Math.ceil((st.elapsedMs - st.standardMs) / 60000)} min do padrão (${fmtLimit(st.standardMs)}). Retorne à produção.`
+                                    : `Padrão ${fmtLimit(st.standardMs)} · até ${new Date(since.getTime() + st.standardMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
                                 </p>
                               </div>
                             )}
@@ -2072,12 +2068,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
               </Select>
               {/^\s*intervalo/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
-                  Almoço de 1 hora, com 5 minutos de tolerância no retorno (até 1h05), não conta como ociosidade. Passou disso, todo o tempo acima de 1 hora conta como ocioso e será pedida uma justificativa ao retomar.
+                  Almoço de 1 hora não conta como ociosidade. Passou de 1 hora, o tempo acima conta como ocioso e pode ser pedida uma justificativa ao retomar.
                 </p>
               )}
               {/^\s*caf[eé]/i.test(pauseReason || '') && (
                 <p className="text-[11px] text-emerald-400 mt-1.5">
-                  Café de 15 minutos, com 5 minutos de tolerância no retorno (até 20 min), não conta como ociosidade. Passou disso, todo o tempo acima de 15 minutos conta como ocioso e será pedida uma justificativa ao retomar.
+                  Café de 15 minutos não conta como ociosidade. Passou de 15 minutos, o tempo acima conta como ocioso e pode ser pedida uma justificativa ao retomar.
                 </p>
               )}
             </div>
