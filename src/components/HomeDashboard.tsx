@@ -777,6 +777,27 @@ export function HomeDashboard({
     return Math.round((avgLineProductionTime.avgWorkingMs / total) * 1000) / 10;
   }, [avgLineProductionTime]);
 
+  // Dias (locais) das conclusões PARCIAIS de cada OP. A OP que volta pro
+  // estoque por uma parcial fica sem data de conclusão — sem isto ela sumia
+  // do Desempenho/OEE do dia em que a parcial aconteceu. Só vale enquanto a
+  // OP não foi concluída de vez (aí ela conta no dia da conclusão, com o
+  // tempo previsto inteiro, e não pode contar duas vezes).
+  const partialDaysByOp = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const ev of events) {
+      if (!ev?.opId || !isPartialFinishEvent(ev)) continue;
+      const k = String(ev.opId);
+      const list = map.get(k) || [];
+      list.push(toLocalDateStr(ev.createdAt));
+      map.set(k, list);
+    }
+    return map;
+  }, [events]);
+  const hasPartialInRange = useCallback((op: ProductionOrder, startStr: string, endStr: string) => {
+    if (op.status === 'completed' || op.isPartialRecord) return false;
+    return (partialDaysByOp.get(String(op.id)) || []).some(d => d >= startStr && d <= endStr);
+  }, [partialDaysByOp]);
+
   // OPs e eventos restritos ao período selecionado (Dia/Mês/Ano) — usados nos
   // componentes do OEE (Performance e Qualidade dependem de quais OPs contam).
   // Em "Geral" não há corte: entra o histórico inteiro.
@@ -795,11 +816,11 @@ export function HomeDashboard({
 
     const periodOps = ops.filter(op => {
       const d = getOpReferenceDateStr(op);
-      return !!d && d >= startStr && d <= endStr;
+      return (!!d && d >= startStr && d <= endStr) || hasPartialInRange(op, startStr, endStr);
     });
     const periodEvents = events.filter(ev => inRange(ev.createdAt));
     return { periodOps, periodEvents };
-  }, [ops, events, dashboardPeriod, periodDateRange, todayDateStr]);
+  }, [ops, events, dashboardPeriod, periodDateRange, todayDateStr, hasPartialInRange]);
 
   // OPs Finalizadas (Card 5) restritas ao período selecionado no filtro do
   // dashboard (Dia/Mês/Ano/Geral), usando o mesmo recorte do OEE.
@@ -892,7 +913,8 @@ export function HomeDashboard({
     const result: { monthName: string; disponibilidade: number | null; performance: number | null; qualidade: number | null }[] = [];
     for (let m = 0; m <= currentMonth; m++) {
       const monthKey = `${currentYear}-${String(m + 1).padStart(2, '0')}`;
-      const monthOps = ops.filter(op => getOpReferenceDateStr(op).startsWith(monthKey));
+      const lastDayStr = `${monthKey}-${String(new Date(currentYear, m + 1, 0).getDate()).padStart(2, '0')}`;
+      const monthOps = ops.filter(op => getOpReferenceDateStr(op).startsWith(monthKey) || hasPartialInRange(op, `${monthKey}-01`, lastDayStr));
       const monthEvents = events.filter(ev => {
         if (!ev.createdAt) return false;
         const d = new Date(ev.createdAt);
@@ -908,7 +930,7 @@ export function HomeDashboard({
       });
     }
     return result;
-  }, [dashboardPeriod, ops, events, currentYear, currentMonth, isEnvaseLineOp, workSessions]);
+  }, [dashboardPeriod, ops, events, currentYear, currentMonth, isEnvaseLineOp, workSessions, hasPartialInRange]);
 
   // Timer do card da linha = tempo TRABALHADO da OP (soma dos trechos em
   // produção, sem pausas e sem as noites em que ficou esquecida "em

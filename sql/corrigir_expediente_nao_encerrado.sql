@@ -7,8 +7,8 @@
 -- ficou rodando (seg–qui 17:00, sex 16:00, horário de Brasília), marcada como
 -- correção manual. Os eventos originais NÃO são alterados nem apagados.
 --
--- Vale para as linhas de Envase/Sleev (reatores têm outra jornada e ficam de
--- fora). Casos que começaram depois do fim da jornada (hora extra) ou no fim de
+-- Vale para as OPs lançadas pelo app nas linhas de Envase/Sleev (reatores têm
+-- outra jornada e o histórico importado da planilha — imp-* — fica de fora). Casos que começaram depois do fim da jornada (hora extra) ou no fim de
 -- semana não são corrigidos automaticamente — aparecem no PASSO 1 para análise.
 --
 -- Rodar no Supabase SQL Editor: primeiro o PASSO 1 (só mostra), depois o PASSO 2.
@@ -40,6 +40,9 @@ trechos AS (
     AND s.next_at IS NOT NULL
     AND (s.next_at AT TIME ZONE 'America/Sao_Paulo')::date > s.local_ts::date
     AND COALESCE(s.line_id, '') !~* 'reator|pesagem|manipula'
+    -- Histórico importado da planilha (imp-*) fica de fora: só tem início/fim
+    -- e a noite ali foi produção real (2º turno / hora extra), não esquecimento.
+    AND s.op_id NOT LIKE 'imp-%'
 )
 SELECT
   t.op_id,
@@ -82,6 +85,9 @@ trechos AS (
     AND s.next_at IS NOT NULL
     AND (s.next_at AT TIME ZONE 'America/Sao_Paulo')::date > s.local_ts::date
     AND COALESCE(s.line_id, '') !~* 'reator|pesagem|manipula'
+    -- Histórico importado da planilha (imp-*) fica de fora: só tem início/fim
+    -- e a noite ali foi produção real (2º turno / hora extra), não esquecimento.
+    AND s.op_id NOT LIKE 'imp-%'
 ),
 correcoes AS (
   SELECT
