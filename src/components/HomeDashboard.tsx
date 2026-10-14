@@ -15,6 +15,7 @@ import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../servi
 import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import { PerformanceOpsModal } from './PerformanceOpsModal';
+import { LastUpdatedBadge } from './LastUpdatedBadge';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -49,6 +50,8 @@ interface HomeDashboardProps {
   onNavigateTab?: (tab: 'cronograma' | 'ops' | 'users' | 'events' | 'daily_production') => void;
   onOpenShareModal?: () => void;
   isReadOnly?: boolean;
+  /** Quando os dados do dashboard foram carregados pela última vez */
+  lastUpdatedAt?: number | Date | null;
   /** Lista de Setups do Envase — só no dashboard do coordenador. */
   showSetupHistory?: boolean;
   /** Seletor de OEE por setor (Geral, Envase, Manipulação, Pesagem, Separação, Datação) — só Coordenação/ADM. */
@@ -253,6 +256,7 @@ export function HomeDashboard({
   onNavigateTab,
   onOpenShareModal,
   isReadOnly = false,
+  lastUpdatedAt = null,
   showSetupHistory = false,
   showSectorOee = false,
   oeeOnly = false,
@@ -1571,6 +1575,7 @@ export function HomeDashboard({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            <LastUpdatedBadge at={lastUpdatedAt} />
             {periodFilterJsx}
 
             {!isReadOnly && onOpenShareModal && (

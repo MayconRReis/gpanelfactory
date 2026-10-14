@@ -233,6 +233,7 @@ export function PublicDashboardView() {
               factoryMonthlyGoals={factoryMonthlyGoals}
               lineDailyGoals={lineDailyGoals}
               isReadOnly={true}
+              lastUpdatedAt={lastUpdated}
             />
           )}
         </div>

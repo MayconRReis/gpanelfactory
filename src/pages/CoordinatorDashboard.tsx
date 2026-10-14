@@ -343,6 +343,8 @@ export function CoordinatorDashboard() {
   // `finally` dispara um loadData() extra assim que o atual terminar, então
   // nenhuma atualização fica perdida — o pior caso passa a ser um pequeno
   // atraso (esperar o fetch em andamento terminar), nunca mais um "travado".
+  // Hora da última carga completa dos dados (mostrada no dashboard)
+  const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
   const isLoadingDataRef = useRef(false);
   const pendingReloadRef = useRef(false);
 
@@ -382,6 +384,7 @@ export function CoordinatorDashboard() {
       setLineDailyGoals(ldgs || []);
       setFactoryMonthlyGoal(fmg);
       setFactoryMonthlyGoals(fmgs || []);
+      setLastLoadedAt(Date.now());
     } catch (e) {
       console.warn('Erro ao carregar dados do coordenador:', e);
     } finally {
@@ -1560,6 +1563,7 @@ WHERE email IN (
                 lineDailyGoals={lineDailyGoals}
                 onNavigateTab={(tab) => setActiveTab(tab)}
                 onOpenShareModal={() => setIsShareModalOpen(true)}
+                lastUpdatedAt={lastLoadedAt}
               />
             )}
 
