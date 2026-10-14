@@ -222,6 +222,28 @@ export function CoordinatorDashboard() {
   const [deleteModalOp, setDeleteModalOp] = useState<ProductionOrder | null>(null);
   const [isDeletingOp, setIsDeletingOp] = useState(false);
 
+  // OP Granel: ao digitar o lote da OP, acha a OSM do granel (Pesagem/
+  // Manipulação) com o mesmo lote e preenche o campo com o NÚMERO dela.
+  // `granelAutoRef` guarda o último valor preenchido sozinho — se o usuário
+  // digitar outro granel, o campo deixa de ser trocado automaticamente.
+  const granelAutoRef = useRef<string>('');
+  const findGranelOsmByLote = (lote: string): ProductionOrder | null => {
+    const key = lote.trim().toLowerCase();
+    if (!key) return null;
+    const cands = ops.filter(o =>
+      !o.isPartialRecord &&
+      (o.setor === 'Pesagem' || o.setor === 'Manipulação' || o.tipoDocumento === 'OSM') &&
+      String(o.lote || '').trim().toLowerCase() === key &&
+      String(o.number || '').trim()
+    );
+    // Prefere a da Pesagem (origem do granel); senão a mais recente
+    return cands.sort((a, b) =>
+      (a.setor === 'Pesagem' ? 0 : 1) - (b.setor === 'Pesagem' ? 0 : 1) ||
+      String(b.createdAt || '').localeCompare(String(a.createdAt || ''))
+    )[0] || null;
+  };
+  const granelFound = newOpLote.trim() ? findGranelOsmByLote(newOpLote) : null;
+
   // Etiquetas da OP (Datado, Ag. datação…) escolhidas no Editar OP
   const opTagsState = useOpTags();
   const [editOpTags, setEditOpTags] = useState<string[]>([]);
@@ -830,6 +852,7 @@ WHERE email IN (
     setNewOpScheduledDays('1');
     setNewOpScheduledShift('Integral');
     setEditOpTags([]);
+    granelAutoRef.current = '';
     setShowNewOpModal(true);
   };
 
@@ -2694,10 +2717,16 @@ WHERE email IN (
                     value={newOpLote}
                     onChange={(e) => {
                       const v = e.target.value;
-                      // O granel quase sempre tem o mesmo lote do acabado: acompanha o
-                      // lote enquanto o granel estiver vazio ou igual ao lote anterior.
-                      if (!newOpGranel.trim() || newOpGranel === newOpLote) setNewOpGranel(v);
                       setNewOpLote(v);
+                      // Granel e acabado quase sempre têm o mesmo lote: acha a OSM do
+                      // granel com esse lote e preenche o número dela (se o campo estiver
+                      // vazio ou tiver sido preenchido automaticamente).
+                      if (!newOpGranel.trim() || newOpGranel === granelAutoRef.current) {
+                        const found = findGranelOsmByLote(v);
+                        const next = found ? String(found.number).trim() : '';
+                        granelAutoRef.current = next;
+                        setNewOpGranel(next);
+                      }
                     }}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-emerald-400"
                   />
@@ -2706,15 +2735,19 @@ WHERE email IN (
                 <div className="space-y-1">
                   <Label className="text-[10px] uppercase font-bold text-[#a1a1aa]">OP Granel</Label>
                   <Input
-                    placeholder="Mesmo do lote"
+                    placeholder="Achado pelo lote"
                     value={newOpGranel}
                     onChange={(e) => setNewOpGranel(e.target.value)}
                     className="bg-[#0b0b0e] border-[#25252c] text-xs font-mono text-amber-400"
                   />
-                  <p className="text-[9px] text-[#71717a] leading-tight">
-                    {newOpGranel.trim() && newOpGranel.trim() === newOpLote.trim()
-                      ? 'Igual ao lote do produto — altere só se o granel for diferente.'
-                      : 'Preenchido com o lote do produto; altere se o granel for diferente.'}
+                  <p className={`text-[9px] leading-tight ${!newOpLote.trim() || granelFound ? 'text-[#71717a]' : 'text-amber-400/80'}`}>
+                    {!newOpLote.trim()
+                      ? 'Preenchido sozinho ao digitar o lote do produto.'
+                      : granelFound
+                        ? (newOpGranel.trim() === String(granelFound.number).trim()
+                          ? `OSM do granel achada pelo lote (${granelFound.setor || 'OSM'}).`
+                          : `Pelo lote, a OSM do granel seria ${granelFound.number}.`)
+                        : 'Nenhuma OSM de granel com este lote — preencha a OP do granel.'}
                   </p>
                 </div>
               </div>
