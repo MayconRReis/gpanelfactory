@@ -361,7 +361,12 @@ export type GranelStatus = 'manipulado' | 'manipulando' | 'separado' | 'nao_sepa
 export function getGranelStatus(granel: string | undefined | null, ops: ProductionOrder[]): GranelStatus | null {
   const key = String(granel || '').trim().toLowerCase();
   if (!key) return null;
-  const sameNumber = ops.filter(o => String(o.number || '').trim().toLowerCase() === key && !o.isPartialRecord);
+  // O granel é informado pelo número da OSM ou — o mais comum — pelo lote
+  // (granel e acabado quase sempre têm o mesmo lote).
+  const sameNumber = ops.filter(o =>
+    !o.isPartialRecord &&
+    (String(o.number || '').trim().toLowerCase() === key || String(o.lote || '').trim().toLowerCase() === key)
+  );
   const manip = sameNumber.filter(o => o.setor === 'Manipulação');
   if (manip.some(o => o.status === 'completed')) return 'manipulado';
   if (manip.some(o => o.status === 'in_progress' || o.status === 'paused')) return 'manipulando';
