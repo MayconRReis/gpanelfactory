@@ -1441,6 +1441,11 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                        activeOp.status === 'paused' ? 'Pausada' : 'Aguardando'}
                     </span>
 
+                    {/* Cronômetro da OP: tempo previsto − tempo trabalhado (pausas não contam) */}
+                    {!isActiveRework && (activeOp.status === 'in_progress' || activeOp.status === 'paused') && Number(activeOp.plannedHours) > 0 && (
+                      <OpCountdown expectedMs={Number(activeOp.plannedHours) * 3600000} workingMs={activeOpWorkingMs} />
+                    )}
+
                     {/* Badge Sleev se a OP veio do envase com acabamento para Sleev */}
                     {activeOp.isSleeve && (
                       <span className="px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 border bg-purple-950 text-purple-300 border-purple-600/60 shadow-sm shadow-purple-950/40">
@@ -1654,21 +1659,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     />
                   </div>
                 </div>
-
-                {/* Cronômetro da OP: tempo previsto (cadastro da OP) − tempo trabalhado */}
-                {!isActiveRework && (activeOp.status === 'in_progress' || activeOp.status === 'paused') && (
-                  Number(activeOp.plannedHours) > 0 ? (
-                    <OpCountdown
-                      expectedMs={Number(activeOp.plannedHours) * 3600000}
-                      workingMs={activeOpWorkingMs}
-                      running={activeOp.status === 'in_progress'}
-                    />
-                  ) : (
-                    <p className="text-[11px] text-[#71717a] px-1">
-                      Esta OP não tem <strong className="text-[#a1a1aa]">tempo previsto</strong> — o cronômetro aparece quando o tempo for preenchido (ao iniciar a OP ou pela Coordenação em Editar OP).
-                    </p>
-                  )
-                )}
 
                 {/* Retrabalho: OP já envasada, voltou do estoque só para o acabamento */}
                 {isActiveRework && activeRework && (
