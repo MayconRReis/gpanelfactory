@@ -37,6 +37,8 @@ export interface LineTimeMetrics {
   hasExplicitSession?: boolean;
   /** Parte do ocioso que foi troca de produto (botão "Iniciar troca"). Só com workSessions. */
   changeoverMs?: number;
+  /** Trechos (início, fim) em que a linha ficou ociosa — a soma é o idleMs. */
+  idleRanges?: Array<[number, number]>;
 }
 
 /**
@@ -935,6 +937,7 @@ export function calculateProductionTime(
       const idleUnion = subtractRanges(mergeRanges(entry.idle), workingUnion);
       byLine[lId].workingMs = rangesLength(workingUnion);
       byLine[lId].idleMs = rangesLength(idleUnion);
+      byLine[lId].idleRanges = idleUnion;
     }
   } else {
     // ---- Com controle de expediente ----
@@ -1106,6 +1109,7 @@ export function calculateProductionTime(
 
       byLine[lId].workingMs = rangesLength(workingUnion);
       byLine[lId].idleMs = rangesLength(idleUnion);
+      byLine[lId].idleRanges = idleUnion;
       byLine[lId].changeoverMs = rangesLength(changeoverInIdle);
       byLine[lId].sessionMs = coverageMs;
       byLine[lId].overtimeMs = overtimeMs;

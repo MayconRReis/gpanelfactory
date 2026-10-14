@@ -16,6 +16,8 @@ import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProduc
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import { PerformanceOpsModal } from './PerformanceOpsModal';
 import { OpDetailsModal } from './OpDetailsModal';
+import { AvailabilityModal } from './AvailabilityModal';
+import { QualityModal } from './QualityModal';
 import { LastUpdatedBadge } from './LastUpdatedBadge';
 import {
   ResponsiveContainer,
@@ -883,6 +885,8 @@ export function HomeDashboard({
   };
   const [showPerfOps, setShowPerfOps] = useState(false);
   const [perfDetailOpId, setPerfDetailOpId] = useState<string | null>(null);
+  const [showAvailOps, setShowAvailOps] = useState(false);
+  const [showQualityOps, setShowQualityOps] = useState(false);
   const performanceDesc = oeeMetrics.performanceBasis === 'tempo'
     ? `Tempo esperado ${fmtH(oeeMetrics.expectedHours)} ÷ tempo produzido ${fmtH(oeeMetrics.workedHours)}`
       + (oeeMetrics.opsWithoutTime > 0 ? ` · ${oeeMetrics.opsWithoutTime} OP(s) sem horas planejadas fora do cálculo` : '')
@@ -1490,13 +1494,17 @@ export function HomeDashboard({
           ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <OeeDonut label="Disponibilidade" pct={oeeDisponibilidadePct} color="#3b82f6" glow="rgba(59,130,246,0.8)" border="border-blue-800/40"
-              desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)" />
+              desc="Tempo real produzindo ÷ tempo planejado (descontadas as paradas)"
+              onClick={oeeDisponibilidadePct !== null ? () => setShowAvailOps(true) : undefined}
+              hint="Ver linhas e paradas do cálculo" />
             <OeeDonut label="Performance" pct={oeePerformancePct} color="#f97316" glow="rgba(249,115,22,0.8)" border="border-orange-800/40"
               desc={performanceDesc}
               onClick={(oeeMetrics.perfOps?.length || 0) > 0 ? () => setShowPerfOps(true) : undefined}
               hint="Ver OPs do cálculo" />
             <OeeDonut label="Qualidade" pct={oeeQualidadePct} color="#10b981" glow="rgba(16,185,129,0.8)" border="border-emerald-800/40"
-              desc="(Produzido − rejeitado) ÷ produzido" />
+              desc="(Produzido − rejeitado) ÷ produzido"
+              onClick={oeeQualidadePct !== null ? () => setShowQualityOps(true) : undefined}
+              hint="Ver OPs do cálculo" />
             <GoalGauge
               produced={sectorKpis.envase.valor}
               goal={goalGauge.goal}
@@ -1577,6 +1585,28 @@ export function HomeDashboard({
           lines={lines}
           periodLabel={PERIOD_LABELS[dashboardPeriod]}
           onClose={() => setShowPerfOps(false)}
+          onOpenOp={setPerfDetailOpId}
+        />
+      )}
+      {showAvailOps && (
+        <AvailabilityModal
+          lines={envaseMetricLines}
+          byLine={periodProductionTime.byLine}
+          intervals={periodProductionTime.intervals}
+          changeovers={changeovers}
+          ops={ops}
+          periodLabel={PERIOD_LABELS[dashboardPeriod]}
+          nowMs={nowTick}
+          onClose={() => setShowAvailOps(false)}
+          onOpenOp={setPerfDetailOpId}
+        />
+      )}
+      {showQualityOps && (
+        <QualityModal
+          ops={periodOpsAndEvents.periodOps.filter(isEnvaseLineOp)}
+          lines={lines}
+          periodLabel={PERIOD_LABELS[dashboardPeriod]}
+          onClose={() => setShowQualityOps(false)}
           onOpenOp={setPerfDetailOpId}
         />
       )}
