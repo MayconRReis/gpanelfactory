@@ -10,9 +10,9 @@ import {
   Filter,
   Boxes,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover, StaffOccurrence } from '../types';
 import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../services/productionLedger';
-import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
+import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover, getStaffOccurrences, getLineDayAbsences, ABSENCES_FROM_OCCURRENCES_SINCE } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import { PerformanceOpsModal } from './PerformanceOpsModal';
 import { OpDetailsModal } from './OpDetailsModal';
@@ -646,6 +646,16 @@ export function HomeDashboard({
   // Produtividade = unidades produzidas ÷ horas-pessoa trabalhadas: cada trecho
   // de trabalho da linha vale o nº de colaboradores presentes naquele horário.
   // Só entram dias/trechos com equipe informada — nada é estimado.
+  // Faltas vêm das Ocorrências (falta + atestado) desde ABSENCES_FROM_OCCURRENCES_SINCE
+  const [absenceOccurrences, setAbsenceOccurrences] = useState<StaffOccurrence[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getStaffOccurrences(ABSENCES_FROM_OCCURRENCES_SINCE, todayDateStr).then(res => { if (!cancelled) setAbsenceOccurrences(res.list); }).catch(() => {});
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [todayDateStr]);
+
   const teamMetrics = useMemo(() => {
     const inPeriod = (day: string) =>
       dashboardPeriod === 'geral' ||
@@ -667,7 +677,7 @@ export function HomeDashboard({
     let absent = 0;
     for (const h of lastByLineDay.values()) {
       present += h.present;
-      absent += h.absent;
+      absent += getLineDayAbsences(h, absenceOccurrences, h.lineId, toLocalDateStr(h.recordedAt));
     }
     const absenteeismPct = present + absent > 0 ? Math.round((absent / (present + absent)) * 1000) / 10 : null;
 
@@ -698,7 +708,7 @@ export function HomeDashboard({
     const unitsPerPersonHour = personHours > 0 ? Math.round(producedWithTeam / personHours) : null;
 
     return { present, absent, absenteeismPct, unitsPerPersonHour, personHours, lineDays: lastByLineDay.size };
-  }, [headcounts, envaseLines, dashboardPeriod, periodDateRange, events, ops, periodProductionTime]);
+  }, [headcounts, envaseLines, dashboardPeriod, periodDateRange, events, ops, periodProductionTime, absenceOccurrences]);
 
   // Duração de um turno de trabalho (8h) — multiplicada pelos dias do
   // período para virar a base do Índice de Ociosidade (% das horas perdidas)
@@ -1202,6 +1212,7 @@ export function HomeDashboard({
       ? `Expediente encerrado às ${hhmm(lastSessionToday.endedAt)}`
       : 'Expediente não iniciado';
     const teamToday = /reator/i.test(line.id) ? null : getHeadcountForLineDay(headcounts, line.id, todayDateStr);
+    const teamTodayAbsent = getLineDayAbsences(teamToday, absenceOccurrences, line.id, todayDateStr);
     const openLineChangeover = getOpenChangeover(changeovers, line.id);
     const changeoverTodayMs = todayProductionTime.byLine[line.id]?.changeoverMs || 0;
     const sessionLabelClass = openSession
@@ -1250,7 +1261,7 @@ export function HomeDashboard({
             {!/reator/i.test(line.id) && (
               <p className="text-[10px] font-semibold mt-0.5 truncate text-[#a1a1aa]">
                 {teamToday
-                  ? <>Equipe: <span className="text-white">{teamToday.present}</span>{teamToday.absent > 0 && <span className="text-amber-300"> · {teamToday.absent} falta(s)</span>}</>
+                  ? <>Equipe: <span className="text-white">{teamToday.present}</span>{teamTodayAbsent > 0 && <span className="text-amber-300"> · {teamTodayAbsent} falta(s)</span>}</>
                   : <span className="text-[#52525b]">Equipe não informada</span>}
               </p>
             )}

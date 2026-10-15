@@ -64,6 +64,8 @@ import {
   getLineHeadcounts,
   recordLineHeadcount,
   getHeadcountForLineDay,
+  getStaffOccurrences,
+  countOccurrenceAbsences,
   getChangeovers,
   getOpenChangeover,
   startChangeover,
@@ -79,7 +81,7 @@ import { OpCountdown } from '../components/OpCountdown';
 import { OpTagBadges } from '../components/OpTags';
 import { parseHoursHHMM, formatHoursHHMM } from '../lib/hours';
 import { PresenceIndicator, PresenceDot, useLinePresence } from '../components/PresenceIndicator';
-import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile } from '../types';
+import { ProductionLine, ProductionOrder, ProductionEvent, PauseReason, WorkSession, LineDailyGoal, LineHeadcount, LineChangeover, UserProfile, StaffOccurrence } from '../types';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Label } from '../components/ui/label';
 import { Input } from '../components/ui/input';
@@ -211,7 +213,6 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
   const [headcounts, setHeadcounts] = useState<LineHeadcount[]>([]);
   const [teamDialogMode, setTeamDialogMode] = useState<'start' | 'edit' | null>(null);
   const [teamPresent, setTeamPresent] = useState('');
-  const [teamAbsent, setTeamAbsent] = useState('0');
   const [teamError, setTeamError] = useState<string | null>(null);
   // Troca de produto (botão "Iniciar troca")
   const [changeovers, setChangeovers] = useState<LineChangeover[]>([]);
@@ -521,27 +522,22 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     setShiftError(null);
     setTeamError(null);
     setTeamPresent('');
-    setTeamAbsent('0');
     setTeamDialogMode('start');
   };
 
   const openTeamEditor = () => {
     setTeamError(null);
     setTeamPresent(todayTeam ? String(todayTeam.present) : '');
-    setTeamAbsent(todayTeam ? String(todayTeam.absent) : '0');
     setTeamDialogMode('edit');
   };
 
   const handleConfirmTeam = async () => {
     if (!currentLine || !profile || !teamDialogMode) return;
     const present = parseInt(teamPresent, 10);
-    const absent = teamAbsent.trim() === '' ? 0 : parseInt(teamAbsent, 10);
+    // Faltas vêm das ocorrências — grava o número do momento só como registro
+    const absent = todayAbsences;
     if (isNaN(present) || present < 1) {
       setTeamError('Informe quantos colaboradores estão trabalhando na linha (mínimo 1).');
-      return;
-    }
-    if (isNaN(absent) || absent < 0) {
-      setTeamError('Informe as faltas (0 se ninguém faltou).');
       return;
     }
     setIsShiftBusy(true);
@@ -909,6 +905,18 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
     () => (currentLine ? getHeadcountForLineDay(headcounts, currentLine.id, todayDateStr) : null),
     [headcounts, currentLine, todayDateStr]
   );
+
+  // Faltas de hoje = ocorrências lançadas (falta + atestado) para esta linha.
+  // O líder só informa quantas pessoas estão trabalhando.
+  const [todayOccurrences, setTodayOccurrences] = useState<StaffOccurrence[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getStaffOccurrences(todayDateStr, todayDateStr).then(res => { if (!cancelled) setTodayOccurrences(res.list); }).catch(() => {});
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [todayDateStr, teamDialogMode]);
+  const todayAbsences = currentLine ? countOccurrenceAbsences(todayOccurrences, currentLine.id, todayDateStr) : 0;
 
   const dailyMetrics = useMemo(() => {
     // Eventos de hoje na linha (dia LOCAL — o createdAt vem em UTC)
@@ -1348,7 +1356,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                     <span>
                       Equipe: <strong className="text-white">{todayTeam.present} colaborador(es)</strong>
                       {' · '}
-                      <strong className={todayTeam.absent > 0 ? 'text-amber-300' : 'text-[#a1a1aa]'}>{todayTeam.absent} falta(s)</strong>
+                      <strong className={todayAbsences > 0 ? 'text-amber-300' : 'text-[#a1a1aa]'} title="Faltas e atestados lançados nas Ocorrências">{todayAbsences} falta(s)</strong>
                     </span>
                     <span className="text-[10px] text-[#71717a] font-mono">
                       desde {new Date(todayTeam.recordedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
@@ -1367,7 +1375,7 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-950/40 border border-amber-800/50 rounded-2xl px-4 py-3">
                   <p className="text-xs text-amber-200 flex items-center gap-2">
                     <Users className="w-4 h-4 text-amber-400 shrink-0" />
-                    Informe quantos colaboradores estão na linha hoje e quantos faltaram.
+                    Informe quantos colaboradores estão trabalhando na linha hoje.
                   </p>
                   <div className="flex items-center gap-2">
                     <button
@@ -2158,19 +2166,12 @@ export function LeaderScreen({ embedded = false }: LeaderScreenProps = {}) {
                 className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
               />
             </div>
-            <div className="space-y-1.5">
-              <Label className="text-[10px] uppercase text-[#a1a1aa] font-bold tracking-wider">
-                Faltas (integrantes da equipe que não vieram)
-              </Label>
-              <Input
-                type="number"
-                min="0"
-                inputMode="numeric"
-                value={teamAbsent}
-                onChange={e => setTeamAbsent(e.target.value)}
-                placeholder="0"
-                className="bg-[#181822] border-[#2c2c3c] rounded-xl text-sm font-mono"
-              />
+            <div className="flex items-start gap-2 bg-[#181822] border border-[#2c2c3c] rounded-xl px-3 py-2">
+              <Users className="w-3.5 h-3.5 text-[#a1a1aa] shrink-0 mt-0.5" />
+              <p className="text-[11px] text-[#a1a1aa]">
+                Faltas de hoje nesta linha: <strong className={todayAbsences > 0 ? 'text-amber-300' : 'text-[#d4d4d8]'}>{todayAbsences}</strong>
+                {' '}— vêm das <strong className="text-[#d4d4d8]">Ocorrências</strong> (falta e atestado). Para corrigir, lance ou apague na tela de Ocorrências.
+              </p>
             </div>
             <p className="text-[11px] text-[#71717a]">
               {teamDialogMode === 'start'
