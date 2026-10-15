@@ -21,6 +21,7 @@ import {
   getLineHeadcounts,
   getChangeovers,
   getHeadcountForLineDay,
+  getLineDayAbsences,
   getDailyReports,
   saveDailyReport,
   getStaffOccurrences,
@@ -309,7 +310,6 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
     };
   }, [lineRows]);
 
-  const appAbsences = lineRows.reduce((acc, r) => acc + (r.team?.absent || 0), 0);
 
   // ---------- Paradas do dia (Envase) por motivo ----------
   const pauseRows = useMemo(() => {
@@ -833,7 +833,7 @@ export function DailyReport({ lines, ops, events, goals = [], factoryMonthlyGoal
                     </td>
                     <td className={tdc}>{r.overtime >= 60000 ? formatMsToHoursMinutes(r.overtime) : '—'}</td>
                     <td className={tdc}>{r.setups > 0 ? <>{r.setups}<span className="block text-[9.5px] text-[#64748b]">{formatMsToHoursMinutes(r.setupMs)}</span></> : '—'}</td>
-                    <td className={tdc}>{r.team ? <>{r.team.present}{r.team.absent > 0 && <span className="block text-[9.5px] text-[#dc2626]">{r.team.absent} falta{r.team.absent > 1 ? 's' : ''}</span>}</> : '—'}</td>
+                    <td className={tdc}>{r.team ? (() => { const ab = getLineDayAbsences(r.team, monthOccurrences, r.id, selectedDate); return <>{r.team.present}{ab > 0 && <span className="block text-[9.5px] text-[#dc2626]">{ab} falta{ab > 1 ? 's' : ''}</span>}</>; })() : '—'}</td>
                   </tr>
                 ))}
                 {lineAvg && (

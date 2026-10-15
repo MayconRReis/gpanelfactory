@@ -3765,6 +3765,76 @@ export function getHeadcountForLineDay(list: LineHeadcount[], lineId: string, da
 }
 
 /**
+ * FALTAS DA LINHA: a partir de ABSENCES_FROM_OCCURRENCES_SINCE, as faltas de
+ * cada linha/dia vêm das OCORRÊNCIAS lançadas (falta + atestado) — o líder só
+ * informa quantas pessoas estão trabalhando. Antes dessa data vale o número
+ * digitado junto com a equipe (line_headcounts.absent).
+ */
+export const ABSENCES_FROM_OCCURRENCES_SINCE = '2026-10-15';
+const ABSENCE_OCCURRENCE_TYPES: StaffOccurrenceType[] = ['falta', 'atestado'];
+
+// Escala semanal do Envase: as equipes trocam entre Envase 1 e Envase 2 toda
+// segunda. Um atestado/férias de vários dias lançado numa delas passa para a
+// outra linha a cada semana seguinte.
+const WEEKLY_SWAP_LINES: Record<string, string> = { 'line-1': 'line-2', 'line-2': 'line-1' };
+const mondayIndex = (dayStr: string) => {
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const t = Date.UTC(y, m - 1, d);
+  const dow = (new Date(t).getUTCDay() + 6) % 7; // 0 = segunda
+  return Math.round((t - dow * 86_400_000) / (7 * 86_400_000));
+};
+
+/** Linha em que a ocorrência vale naquele dia (segue a troca semanal Envase 1 ↔ 2). */
+export function getOccurrenceLineForDay(o: StaffOccurrence): string {
+  const other = WEEKLY_SWAP_LINES[o.lineId];
+  if (!other || !o.startDate || o.startDate === o.date) return o.lineId;
+  const weeks = mondayIndex(o.date) - mondayIndex(o.startDate);
+  return weeks > 0 && weeks % 2 === 1 ? other : o.lineId;
+}
+
+/** Faltas (falta + atestado) lançadas nas ocorrências para a linha no dia. */
+export function countOccurrenceAbsences(list: StaffOccurrence[], lineId: string, dayStr: string): number {
+  let n = 0;
+  for (const o of list || []) {
+    if (o.date !== dayStr || !ABSENCE_OCCURRENCE_TYPES.includes(o.type)) continue;
+    if (getOccurrenceLineForDay(o) !== lineId) continue;
+    n += o.quantity || 1;
+  }
+  return n;
+}
+
+/**
+ * ABSENTEÍSMO DA FÁBRICA (todos os setores): dias-pessoa perdidos (falta +
+ * atestado) ÷ dias-pessoa esperados (quadro ativo × dias trabalhados − férias).
+ */
+export function computeFactoryAbsenteeism(
+  occurrences: StaffOccurrence[],
+  headcount: number,
+  workDays: string[]
+): { absences: number; faltas: number; atestados: number; vacations: number; expected: number; pct: number | null } {
+  const days = new Set(workDays);
+  let faltas = 0;
+  let atestados = 0;
+  let vacations = 0;
+  for (const o of occurrences || []) {
+    if (!days.has(o.date)) continue;
+    const q = o.quantity || 1;
+    if (o.type === 'falta') faltas += q;
+    else if (o.type === 'atestado') atestados += q;
+    else if (o.type === 'ferias') vacations += q;
+  }
+  const expected = Math.max(0, headcount * days.size - vacations);
+  const absences = faltas + atestados;
+  return { absences, faltas, atestados, vacations, expected, pct: expected > 0 ? Math.round((absences / expected) * 1000) / 10 : null };
+}
+
+/** Faltas da linha no dia: ocorrências (a partir da data de corte) ou o número digitado com a equipe. */
+export function getLineDayAbsences(team: LineHeadcount | null, occurrences: StaffOccurrence[], lineId: string, dayStr: string): number {
+  if (dayStr >= ABSENCES_FROM_OCCURRENCES_SINCE) return countOccurrenceAbsences(occurrences, lineId, dayStr);
+  return team?.absent || 0;
+}
+
+/**
  * Horas-pessoa trabalhadas numa linha: cada trecho de trabalho vale o número
  * de colaboradores presentes naquele horário (o primeiro registro do dia vale
  * desde o início do dia; cada correção vale a partir do horário em que foi

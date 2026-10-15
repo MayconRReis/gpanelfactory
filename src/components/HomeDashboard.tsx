@@ -10,9 +10,9 @@ import {
   Filter,
   Boxes,
 } from 'lucide-react';
-import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover } from '../types';
+import { ProductionLine, ProductionOrder, UserProfile, ProductionEvent, MonthlyGoal, LineDailyGoal, FactoryMonthlyGoal, WorkSession, LineHeadcount, LineChangeover, StaffOccurrence } from '../types';
 import { buildProductionLedger, sumLedgerByDay, sumLedgerByHour } from '../services/productionLedger';
-import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover } from '../services/db';
+import { calculateOEE, toLocalDateStr, getOpReferenceDateStr, buildPartialProductionRecords, buildSleeveHandoffRecords, isSleeveLineId, getPartialOpsInStock, getWorkSessions, getOpenWorkSession, isPartialFinishEvent, getLineHeadcounts, getHeadcountForLineDay, computePersonHours, computeProductionByLineAndDay, getChangeovers, getOpenChangeover, getStaffOccurrences, getLineDayAbsences, ABSENCES_FROM_OCCURRENCES_SINCE, getColaboradores, computeFactoryAbsenteeism } from '../services/db';
 import { calculateProductionTime, calculateProductionRatePerHour, formatMsToHoursMinutes, getAutoShiftNow } from '../lib/productionTime';
 import { PerformanceOpsModal } from './PerformanceOpsModal';
 import { OpDetailsModal } from './OpDetailsModal';
@@ -646,6 +646,39 @@ export function HomeDashboard({
   // Produtividade = unidades produzidas ÷ horas-pessoa trabalhadas: cada trecho
   // de trabalho da linha vale o nº de colaboradores presentes naquele horário.
   // Só entram dias/trechos com equipe informada — nada é estimado.
+  // Ocorrências do período (todos os setores): faltas das linhas (desde
+  // ABSENCES_FROM_OCCURRENCES_SINCE) e o absenteísmo da fábrica.
+  const occFrom = [periodDateRange.rangeStart, ABSENCES_FROM_OCCURRENCES_SINCE].filter(Boolean).sort()[0] as string;
+  const occTo = periodDateRange.rangeEnd && periodDateRange.rangeEnd > todayDateStr ? periodDateRange.rangeEnd : todayDateStr;
+  const [absenceOccurrences, setAbsenceOccurrences] = useState<StaffOccurrence[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getStaffOccurrences(occFrom, occTo).then(res => { if (!cancelled) setAbsenceOccurrences(res.list); }).catch(() => {});
+    load();
+    const timer = window.setInterval(load, 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [occFrom, occTo]);
+  const [factoryHeadcount, setFactoryHeadcount] = useState(0);
+  useEffect(() => { getColaboradores().then(list => setFactoryHeadcount(list.length)).catch(() => {}); }, []);
+
+  // Absenteísmo da FÁBRICA no período: dias úteis (seg–sex) em que a fábrica
+  // trabalhou × quadro ativo, menos férias; faltas + atestados de todos os setores.
+  const factoryAbsenteeism = useMemo(() => {
+    const activeDays = new Set<string>();
+    for (const e of events) if (e?.createdAt) activeDays.add(toLocalDateStr(e.createdAt));
+    const workDays: string[] = [];
+    const from = periodDateRange.rangeStart || occFrom;
+    const to = periodDateRange.rangeEnd && periodDateRange.rangeEnd < todayDateStr ? periodDateRange.rangeEnd : todayDateStr;
+    const [fy, fm, fd] = from.split('-').map(Number);
+    for (const d = new Date(fy, fm - 1, fd); ; d.setDate(d.getDate() + 1)) {
+      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (ds > to) break;
+      const dow = d.getDay();
+      if (dow >= 1 && dow <= 5 && activeDays.has(ds)) workDays.push(ds);
+    }
+    return { ...computeFactoryAbsenteeism(absenceOccurrences, factoryHeadcount, workDays), workDays: workDays.length };
+  }, [events, absenceOccurrences, factoryHeadcount, periodDateRange, todayDateStr, occFrom]);
+
   const teamMetrics = useMemo(() => {
     const inPeriod = (day: string) =>
       dashboardPeriod === 'geral' ||
@@ -667,7 +700,7 @@ export function HomeDashboard({
     let absent = 0;
     for (const h of lastByLineDay.values()) {
       present += h.present;
-      absent += h.absent;
+      absent += getLineDayAbsences(h, absenceOccurrences, h.lineId, toLocalDateStr(h.recordedAt));
     }
     const absenteeismPct = present + absent > 0 ? Math.round((absent / (present + absent)) * 1000) / 10 : null;
 
@@ -698,7 +731,7 @@ export function HomeDashboard({
     const unitsPerPersonHour = personHours > 0 ? Math.round(producedWithTeam / personHours) : null;
 
     return { present, absent, absenteeismPct, unitsPerPersonHour, personHours, lineDays: lastByLineDay.size };
-  }, [headcounts, envaseLines, dashboardPeriod, periodDateRange, events, ops, periodProductionTime]);
+  }, [headcounts, envaseLines, dashboardPeriod, periodDateRange, events, ops, periodProductionTime, absenceOccurrences]);
 
   // Duração de um turno de trabalho (8h) — multiplicada pelos dias do
   // período para virar a base do Índice de Ociosidade (% das horas perdidas)
@@ -1202,6 +1235,7 @@ export function HomeDashboard({
       ? `Expediente encerrado às ${hhmm(lastSessionToday.endedAt)}`
       : 'Expediente não iniciado';
     const teamToday = /reator/i.test(line.id) ? null : getHeadcountForLineDay(headcounts, line.id, todayDateStr);
+    const teamTodayAbsent = getLineDayAbsences(teamToday, absenceOccurrences, line.id, todayDateStr);
     const openLineChangeover = getOpenChangeover(changeovers, line.id);
     const changeoverTodayMs = todayProductionTime.byLine[line.id]?.changeoverMs || 0;
     const sessionLabelClass = openSession
@@ -1250,7 +1284,7 @@ export function HomeDashboard({
             {!/reator/i.test(line.id) && (
               <p className="text-[10px] font-semibold mt-0.5 truncate text-[#a1a1aa]">
                 {teamToday
-                  ? <>Equipe: <span className="text-white">{teamToday.present}</span>{teamToday.absent > 0 && <span className="text-amber-300"> · {teamToday.absent} falta(s)</span>}</>
+                  ? <>Equipe: <span className="text-white">{teamToday.present}</span>{teamTodayAbsent > 0 && <span className="text-amber-300"> · {teamTodayAbsent} falta(s)</span>}</>
                   : <span className="text-[#52525b]">Equipe não informada</span>}
               </p>
             )}
@@ -1901,28 +1935,27 @@ export function HomeDashboard({
         {/* ── EQUIPE DO ENVASE: absenteísmo e produtividade por pessoa, no período do filtro ── */}
         <div className="bg-[#121217] border border-[#22222b] rounded-2xl p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">Equipe do Envase</h3>
+            <h3 className="text-xs sm:text-sm font-black text-white uppercase tracking-wider">Equipe</h3>
             <span className="bg-[#1a1a22] text-[#d4d4d8] border border-[#2c2c3c] px-1.5 py-0.5 rounded text-[9px] font-bold font-mono">
               {PERIOD_LABELS[dashboardPeriod]}{dashboardPeriod === 'mes' ? ` · ${MONTH_LABELS_SHORT[selectedMonth]}` : ''}
             </span>
           </div>
-          {teamMetrics.lineDays === 0 ? (
-            <p className="text-[11px] text-[#71717a] py-2">Nenhuma equipe informada no período.</p>
-          ) : (
+          {(
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Absenteísmo</div>
+              <div title="Faltas + atestados de todos os setores ÷ (quadro ativo × dias trabalhados − férias)">
+                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Absenteísmo · fábrica</div>
                 <div className={`text-2xl sm:text-3xl font-black font-mono tracking-tight mt-0.5 ${
-                  (teamMetrics.absenteeismPct ?? 0) === 0 ? 'text-emerald-400' : (teamMetrics.absenteeismPct ?? 0) <= 5 ? 'text-amber-400' : 'text-rose-400'
+                  (factoryAbsenteeism.pct ?? 0) === 0 ? 'text-emerald-400' : (factoryAbsenteeism.pct ?? 0) <= 5 ? 'text-amber-400' : 'text-rose-400'
                 }`}>
-                  {teamMetrics.absenteeismPct !== null ? `${teamMetrics.absenteeismPct.toLocaleString('pt-BR')}%` : '—'}
+                  {factoryAbsenteeism.pct !== null ? `${factoryAbsenteeism.pct.toLocaleString('pt-BR')}%` : '—'}
                 </div>
                 <div className="text-[11px] text-[#a1a1aa] font-mono">
-                  {teamMetrics.absent} falta(s) de {teamMetrics.present + teamMetrics.absent}
+                  {factoryAbsenteeism.faltas} falta(s) · {factoryAbsenteeism.atestados} atestado(s)
+                  {factoryAbsenteeism.workDays > 0 && <span className="block text-[10px] text-[#71717a]">{factoryAbsenteeism.workDays} dia(s) · quadro {factoryHeadcount}</span>}
                 </div>
               </div>
               <div>
-                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Produtividade</div>
+                <div className="text-[10px] font-black uppercase tracking-wider text-[#71717a]">Produtividade · Envase</div>
                 <div className="text-2xl sm:text-3xl font-black font-mono tracking-tight mt-0.5 text-blue-300">
                   {teamMetrics.unitsPerPersonHour !== null ? teamMetrics.unitsPerPersonHour.toLocaleString('pt-BR') : '—'}
                 </div>
