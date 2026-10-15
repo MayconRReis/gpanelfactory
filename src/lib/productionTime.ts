@@ -1030,6 +1030,10 @@ export function calculateProductionTime(
         const startMs = new Date(ws.startedAt).getTime();
         if (isNaN(startMs)) continue;
         let endMs = ws.endedAt ? new Date(ws.endedAt).getTime() : NaN;
+        // Encerrado só num dia SEGUINTE (a OP ficou "em produção" de noite e
+        // alguém encerrou de manhã): a madrugada não é expediente. Vale como
+        // não encerrado naquele dia — até o fim da jornada ou a última OP.
+        if (!isNaN(endMs) && !isReactorLineId(lId) && dayKey(endMs) !== dayKey(startMs)) endMs = NaN;
         if (isNaN(endMs)) {
           const sameDayWork = workingUnion.filter(r => dayKey(r[0]) === dayKey(startMs) && r[1] > startMs);
           const lastWorkEnd = sameDayWork.length > 0 ? Math.max(...sameDayWork.map(r => r[1])) : startMs;
